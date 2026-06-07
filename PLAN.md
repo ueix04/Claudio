@@ -118,18 +118,29 @@ Claudio 目前更像“AI 推荐歌曲 + 普通播放器”，还不够像一个
 
 - [x] 主源：当前保留 `netease_legacy` 适配器作为主源；NeteaseCloudMusicApiEnhanced 先作为替换候选，不在本轮强行引入。
 - [x] 备用源：接入 UnblockNeteaseMusic/server，仅作为失败 fallback，不作为唯一主源。
-- [ ] 长期稳定源：本地音乐库，用网易云做口味画像，本地文件做可靠播放。
+- [x] 长期稳定源：本地音乐库基础接入，用网易云做口味画像时可优先匹配本地文件做可靠播放。
+
+本地音乐库实现记录：
+
+- [x] 新增 `local_library` 音源适配器，支持递归扫描本地音频目录、搜索、获取详情、解析播放链接和健康检查。
+- [x] 本地曲目使用稳定 `sourceTrackId`，队列只保存本地曲目身份和 `/api/audio/local/:sourceTrackId` 播放入口，不保存真实磁盘路径。
+- [x] 配置 `LOCAL_MUSIC_DIRS` 后，默认解析顺序变为本地音乐库优先，未命中再走 `netease_legacy`。
+- [x] 网易云口味候选曲命中时，会先用标题和歌手尝试匹配本地文件，匹配失败再回到网易云 ID 解析。
+- [x] 前端识别项目内 `/api/audio/...` 播放地址，避免把本地音频接口错误包进远程音频代理。
 
 风险记录：
 
 - [x] UnblockNeteaseMusic/server 只作为可禁用 fallback；可通过 `UNBLOCK_NETEASE_ENABLED=false` 关闭，通过 `UNBLOCK_NETEASE_SOURCES` 调整匹配源。
 - [x] 默认备用匹配源使用 `kugou,bodian,migu`，不默认依赖 `ytdlp` 外部二进制。
+- [x] 本地音乐库当前先按文件名解析 `Artist - Title`，暂不读取音频元数据；真实曲库整理质量会影响搜索命中率。
+- [x] 本地音乐库暂不提供前端导入界面；通过 `.env` 的 `LOCAL_MUSIC_DIRS` 配置目录。
 
 验收：
 
 - [x] 队列不再依赖旧的网易云临时 URL。
 - [x] 旧 URL 过期不会导致整条播放链路卡死。
 - [x] 音源失败时可以刷新、重试或自动跳过。
+- [x] 配置本地音乐目录后，可以优先返回本地文件播放地址，并通过后端安全路由播放。
 
 ## 阶段四：改善播放连续性（已完成：2026-06-08）
 
@@ -226,6 +237,7 @@ Claudio 目前更像“AI 推荐歌曲 + 普通播放器”，还不够像一个
 - 是否接受引入 NeteaseCloudMusicApiEnhanced 作为当前网易云 API 的替代。
 - 已接受 UnblockNeteaseMusic/server 只作为备用音源，而不是主播放源。
 - 是否优先做本地音乐库导入，以获得长期稳定播放体验。
+- 是否需要为本地音乐库补前端导入 / 重扫 / 命中率检查界面。
 - 是否需要保留网易云登录歌单同步作为口味画像入口。
 - 是否需要为电台准备固定 bumper / station ID 音频素材。
 - 是否希望 Claudio 默认中文主持，只有 Dean 音色时自动切英文。

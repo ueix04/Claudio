@@ -1,4 +1,9 @@
 import type { Track } from "../db.js";
+import {
+  LOCAL_LIBRARY_SOURCE_ID,
+  isLocalLibraryEnabled,
+  localLibraryAdapter,
+} from "./local-library.js";
 import { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter, toPlayableTrack } from "./netease-legacy.js";
 import {
   UNBLOCK_NETEASE_SOURCE_ID,
@@ -16,6 +21,14 @@ import {
 } from "./types.js";
 
 export * from "./types.js";
+export {
+  LOCAL_LIBRARY_SOURCE_ID,
+  clearLocalLibraryCacheForTests,
+  getLocalLibraryFileForPlayback,
+  getLocalMusicDirectories,
+  isLocalLibraryEnabled,
+  localLibraryAdapter,
+} from "./local-library.js";
 export { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter };
 export {
   UNBLOCK_NETEASE_SOURCE_ID,
@@ -27,6 +40,7 @@ export {
 } from "./unblock-netease.js";
 
 const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
+  [localLibraryAdapter.id, localLibraryAdapter],
   [neteaseLegacyAdapter.id, neteaseLegacyAdapter],
   [unblockNeteaseAdapter.id, unblockNeteaseAdapter],
 ]);
@@ -124,17 +138,37 @@ async function resolvePlayableUrlWithFallback(
 export async function resolveTrack(
   title: string,
   artist?: string,
-  source: MusicSourceId = NETEASE_LEGACY_SOURCE_ID,
+  source?: MusicSourceId,
 ): Promise<PlayableTrack | null> {
-  const adapter = getMusicSourceAdapter(source);
   const query = artist ? `${title} ${artist}` : title;
-  const tracks = await adapter.search({ keyword: query, limit: 5 });
-  const track = tracks[0];
-  if (!track) {
-    return null;
+  const searchSources = source
+    ? [source]
+    : [
+      ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
+      NETEASE_LEGACY_SOURCE_ID,
+    ];
+  let lastError: MusicSourceError | null = null;
+
+  for (const searchSource of searchSources) {
+    try {
+      const adapter = getMusicSourceAdapter(searchSource);
+      const tracks = await adapter.search({ keyword: query, limit: 5 });
+      const track = tracks[0];
+      if (!track) {
+        continue;
+      }
+
+      return await resolveKnownTrack(track);
+    } catch (error) {
+      lastError = normalizeMusicSourceError(searchSource, error);
+      if (source) {
+        throw lastError;
+      }
+      console.warn(`[music-source] search source ${searchSource} failed for ${query}: ${lastError.message}`);
+    }
   }
 
-  return resolveKnownTrack(track);
+  return null;
 }
 
 export async function refreshStoredTrackPlayableUrl(

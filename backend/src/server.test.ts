@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "node:fs/promises";
 import http from "node:http";
 import { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
 
 vi.mock("./db.js");
 vi.mock("./pipeline.js");
@@ -11,6 +14,18 @@ vi.mock("./taste-profile.js");
 vi.mock("./weather.js");
 
 const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
+const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
+const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
+let tempDirs: string[] = [];
+
+async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "claudio-server-local-music-"));
+  tempDirs.push(dir);
+  const filePath = path.join(dir, filename);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, contents);
+  return filePath;
+}
 
 describe("API Server", () => {
   let server: http.Server;
@@ -19,6 +34,10 @@ describe("API Server", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
+    delete process.env.LOCAL_MUSIC_ENABLED;
+    delete process.env.LOCAL_MUSIC_DIRS;
+    const musicSources = await import("./music-sources/index.js");
+    musicSources.clearLocalLibraryCacheForTests();
     const { startServer } = await import("./server.js");
     server = startServer(0);
     await new Promise<void>((resolve) => server.on("listening", resolve));
@@ -32,6 +51,20 @@ describe("API Server", () => {
     } else {
       process.env.UNBLOCK_NETEASE_ENABLED = originalUnblockEnabled;
     }
+    if (originalLocalEnabled === undefined) {
+      delete process.env.LOCAL_MUSIC_ENABLED;
+    } else {
+      process.env.LOCAL_MUSIC_ENABLED = originalLocalEnabled;
+    }
+    if (originalLocalDirs === undefined) {
+      delete process.env.LOCAL_MUSIC_DIRS;
+    } else {
+      process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
+    }
+    const musicSources = await import("./music-sources/index.js");
+    musicSources.clearLocalLibraryCacheForTests();
+    await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+    tempDirs = [];
   });
 
   it("GET /api/health 返回 200", async () => {
@@ -102,6 +135,29 @@ describe("API Server", () => {
       body: JSON.stringify({ mode: "invalid" }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("GET /api/audio/local/:sourceTrackId 返回本地音频文件", async () => {
+    const musicSources = await import("./music-sources/index.js");
+    const filePath = await createTempMusicFile("Local API Artist - Local API Song.wav", "local wav body");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    musicSources.clearLocalLibraryCacheForTests();
+
+    const track = await musicSources.resolveTrack(
+      "Local API Song",
+      "Local API Artist",
+      musicSources.LOCAL_LIBRARY_SOURCE_ID,
+    );
+    expect(track?.sourceTrackId).toMatch(/^local_/);
+
+    const res = await fetch(
+      `http://localhost:${port}/api/audio/local/${encodeURIComponent(track!.sourceTrackId)}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("audio/wav");
+    expect(await res.text()).toBe("local wav body");
   });
 
   it("POST /api/netease/sync 同步并保存网易云歌单快照", async () => {

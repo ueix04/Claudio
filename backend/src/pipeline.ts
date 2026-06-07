@@ -191,6 +191,21 @@ async function resolvePlayableTracksFromRequests(
     attempts.map(async (trackInfo) => {
       if (typeof trackInfo.id === "number" && localCandidateMap.has(trackInfo.id)) {
         const candidate = localCandidateMap.get(trackInfo.id)!;
+        if (musicSources.isLocalLibraryEnabled()) {
+          try {
+            const localTrack = await musicSources.resolveTrack(
+              candidate.title,
+              candidate.artist,
+              musicSources.LOCAL_LIBRARY_SOURCE_ID,
+            );
+            if (localTrack) {
+              return localTrack;
+            }
+          } catch {
+            // fall through to Netease identity resolution
+          }
+        }
+
         try {
           return await musicSources.resolveKnownTrack({
             source: musicSources.NETEASE_LEGACY_SOURCE_ID,

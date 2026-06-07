@@ -1,8 +1,14 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as netease from "./netease.js";
 import {
+  LOCAL_LIBRARY_SOURCE_ID,
   NETEASE_LEGACY_SOURCE_ID,
   UNBLOCK_NETEASE_SOURCE_ID,
+  clearLocalLibraryCacheForTests,
+  getLocalLibraryFileForPlayback,
   inferStoredTrackSource,
   listMusicSourceAdapters,
   refreshStoredTrackPlayableUrl,
@@ -16,15 +22,30 @@ vi.mock("./netease.js");
 describe("music source adapters", () => {
   const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
   const originalUnblockSources = process.env.UNBLOCK_NETEASE_SOURCES;
+  const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
+  const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
+  let tempDirs: string[] = [];
+
+  async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "claudio-local-music-"));
+    tempDirs.push(dir);
+    const filePath = path.join(dir, filename);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, contents);
+    return filePath;
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
     delete process.env.UNBLOCK_NETEASE_SOURCES;
+    delete process.env.LOCAL_MUSIC_ENABLED;
+    delete process.env.LOCAL_MUSIC_DIRS;
     setUnblockNeteaseMatcherForTests(null);
+    clearLocalLibraryCacheForTests();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalUnblockEnabled === undefined) {
       delete process.env.UNBLOCK_NETEASE_ENABLED;
     } else {
@@ -35,11 +56,25 @@ describe("music source adapters", () => {
     } else {
       process.env.UNBLOCK_NETEASE_SOURCES = originalUnblockSources;
     }
+    if (originalLocalEnabled === undefined) {
+      delete process.env.LOCAL_MUSIC_ENABLED;
+    } else {
+      process.env.LOCAL_MUSIC_ENABLED = originalLocalEnabled;
+    }
+    if (originalLocalDirs === undefined) {
+      delete process.env.LOCAL_MUSIC_DIRS;
+    } else {
+      process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
+    }
     setUnblockNeteaseMatcherForTests(null);
+    clearLocalLibraryCacheForTests();
+    await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+    tempDirs = [];
   });
 
   it("lists the registered source adapters", () => {
     const ids = listMusicSourceAdapters().map((adapter) => adapter.id);
+    expect(ids).toContain(LOCAL_LIBRARY_SOURCE_ID);
     expect(ids).toContain(NETEASE_LEGACY_SOURCE_ID);
     expect(ids).toContain(UNBLOCK_NETEASE_SOURCE_ID);
   });
@@ -129,6 +164,56 @@ describe("music source adapters", () => {
       url: "found-url",
       sourceTrackId: "456",
     });
+  });
+
+  it("prefers configured local music files before remote search", async () => {
+    const filePath = await createTempMusicFile("Local Artist - Local Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    clearLocalLibraryCacheForTests();
+
+    const track = await resolveTrack("Local Song", "Local Artist");
+
+    expect(netease.searchSongs).not.toHaveBeenCalled();
+    expect(track).toMatchObject({
+      name: "Local Song",
+      artist: "Local Artist",
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      urlSource: LOCAL_LIBRARY_SOURCE_ID,
+    });
+    expect(track?.sourceTrackId).toMatch(/^local_/);
+    expect(track?.url).toBe(`/api/audio/local/${encodeURIComponent(track!.sourceTrackId)}`);
+
+    const playbackFile = await getLocalLibraryFileForPlayback(track!.sourceTrackId);
+    expect(playbackFile.filePath).toBe(filePath);
+    expect(playbackFile.contentType).toBe("audio/mpeg");
+  });
+
+  it("refreshes stored local library tracks without remote fallback", async () => {
+    const filePath = await createTempMusicFile("Album/Stable Artist - Stable Song.wav");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(path.dirname(filePath));
+    clearLocalLibraryCacheForTests();
+
+    const track = await resolveTrack("Stable Song", "Stable Artist");
+    const refreshed = await refreshStoredTrackPlayableUrl({
+      id: track!.sourceTrackId,
+      name: track!.name,
+      artist: track!.artist,
+      url: "old-local-url",
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: track!.sourceTrackId,
+    });
+
+    expect(netease.getPlayableUrl).not.toHaveBeenCalled();
+    expect(refreshed).toMatchObject({
+      id: track!.sourceTrackId,
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: track!.sourceTrackId,
+      urlSource: LOCAL_LIBRARY_SOURCE_ID,
+      url: `/api/audio/local/${encodeURIComponent(track!.sourceTrackId)}`,
+    });
+    expect(refreshed.urlExpiresAt).toBeGreaterThan(Date.now());
   });
 
   it("refreshes stored tracks and records structured errors without throwing", async () => {

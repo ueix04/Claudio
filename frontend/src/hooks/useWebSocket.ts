@@ -103,7 +103,7 @@ export function useWebSocket() {
     new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const toPlayableUrl = useCallback((url: string) => {
-    if (url.startsWith("/api/audio/music?url=")) return url;
+    if (url.startsWith("/api/audio/")) return url;
     return `/api/audio/music?url=${encodeURIComponent(url)}`;
   }, []);
 

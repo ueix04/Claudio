@@ -237,6 +237,28 @@ app.get("/api/audio/tts/:filename", (req, res) => {
   res.sendFile(resolved);
 });
 
+app.get("/api/audio/local/:sourceTrackId", async (req, res) => {
+  const sourceTrackId = String(req.params.sourceTrackId ?? "").trim();
+  if (!sourceTrackId) {
+    res.status(400).json({ error: "sourceTrackId required" });
+    return;
+  }
+
+  try {
+    const file = await musicSources.getLocalLibraryFileForPlayback(sourceTrackId);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Content-Type", file.contentType);
+    res.sendFile(file.filePath);
+  } catch (error) {
+    const normalized = musicSources.normalizeMusicSourceError(
+      musicSources.LOCAL_LIBRARY_SOURCE_ID,
+      error,
+    );
+    const status = normalized.code === "not_found" ? 404 : 500;
+    res.status(status).json({ error: normalized.message });
+  }
+});
+
 app.get("/api/audio/music", (req, res) => {
   const { url } = req.query;
   if (typeof url === "string" && /^https?:\/\//i.test(url)) {

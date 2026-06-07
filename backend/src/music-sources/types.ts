@@ -1,4 +1,4 @@
-export type MusicSourceId = "netease_legacy" | "unblock_netease";
+export type MusicSourceId = "netease_legacy" | "unblock_netease" | "local_library";
 
 export type MusicSourceErrorCode =
   | "url_expired"
