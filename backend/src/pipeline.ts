@@ -61,6 +61,12 @@ type RequestedTrack = {
   artist?: string;
 };
 
+type TrackIdentity = {
+  title?: string;
+  name?: string;
+  artist?: string;
+};
+
 type ProgramRequestedTrack = RequestedTrack & {
   mood?: string;
   reason?: string;
@@ -165,14 +171,16 @@ async function resolvePlayableTracks(
   mode: "morning_brief" | "mood_pick" | "random_discover",
   playList: RequestedTrack[],
   localCandidateMap: Map<number, tasteProfile.RecommendationCandidate> = new Map(),
+  avoidTracks: TrackIdentity[] = [],
 ): Promise<PlayableTrack[]> {
-  return resolvePlayableTracksFromRequests(playList, FALLBACK_TRACKS[mode], localCandidateMap);
+  return resolvePlayableTracksFromRequests(playList, FALLBACK_TRACKS[mode], localCandidateMap, avoidTracks);
 }
 
 async function resolvePlayableTracksFromRequests(
   playList: RequestedTrack[],
   fallbackTracks: Array<{ title: string; artist: string }>,
   localCandidateMap: Map<number, tasteProfile.RecommendationCandidate> = new Map(),
+  avoidTracks: TrackIdentity[] = [],
 ): Promise<PlayableTrack[]> {
   const attempts = [...playList];
   if (attempts.length === 0) {
@@ -208,14 +216,15 @@ async function resolvePlayableTracksFromRequests(
       return [result.value];
     });
 
-  if (playableTracks.length > 0) {
-    return playableTracks;
+  const preferredTracks = filterProgramTrackRepeats(playableTracks, avoidTracks);
+  if (preferredTracks.length > 0) {
+    return preferredTracks;
   }
 
   for (const fallback of fallbackTracks) {
     try {
       const track = await musicSources.resolveTrack(fallback.title, fallback.artist);
-      if (track) {
+      if (track && filterProgramTrackRepeats([track], avoidTracks).length > 0) {
         return [track];
       }
     } catch (error) {
@@ -223,7 +232,63 @@ async function resolvePlayableTracksFromRequests(
     }
   }
 
-  return [];
+  return playableTracks.slice(0, 1);
+}
+
+function normalizeTrackKey(title: string | undefined, artist: string | undefined): string {
+  const normalizedTitle = (title ?? "").trim().toLowerCase();
+  const normalizedArtist = (artist ?? "").trim().toLowerCase();
+  return `${normalizedTitle}::${normalizedArtist}`;
+}
+
+function buildAvoidTracks(context: MusicContext): TrackIdentity[] {
+  const playHistory = Array.isArray(context.state.playHistory)
+    ? context.state.playHistory
+    : [];
+  const recentHistory = playHistory
+    .slice(0, 25)
+    .map((record) => ({
+      title: record.title,
+      artist: record.artist,
+    }));
+  return [
+    ...(context.state.currentTrack ? [context.state.currentTrack] : []),
+    ...recentHistory,
+  ];
+}
+
+function filterProgramTrackRepeats(
+  tracks: PlayableTrack[],
+  avoidTracks: TrackIdentity[],
+): PlayableTrack[] {
+  const avoided = new Set(
+    avoidTracks
+      .map((track) => normalizeTrackKey(track.title ?? track.name, track.artist))
+      .filter((key) => key !== "::"),
+  );
+  const seen = new Set<string>();
+  const filtered = tracks.filter((track) => {
+    const key = normalizeTrackKey(track.name, track.artist);
+    if (seen.has(key) || avoided.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  if (filtered.length > 0 || tracks.length === 0) {
+    return filtered;
+  }
+
+  const batchSeen = new Set<string>();
+  return tracks.filter((track) => {
+    const key = normalizeTrackKey(track.name, track.artist);
+    if (batchSeen.has(key)) {
+      return false;
+    }
+    batchSeen.add(key);
+    return true;
+  }).slice(0, 1);
 }
 
 export async function ensureDataDirs(): Promise<void> {
@@ -490,7 +555,12 @@ export async function runStartupRadioProgram(
         "program_intro",
         [context.weatherContext, response.reason].filter(Boolean).join("；"),
       ),
-      resolvePlayableTracksFromRequests(response.lineup ?? [], STARTUP_FALLBACK_TRACKS, context.localCandidateMap),
+      resolvePlayableTracksFromRequests(
+        response.lineup ?? [],
+        STARTUP_FALLBACK_TRACKS,
+        context.localCandidateMap,
+        buildAvoidTracks(context),
+      ),
     ]);
 
     await applyProgramQueue("startup", response, playableTracks, context);
@@ -534,7 +604,12 @@ export async function runChatSwitchProgram(
         "music_recommendation",
         [userText, response.reason].filter(Boolean).join("；"),
       ),
-      resolvePlayableTracksFromRequests(response.lineup ?? [], STARTUP_FALLBACK_TRACKS, context.localCandidateMap),
+      resolvePlayableTracksFromRequests(
+        response.lineup ?? [],
+        STARTUP_FALLBACK_TRACKS,
+        context.localCandidateMap,
+        buildAvoidTracks(context),
+      ),
     ]);
 
     const currentTrackPreserved = Boolean(options?.preserveCurrentTrack && context.state.currentTrack);
@@ -604,7 +679,12 @@ export async function runPipeline(
       }
     })();
 
-    const trackTask = resolvePlayableTracks(mode, claudeResponse.play, context.localCandidateMap);
+    const trackTask = resolvePlayableTracks(
+      mode,
+      claudeResponse.play,
+      context.localCandidateMap,
+      buildAvoidTracks(context),
+    );
     const [ttsAudioPath, playableTracks] = await Promise.all([ttsTask, trackTask]);
 
     if (playableTracks.length > 0) {

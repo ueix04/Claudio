@@ -658,7 +658,13 @@ describe("WebSocket Server", () => {
       currentTrack: trackA,
       radioQueue: [trackA, trackB],
       currentQueueIndex: 0,
-      currentProgram: { source: "startup", generatedAt: 1, title: "Night Flow", summary: "smooth transition" },
+      currentProgram: {
+        source: "startup",
+        generatedAt: 1,
+        title: "Night Flow",
+        summary: "smooth transition",
+        speechPlan: [{ beforeTrackIndex: 1, type: "short_say", note: "接到下一首" }],
+      },
       chatHistory: [],
       djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
       lastInteraction: Date.now(),
@@ -818,6 +824,164 @@ describe("WebSocket Server", () => {
     expect(currentState.radioQueue[2].url).toBe("url-3-fresh");
     expect(currentState.radioQueue[3].url).toBe("url-4-fresh");
     expect(currentState.currentProgram.preparedUntilIndex).toBe(3);
+    expect(claude.callJsonLLM).not.toHaveBeenCalled();
+
+    ws.close();
+  });
+
+  it("节目没有 speechPlan 发言点时，切歌不生成 DJ 串场", async () => {
+    const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    const tts = await import("./tts.js");
+    const netease = await import("./netease.js");
+
+    const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100, picUrl: "pic-a" };
+    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100, picUrl: "pic-b" };
+    let currentState = {
+      status: "playing",
+      currentTrack: trackA,
+      radioQueue: [trackA, trackB],
+      currentQueueIndex: 0,
+      currentProgram: {
+        source: "startup",
+        generatedAt: 1,
+        title: "Night Flow",
+        speechPlan: [{ beforeTrackIndex: 0, type: "intro", note: "开场已说过" }],
+      },
+      chatHistory: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      lastInteraction: Date.now(),
+      playlists: [],
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+      };
+      return currentState;
+    });
+    vi.mocked(db.advanceRadioQueue).mockImplementation(async () => {
+      currentState = {
+        ...currentState,
+        currentQueueIndex: 1,
+        currentTrack: trackB,
+      };
+      return currentState;
+    });
+    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "queue_next" }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for track without segue")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "track" && m.data?.name === "Song B")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(claude.callJsonLLM).not.toHaveBeenCalled();
+    expect(tts.speak).not.toHaveBeenCalled();
+    expect(messages.some((m) => m.type === "dj_message")).toBe(false);
+
+    ws.close();
+  });
+
+  it("bumper 发言点使用 station ID，不额外调用 LLM", async () => {
+    const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    const tts = await import("./tts.js");
+    const netease = await import("./netease.js");
+
+    const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100, picUrl: "pic-a" };
+    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100, picUrl: "pic-b" };
+    let currentState = {
+      status: "playing",
+      currentTrack: trackA,
+      radioQueue: [trackA, trackB],
+      currentQueueIndex: 0,
+      currentProgram: {
+        source: "startup",
+        generatedAt: 1,
+        title: "Night Flow",
+        mood: "夜间",
+        speechPlan: [{ beforeTrackIndex: 1, type: "bumper", note: "轻量 station ID" }],
+      },
+      chatHistory: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      lastInteraction: Date.now(),
+      playlists: [],
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+      };
+      return currentState;
+    });
+    vi.mocked(db.advanceRadioQueue).mockImplementation(async () => {
+      currentState = {
+        ...currentState,
+        currentQueueIndex: 1,
+        currentTrack: trackB,
+      };
+      return currentState;
+    });
+    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/bumper.wav",
+    });
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "queue_next" }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for bumper")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("Claudio FM"))) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(claude.callJsonLLM).not.toHaveBeenCalled();
+    expect(tts.speak).toHaveBeenCalledWith(
+      expect.stringContaining("Claudio FM"),
+      expect.objectContaining({ scene: "segue" }),
+    );
 
     ws.close();
   });

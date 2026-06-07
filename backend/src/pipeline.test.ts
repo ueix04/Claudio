@@ -229,6 +229,62 @@ describe("Pipeline Engine", () => {
     );
   });
 
+  it("should avoid recently played tracks when building a program queue", async () => {
+    const mockClaudeResponse: claude.LLMResponse = {
+      say: "换一组不重复的歌。",
+      play: [
+        { title: "Recent Song", artist: "Artist A" },
+        { title: "Fresh Song", artist: "Artist B" },
+      ],
+      reason: "test",
+    };
+
+    vi.mocked(db.getState).mockResolvedValue({
+      ...baseState,
+      playHistory: [{ title: "Recent Song", artist: "Artist A", playedAt: Date.now() }],
+    } as any);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: true,
+      cachePath: "data/audio/no-repeat.wav",
+    });
+
+    vi.mocked(netease.searchSongs)
+      .mockResolvedValueOnce(mockNeteaseSearchTrack({
+        id: 111,
+        name: "Recent Song",
+        artist: "Artist A",
+      }))
+      .mockResolvedValueOnce(mockNeteaseSearchTrack({
+        id: 222,
+        name: "Fresh Song",
+        artist: "Artist B",
+      }));
+    vi.mocked(netease.getPlayableUrl)
+      .mockResolvedValueOnce("recent-url")
+      .mockResolvedValueOnce("fresh-url");
+
+    const result = await pipeline.runPipeline("mood_pick");
+
+    expect(result.tracks).toHaveLength(1);
+    expect(result.tracks[0]).toMatchObject({
+      id: 222,
+      name: "Fresh Song",
+      artist: "Artist B",
+    });
+    expect(db.setRadioQueue).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "222", name: "Fresh Song" })],
+      expect.objectContaining({ currentIndex: 0 }),
+    );
+  });
+
   it("should prefer local candidate id resolution when provided", async () => {
     const mockClaudeResponse: claude.LLMResponse = {
       say: "从你的本地曲库里挑了一首。",

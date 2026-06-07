@@ -11,6 +11,7 @@ import * as claude from "./claude.js";
 import * as djLanguage from "./dj-language.js";
 import * as musicSources from "./music-sources/index.js";
 import * as netease from "./netease.js";
+import * as radioSession from "./radio-session.js";
 import * as radioStyle from "./radio-style.js";
 import * as tasteProfile from "./taste-profile.js";
 import * as tts from "./tts.js";
@@ -37,7 +38,7 @@ interface PreparedQueueTransition {
   nextTrackId: string;
   nextQueueIndex: number;
   nextTrack: db.Track;
-  text: string;
+  text?: string;
   ttsAudioPath?: string;
   preparedAt: number;
 }
@@ -573,6 +574,36 @@ function buildPreparedQueueTransitionKey(state: db.AppState, step = 1): string |
   ].join(":");
 }
 
+function resolveSpeechSlotForTransition(
+  state: db.AppState,
+  nextIndex: number,
+  step = 1,
+): db.RadioSpeechSlot | null {
+  if (step !== 1) {
+    return null;
+  }
+
+  const program = state.currentProgram;
+  if (!program) {
+    return {
+      beforeTrackIndex: nextIndex,
+      type: "short_say",
+      note: "临时队列切歌，保持一句自然接歌",
+    };
+  }
+
+  const queueLength = Array.isArray(state.radioQueue) ? state.radioQueue.length : 0;
+  const speechPlan = program.speechPlan?.length
+    ? program.speechPlan
+    : radioSession.buildDefaultSpeechPlan(queueLength);
+  const slot = speechPlan.find((item) => item.beforeTrackIndex === nextIndex);
+  if (!slot || slot.type === "intro") {
+    return null;
+  }
+
+  return slot;
+}
+
 function invalidatePreparedQueueTransition(): void {
   preparedQueueTransitions.clear();
   preparedQueueTransitionInFlight.clear();
@@ -685,7 +716,10 @@ async function primeUpcomingQueueTransition(step = 1): Promise<PreparedQueueTran
       });
     }
 
-    const transition = await buildTransitionReply(context.currentTrack, nextTrack);
+    const speechSlot = resolveSpeechSlotForTransition(state, context.nextIndex, step);
+    const transition: { text?: string; ttsAudioPath?: string } = speechSlot
+      ? await buildTransitionReply(context.currentTrack, nextTrack, speechSlot)
+      : {};
     const prepared: PreparedQueueTransition = {
       key,
       step,
@@ -1094,6 +1128,7 @@ async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
 async function buildTransitionReply(
   previousTrack: db.Track | null,
   nextTrack: db.Track,
+  speechSlot: db.RadioSpeechSlot,
 ): Promise<{ text: string; ttsAudioPath?: string }> {
   const state = await db.getState();
   const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
@@ -1112,6 +1147,11 @@ async function buildTransitionReply(
     nextIndex: state.currentQueueIndex,
   });
   const segueDirective = radioStyle.buildSegueDirective(segueKind, language);
+  const speechSlotLabel = speechSlot.type === "bumper"
+    ? (useEnglish ? "station ID / bumper" : "station ID / bumper")
+    : speechSlot.type === "closing"
+      ? (useEnglish ? "closing" : "收束")
+      : (useEnglish ? "short talk" : "短讲");
   const recentDjLines = state.chatHistory
     .filter((message) => message.role === "dj")
     .slice(-3)
@@ -1129,6 +1169,30 @@ async function buildTransitionReply(
       `Up next is ${nextTrack.name}. I'll stay with you through it.`,
     );
 
+  if (speechSlot.type === "bumper") {
+    const bumperText = djLanguage.pickDjCopy(
+      state.djProfile,
+      `Claudio FM，继续把这一段听感放稳。下一首，${nextTrack.name}。`,
+      `Claudio FM. Keeping this set in motion with ${nextTrack.name}.`,
+    );
+
+    try {
+      const ttsResult = await tts.speak(bumperText, {
+        profile: state.djProfile,
+        scene: "segue",
+        atmosphere: [currentProgram?.title, currentProgram?.mood, speechSlot.note].filter(Boolean).join("；"),
+      });
+      return {
+        text: bumperText,
+        ttsAudioPath: ttsResult.cachePath,
+      };
+    } catch {
+      return {
+        text: bumperText,
+      };
+    }
+  }
+
   let replyText = fallbackText;
   let replyTtsText = fallbackText;
 
@@ -1140,6 +1204,8 @@ ${segueDirective}
 ${currentProgram?.title ? `Current show: ${currentProgram.title}` : "Current show: untitled"}
 ${currentProgram?.summary ? `Program note: ${currentProgram.summary}` : ""}
 ${weatherContext ? `Current weather: ${weatherContext}` : ""}
+Speech slot: ${speechSlotLabel}
+Slot note: ${speechSlot.note || "none"}
 Previous track: ${previousTrack ? `${previousTrack.name} - ${previousTrack.artist}` : "unknown"}
 Next track: ${nextTrack.name} - ${nextTrack.artist}
 ${recentDjLines ? `A few recent DJ lines you already said:\n${recentDjLines}` : ""}
@@ -1152,6 +1218,7 @@ Extra constraints:
 - Do not reintroduce yourself
 - Do not say things like "good evening", "welcome back", or "I'm Claudio" as if the show restarted
 - Do not repeat wording that is too close to the last few lines
+- If this is a closing slot, give the section a soft landing without sounding final unless the note asks for it
 - The focus is the handoff from the previous track to the next, not a long lyrical monologue
 `
       : `你是 Claudio，一位 AI 情感电台 DJ。
@@ -1160,6 +1227,8 @@ ${segueDirective}
 ${currentProgram?.title ? `当前节目：${currentProgram.title}` : "当前节目：未命名节目"}
 ${currentProgram?.summary ? `节目思路：${currentProgram.summary}` : ""}
 ${weatherContext ? `当前天气：${weatherContext}` : ""}
+发言位置：${speechSlotLabel}
+发言备注：${speechSlot.note || "无"}
 上一首：${previousTrack ? `${previousTrack.name} - ${previousTrack.artist}` : "未知"}
 下一首：${nextTrack.name} - ${nextTrack.artist}
 ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
@@ -1172,6 +1241,7 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
 - 不要重新自我介绍
 - 不要说“下午好/晚上好/欢迎回来/我是 Claudio”这类重新开场的话
 - 不要重复最近几句已经说过的表述
+- 如果是收束位置，要让这一小段有落点，但不要像整档节目结束，除非备注要求
 - 重点是把上一首自然接到下一首，不要写成长段抒情文
 `;
 
@@ -1211,7 +1281,7 @@ async function advanceQueueWithSegue(step: number) {
   }
 
   let playableState = nextState;
-  let transition: { text: string; ttsAudioPath?: string };
+  let transition: { text?: string; ttsAudioPath?: string } = {};
   const canUsePreparedTransition =
     Boolean(preparedTransition)
     && Boolean(previousTrack)
@@ -1243,7 +1313,10 @@ async function advanceQueueWithSegue(step: number) {
         currentTrack: refreshedTrack,
       }, nextState);
     }
-    transition = await buildTransitionReply(previousTrack, playableState.currentTrack!);
+    const speechSlot = resolveSpeechSlotForTransition(playableState, playableState.currentQueueIndex, step);
+    transition = speechSlot
+      ? await buildTransitionReply(previousTrack, playableState.currentTrack!, speechSlot)
+      : {};
   }
 
   invalidatePreparedQueueTransition();
@@ -1255,25 +1328,29 @@ async function advanceQueueWithSegue(step: number) {
   if (transition.ttsAudioPath) {
     broadcast({ type: "status", data: "speaking" });
   }
-  broadcast({
-    type: "dj_message",
-    data: {
-      text: transition.text,
-      ttsAudioPath: transition.ttsAudioPath,
-      timestamp,
-    },
-  });
+  if (transition.text) {
+    broadcast({
+      type: "dj_message",
+      data: {
+        text: transition.text,
+        ttsAudioPath: transition.ttsAudioPath,
+        timestamp,
+      },
+    });
+  }
   broadcast({
     type: "track",
     data: toClientStoredTrack(playableState.currentTrack!),
   });
   broadcast({ type: "status", data: "playing" });
 
-  await db.addChatMessage({
-    role: "dj",
-    text: transition.text,
-    timestamp,
-  });
+  if (transition.text) {
+    await db.addChatMessage({
+      role: "dj",
+      text: transition.text,
+      timestamp,
+    });
+  }
 
   return playableState;
 }
