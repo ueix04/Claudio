@@ -66,6 +66,7 @@ describe("split panel harmony", () => {
           isSyncingLibrary={false}
           lastSyncSummary={null}
           localLibraryStatus={localLibraryStatus}
+          programAudit={null}
           isRescanningLocalLibrary={false}
           utilityNotice={null}
           visualizerBars={Array.from({ length: 12 }, () => 0.2)}
@@ -115,6 +116,7 @@ describe("split panel harmony", () => {
           isSyncingLibrary={false}
           lastSyncSummary={null}
           localLibraryStatus={localLibraryStatus}
+          programAudit={null}
           isRescanningLocalLibrary={false}
           utilityNotice={null}
           visualizerBars={Array.from({ length: 12 }, () => 0.2)}

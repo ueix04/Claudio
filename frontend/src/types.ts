@@ -214,3 +214,23 @@ export type LocalLibraryStatus = {
   sampleTracks: LocalLibrarySampleTrack[];
   message: string;
 };
+
+export type ProgramAuditStatus = "pass" | "warning" | "fail";
+
+export type ProgramAuditCheck = {
+  id: string;
+  label: string;
+  status: ProgramAuditStatus;
+  detail: string;
+};
+
+export type ProgramExperienceAudit = {
+  ok: boolean;
+  generatedAt: number;
+  trackCount: number;
+  plannedMinutes: number;
+  speechSlotCount: number;
+  djLineCount: number;
+  checks: ProgramAuditCheck[];
+  issues: ProgramAuditCheck[];
+};

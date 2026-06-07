@@ -6,6 +6,7 @@ import type {
   DJMessage,
   LocalLibraryStatus,
   PlayHistoryEntry,
+  ProgramExperienceAudit,
   SyncSummary,
   TasteProfile,
   TtsPreset,
@@ -58,6 +59,7 @@ export function useWebSocket() {
   const [isUpdatingVoicePreset, setIsUpdatingVoicePreset] = useState(false);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
   const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
+  const [programAudit, setProgramAudit] = useState<ProgramExperienceAudit | null>(null);
   const [isRescanningLocalLibrary, setIsRescanningLocalLibrary] = useState(false);
   const [utilityNotice, setUtilityNotice] = useState<string | null>(null);
   const [djProfile, setDjProfile] = useState<DjProfile | null>(null);
@@ -612,12 +614,13 @@ export function useWebSocket() {
 
   const refreshLibraryData = useCallback(async () => {
     try {
-      const [favoritesRes, historyRes, tasteRes, djTasteRes, localLibraryRes] = await Promise.all([
+      const [favoritesRes, historyRes, tasteRes, djTasteRes, localLibraryRes, programAuditRes] = await Promise.all([
         fetch("/api/favorites"),
         fetch("/api/history"),
         fetch("/api/taste-profile"),
         fetch("/api/taste"),
         fetch("/api/music-sources/local-library"),
+        fetch("/api/radio/program-audit"),
       ]);
 
       if (favoritesRes.ok) {
@@ -639,6 +642,10 @@ export function useWebSocket() {
       if (localLibraryRes.ok) {
         const status = await localLibraryRes.json() as LocalLibraryStatus;
         setLocalLibraryStatus(status);
+      }
+      if (programAuditRes.ok) {
+        const audit = await programAuditRes.json() as ProgramExperienceAudit;
+        setProgramAudit(audit);
       }
     } catch {
       // keep best-effort behavior
@@ -771,6 +778,18 @@ export function useWebSocket() {
   useEffect(() => {
     void refreshLibraryData();
   }, [refreshLibraryData]);
+
+  useEffect(() => {
+    if (status !== "playing" && status !== "speaking") {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshLibraryData();
+    }, 30_000);
+
+    return () => window.clearInterval(timer);
+  }, [refreshLibraryData, status]);
 
   useEffect(() => {
     const primary = audioRef.current;
@@ -1325,7 +1344,7 @@ export function useWebSocket() {
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, localLibraryStatus, isRescanningLocalLibrary, utilityNotice,
+    isSyncingLibrary, lastSyncSummary, localLibraryStatus, programAudit, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
     onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,

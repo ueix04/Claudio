@@ -23,6 +23,7 @@ function AppLayout() {
     isSyncingLibrary,
     lastSyncSummary,
     localLibraryStatus,
+    programAudit,
     isRescanningLocalLibrary,
     utilityNotice,
     statusText,
@@ -78,6 +79,7 @@ function AppLayout() {
                   isSyncingLibrary={isSyncingLibrary}
                   lastSyncSummary={lastSyncSummary}
                   localLibraryStatus={localLibraryStatus}
+                  programAudit={programAudit}
                   isRescanningLocalLibrary={isRescanningLocalLibrary}
                   utilityNotice={utilityNotice}
                   visualizerBars={visualizerBars}

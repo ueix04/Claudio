@@ -6,6 +6,7 @@ import {
   LocalLibraryStatus,
   PlayHistoryEntry,
   PlayerState,
+  ProgramExperienceAudit,
   SyncSummary,
   TasteProfile,
   TriggerMode,
@@ -21,6 +22,7 @@ interface PlayerPanelProps {
   isSyncingLibrary: boolean;
   lastSyncSummary: SyncSummary | null;
   localLibraryStatus: LocalLibraryStatus | null;
+  programAudit: ProgramExperienceAudit | null;
   isRescanningLocalLibrary: boolean;
   utilityNotice: string | null;
   visualizerBars: number[];
@@ -85,6 +87,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   isSyncingLibrary,
   lastSyncSummary,
   localLibraryStatus,
+  programAudit,
   isRescanningLocalLibrary,
   utilityNotice,
   visualizerBars,
@@ -744,7 +747,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         <div className="flex items-center justify-between gap-4">
           {renderPanelTabs()}
           <span className="text-[10px] font-bold tracking-[0.2em] uppercase claudio-theme-text-muted">
-            {activeView === "list" ? "QUEUE / RECENT" : activeView === "favorites" ? "FAVORITES" : "TASTE PROFILE"}
+            {activeView === "list" ? "QUEUE / RECENT" : activeView === "favorites" ? "FAVORITES" : "TASTE / AUDIT"}
           </span>
         </div>
         <div className="flex items-center justify-between pt-3">
@@ -852,9 +855,67 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const localStatusLabel = localLibraryStatus?.enabled
       ? localLibraryStatus.trackCount > 0 ? "READY" : "EMPTY"
       : "STANDBY";
+    const programAuditLabel = programAudit
+      ? programAudit.ok ? "READY" : "CHECK"
+      : "STANDBY";
+    const programAuditIssueCount = programAudit?.issues.length ?? 0;
+    const programAuditStatusClass = programAudit?.ok
+      ? "text-[#4ade80]"
+      : programAuditIssueCount > 0 ? "text-[#f87171]" : "claudio-theme-text-muted";
+    const programAuditChecks = programAudit?.issues.length
+      ? programAudit.issues
+      : programAudit?.checks.slice(0, 4) ?? [];
 
     return (
       <div className="flex flex-col gap-6">
+        <section className="panel-card">
+          <div className="panel-card-head">
+            <span>PROGRAM AUDIT</span>
+            <span className={programAuditStatusClass}>{programAuditLabel}</span>
+          </div>
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="stat-card">
+              <span className="stat-label">MINUTES</span>
+              <span className="stat-value">{programAudit?.plannedMinutes ?? 0}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">TRACKS</span>
+              <span className="stat-value">{programAudit?.trackCount ?? 0}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">SPEECH</span>
+              <span className="stat-value">{programAudit?.speechSlotCount ?? 0}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">ISSUES</span>
+              <span className={`stat-value ${programAuditStatusClass}`}>{programAuditIssueCount}</span>
+            </div>
+          </div>
+          <div className="mt-4 flex flex-col gap-3">
+            {!programAudit ? (
+              <div className="panel-empty">No program audit yet</div>
+            ) : programAuditChecks.length === 0 ? (
+              <div className="panel-empty">Audit clear</div>
+            ) : (
+              programAuditChecks.map((check) => (
+                <div key={check.id} className="insight-row items-start">
+                  <div className="flex flex-col min-w-0 gap-1">
+                    <span className="truncate text-sm claudio-theme-text-strong">{check.label}</span>
+                    <span className="text-xs text-[#71717a] leading-relaxed break-words">{check.detail}</span>
+                  </div>
+                  <span className={`text-[10px] uppercase ${
+                    check.status === "pass"
+                      ? "text-[#4ade80]"
+                      : check.status === "warning" ? "text-[#facc15]" : "text-[#f87171]"
+                  }`}>
+                    {check.status}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
         <section className="panel-card">
           <div className="panel-card-head">
             <span>LOCAL LIBRARY</span>
