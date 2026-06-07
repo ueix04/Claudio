@@ -57,6 +57,26 @@ export interface PlayRecord {
   playedAt: number;
 }
 
+export interface ListenCheckRecord {
+  id: string;
+  startedAt: number;
+  completedAt: number;
+  durationMs: number;
+  checks: {
+    program: boolean;
+    dj: boolean;
+    context: boolean;
+  };
+  programAudit?: {
+    ok: boolean;
+    plannedMinutes: number;
+    trackCount: number;
+    speechSlotCount: number;
+    issueCount: number;
+  };
+  recordedAt: number;
+}
+
 export interface RadioSpeechSlot {
   beforeTrackIndex: number;
   type: "intro" | "short_say" | "bumper" | "closing";
@@ -115,6 +135,7 @@ export interface AppState {
   currentProgram: RadioProgram | null;
   chatHistory: ChatMessage[];
   playHistory: PlayRecord[];
+  listenChecks: ListenCheckRecord[];
   djProfile: DjProfile;
   playlists: Playlist[];
   neteaseSnapshot: NeteaseSnapshot | null;
@@ -130,6 +151,7 @@ const defaultState = (): AppState => ({
   currentProgram: null,
   chatHistory: [],
   playHistory: [],
+  listenChecks: [],
   djProfile: {
     voice: "冰糖",
     style: "情感电台",
@@ -176,6 +198,9 @@ function loadInitialState(): AppState {
       chatHistory: Array.isArray(parsed.chatHistory)
         ? parsed.chatHistory
         : defaultState().chatHistory,
+      listenChecks: Array.isArray(parsed.listenChecks)
+        ? parsed.listenChecks
+        : defaultState().listenChecks,
     };
   } catch {
     return defaultState();
@@ -466,4 +491,22 @@ export async function recordPlay(title: string, artist: string): Promise<AppStat
 
 export async function getPlayHistory(limit = 20): Promise<PlayRecord[]> {
   return getMutableState().playHistory.slice(0, limit);
+}
+
+export async function addListenCheckRecord(
+  record: Omit<ListenCheckRecord, "id" | "recordedAt">,
+): Promise<ListenCheckRecord> {
+  const nextRecord: ListenCheckRecord = {
+    ...record,
+    id: `listen_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    recordedAt: Date.now(),
+  };
+  const current = getMutableState();
+  const listenChecks = [nextRecord, ...current.listenChecks].slice(0, 20);
+  await updateState({ listenChecks, lastInteraction: Date.now() });
+  return nextRecord;
+}
+
+export async function getListenCheckRecords(limit = 10): Promise<ListenCheckRecord[]> {
+  return getMutableState().listenChecks.slice(0, limit);
 }

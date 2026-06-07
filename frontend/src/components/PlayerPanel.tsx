@@ -54,6 +54,7 @@ type ListenCheckId = "program" | "dj" | "context";
 type ListenCheckState = {
   startedAt: number | null;
   completedAt: number | null;
+  savedRecordId: string | null;
   checks: Record<ListenCheckId, boolean>;
 };
 
@@ -68,6 +69,7 @@ const LISTEN_CHECK_ITEMS: Array<{ id: ListenCheckId; label: string }> = [
 const createEmptyListenCheck = (): ListenCheckState => ({
   startedAt: null,
   completedAt: null,
+  savedRecordId: null,
   checks: {
     program: false,
     dj: false,
@@ -86,6 +88,7 @@ const loadListenCheckState = (): ListenCheckState => {
     return {
       startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
       completedAt: typeof parsed.completedAt === "number" ? parsed.completedAt : null,
+      savedRecordId: typeof parsed.savedRecordId === "string" ? parsed.savedRecordId : null,
       checks: {
         program: Boolean(parsed.checks?.program),
         dj: Boolean(parsed.checks?.dj),
@@ -171,6 +174,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const listStageScrollRef = useRef<HTMLDivElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  const listenCheckSaveKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -192,6 +196,60 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       };
     });
   }, [now]);
+
+  useEffect(() => {
+    if (!listenCheck.startedAt || !listenCheck.completedAt || listenCheck.savedRecordId) return;
+    const saveKey = `${listenCheck.startedAt}:${listenCheck.completedAt}`;
+    if (listenCheckSaveKeyRef.current === saveKey) return;
+    listenCheckSaveKeyRef.current = saveKey;
+
+    let cancelled = false;
+    const saveListenCheck = async () => {
+      try {
+        const res = await fetch("/api/radio/listen-checks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            startedAt: listenCheck.startedAt,
+            completedAt: listenCheck.completedAt,
+            checks: listenCheck.checks,
+            programAudit: programAudit
+              ? {
+                  ok: programAudit.ok,
+                  plannedMinutes: programAudit.plannedMinutes,
+                  trackCount: programAudit.trackCount,
+                  speechSlotCount: programAudit.speechSlotCount,
+                  issueCount: programAudit.issues.length,
+                }
+              : undefined,
+          }),
+        });
+        if (!res.ok) {
+          if (!cancelled) {
+            listenCheckSaveKeyRef.current = null;
+          }
+          return;
+        }
+        const record = await res.json() as { id?: string };
+        if (cancelled || !record.id) return;
+        setListenCheck((current) => (
+          current.completedAt === listenCheck.completedAt && !current.savedRecordId
+            ? { ...current, savedRecordId: record.id ?? null }
+            : current
+        ));
+      } catch {
+        if (!cancelled) {
+          listenCheckSaveKeyRef.current = null;
+        }
+        // keep the local listen check; it can be retried by restarting or toggling a check.
+      }
+    };
+
+    void saveListenCheck();
+    return () => {
+      cancelled = true;
+    };
+  }, [listenCheck, programAudit]);
 
   useEffect(() => {
     const toEmoji = (description: string) => {
@@ -960,6 +1018,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
           ...current.checks,
           [id]: !current.checks[id],
         },
+        savedRecordId: null,
       }));
     };
 
@@ -1054,6 +1113,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               >
                 RESET
               </button>
+              {listenCheck.savedRecordId && (
+                <span className="sync-pill pointer-events-none">SAVED</span>
+              )}
             </div>
             <div className="mt-4 grid md:grid-cols-3 gap-3">
               {LISTEN_CHECK_ITEMS.map((item) => {

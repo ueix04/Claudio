@@ -199,4 +199,38 @@ describe("db.ts", () => {
     expect(snapshot?.playlists).toHaveLength(1);
     expect(summarizeNeteaseSnapshot()).toContain("深夜歌单");
   });
+
+  it("stores recent listen check records", async () => {
+    const { addListenCheckRecord, getListenCheckRecords, getState } = await loadModule();
+
+    const record = await addListenCheckRecord({
+      startedAt: 1_700_000_000_000,
+      completedAt: 1_700_001_200_000,
+      durationMs: 1_200_000,
+      checks: {
+        program: true,
+        dj: true,
+        context: true,
+      },
+      programAudit: {
+        ok: true,
+        plannedMinutes: 24,
+        trackCount: 6,
+        speechSlotCount: 3,
+        issueCount: 0,
+      },
+    });
+
+    const records = await getListenCheckRecords();
+    const state = await getState();
+
+    expect(record.id).toMatch(/^listen_/);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      durationMs: 1_200_000,
+      checks: { program: true, dj: true, context: true },
+      programAudit: { ok: true, issueCount: 0 },
+    });
+    expect(state.listenChecks[0].id).toBe(record.id);
+  });
 });

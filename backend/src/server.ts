@@ -535,6 +535,52 @@ app.get("/api/radio/program-audit", async (_req, res) => {
   res.json(auditProgramExperience(state));
 });
 
+app.get("/api/radio/listen-checks", async (req, res) => {
+  const parsedLimit = parseQueryNumber(req.query.limit);
+  const limit = parsedLimit && parsedLimit > 0
+    ? Math.min(Math.round(parsedLimit), 20)
+    : 10;
+  res.json(await db.getListenCheckRecords(limit));
+});
+
+app.post("/api/radio/listen-checks", async (req, res) => {
+  const body = req.body as Record<string, any>;
+  const startedAt = Number(body?.startedAt);
+  const completedAt = Number(body?.completedAt);
+  const checks = body?.checks as Record<string, unknown> | undefined;
+  const durationMs = completedAt - startedAt;
+
+  if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || durationMs < 0) {
+    res.status(400).json({ error: "startedAt and completedAt must be valid timestamps" });
+    return;
+  }
+
+  const normalizedChecks = {
+    program: checks?.program === true,
+    dj: checks?.dj === true,
+    context: checks?.context === true,
+  };
+
+  const programAudit = body?.programAudit && typeof body.programAudit === "object"
+    ? {
+        ok: body.programAudit.ok === true,
+        plannedMinutes: Number(body.programAudit.plannedMinutes) || 0,
+        trackCount: Number(body.programAudit.trackCount) || 0,
+        speechSlotCount: Number(body.programAudit.speechSlotCount) || 0,
+        issueCount: Number(body.programAudit.issueCount) || 0,
+      }
+    : undefined;
+
+  const record = await db.addListenCheckRecord({
+    startedAt,
+    completedAt,
+    durationMs,
+    checks: normalizedChecks,
+    programAudit,
+  });
+  res.status(201).json(record);
+});
+
 app.get("/api/taste", async (_req, res) => {
   const state = await db.getState();
   res.json(state.djProfile);

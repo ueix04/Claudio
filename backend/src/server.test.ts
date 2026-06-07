@@ -333,6 +333,7 @@ describe("API Server", () => {
         { role: "dj", text: "下一首把情绪再往里收一点。", timestamp: 2 },
       ],
       playHistory: [],
+      listenChecks: [],
       djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
       playlists: [],
       neteaseSnapshot: null,
@@ -348,6 +349,52 @@ describe("API Server", () => {
     expect(body.trackCount).toBe(5);
     expect(body.plannedMinutes).toBe(20);
     expect(body.checks.map((check: { id: string }) => check.id)).toContain("speech_cadence");
+  });
+
+  it("GET/POST /api/radio/listen-checks 保存并返回长时实听记录", async () => {
+    const db = await import("./db.js");
+    const record = {
+      id: "listen_test",
+      startedAt: 1,
+      completedAt: 1_200_001,
+      durationMs: 1_200_000,
+      checks: { program: true, dj: true, context: true },
+      programAudit: {
+        ok: true,
+        plannedMinutes: 24,
+        trackCount: 6,
+        speechSlotCount: 3,
+        issueCount: 0,
+      },
+      recordedAt: 1_200_002,
+    };
+    vi.mocked(db.addListenCheckRecord).mockResolvedValue(record);
+    vi.mocked(db.getListenCheckRecords).mockResolvedValue([record]);
+
+    const postRes = await fetch(`http://localhost:${port}/api/radio/listen-checks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        startedAt: record.startedAt,
+        completedAt: record.completedAt,
+        checks: record.checks,
+        programAudit: record.programAudit,
+      }),
+    });
+
+    expect(postRes.status).toBe(201);
+    expect(await postRes.json()).toMatchObject({ id: "listen_test" });
+    expect(db.addListenCheckRecord).toHaveBeenCalledWith(expect.objectContaining({
+      durationMs: 1_200_000,
+      checks: { program: true, dj: true, context: true },
+      programAudit: expect.objectContaining({ issueCount: 0 }),
+    }));
+
+    const getRes = await fetch(`http://localhost:${port}/api/radio/listen-checks?limit=5`);
+
+    expect(getRes.status).toBe(200);
+    expect(await getRes.json()).toHaveLength(1);
+    expect(db.getListenCheckRecords).toHaveBeenCalledWith(5);
   });
 });
 
