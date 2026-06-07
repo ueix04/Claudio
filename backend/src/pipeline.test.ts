@@ -1,7 +1,11 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as pipeline from "./pipeline.js";
 import * as db from "./db.js";
 import * as claude from "./claude.js";
+import * as musicSources from "./music-sources/index.js";
 import * as netease from "./netease.js";
 import * as tasteProfile from "./taste-profile.js";
 import * as tts from "./tts.js";
@@ -50,18 +54,46 @@ function mockNeteaseSearchTrack(track: {
 
 describe("Pipeline Engine", () => {
   const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
+  const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
+  const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
+  let tempDirs: string[] = [];
+
+  async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "claudio-pipeline-local-music-"));
+    tempDirs.push(dir);
+    const filePath = path.join(dir, filename);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, contents);
+    return filePath;
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
+    delete process.env.LOCAL_MUSIC_ENABLED;
+    delete process.env.LOCAL_MUSIC_DIRS;
+    musicSources.clearLocalLibraryCacheForTests();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalUnblockEnabled === undefined) {
       delete process.env.UNBLOCK_NETEASE_ENABLED;
     } else {
       process.env.UNBLOCK_NETEASE_ENABLED = originalUnblockEnabled;
     }
+    if (originalLocalEnabled === undefined) {
+      delete process.env.LOCAL_MUSIC_ENABLED;
+    } else {
+      process.env.LOCAL_MUSIC_ENABLED = originalLocalEnabled;
+    }
+    if (originalLocalDirs === undefined) {
+      delete process.env.LOCAL_MUSIC_DIRS;
+    } else {
+      process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
+    }
+    musicSources.clearLocalLibraryCacheForTests();
+    await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+    tempDirs = [];
   });
 
   it("should complete morning_brief pipeline successfully", async () => {
@@ -360,6 +392,47 @@ describe("Pipeline Engine", () => {
       name: "Local Song",
       artist: "Local Artist",
       url: "http://example.com/local.mp3",
+    });
+  });
+
+  it("should include configured local library files in recommendation context", async () => {
+    const filePath = await createTempMusicFile("Library Artist - Library Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    musicSources.clearLocalLibraryCacheForTests();
+
+    const mockClaudeResponse: claude.LLMResponse = {
+      say: "从本地文件库里挑一首。",
+      play: [{ title: "Library Song", artist: "Library Artist" }],
+      reason: "test",
+    };
+
+    vi.mocked(db.getState).mockResolvedValue(baseState);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(claude.buildContextPrompt).mockReturnValue("prompt with local library");
+    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/local-library.wav",
+    });
+
+    const result = await pipeline.runPipeline("random_discover");
+
+    expect(claude.buildContextPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      candidateContext: expect.stringContaining("Library Song - Library Artist"),
+    }));
+    expect(netease.searchSongs).not.toHaveBeenCalled();
+    expect(result.tracks[0]).toMatchObject({
+      name: "Library Song",
+      artist: "Library Artist",
+      source: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+      urlSource: musicSources.LOCAL_LIBRARY_SOURCE_ID,
     });
   });
 

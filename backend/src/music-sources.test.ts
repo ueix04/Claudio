@@ -9,12 +9,14 @@ import {
   UNBLOCK_NETEASE_SOURCE_ID,
   clearLocalLibraryCacheForTests,
   getLocalLibraryFileForPlayback,
+  getLocalLibraryStatus,
   inferStoredTrackSource,
   listMusicSourceAdapters,
   refreshStoredTrackPlayableUrl,
   resolveKnownTrack,
   resolveTrack,
   setUnblockNeteaseMatcherForTests,
+  summarizeLocalLibraryForPrompt,
 } from "./music-sources/index.js";
 
 vi.mock("./netease.js");
@@ -214,6 +216,29 @@ describe("music source adapters", () => {
       url: `/api/audio/local/${encodeURIComponent(track!.sourceTrackId)}`,
     });
     expect(refreshed.urlExpiresAt).toBeGreaterThan(Date.now());
+  });
+
+  it("reports local library status and summarizes playable local candidates for prompts", async () => {
+    await createTempMusicFile("Prompt Artist - Prompt Song.mp3");
+    await createTempMusicFile("Prompt Artist - Second Song.ogg");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = tempDirs.join(path.delimiter);
+    clearLocalLibraryCacheForTests();
+
+    const status = await getLocalLibraryStatus();
+    const summary = await summarizeLocalLibraryForPrompt(1);
+
+    expect(status).toMatchObject({
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      enabled: true,
+      configuredDirectoryCount: 2,
+      availableDirectoryCount: 2,
+      trackCount: 2,
+    });
+    expect(status.sampleTracks).toHaveLength(2);
+    expect(summary).toContain("本地音乐文件库");
+    expect(summary).toContain("Prompt Song - Prompt Artist");
+    expect(summary).not.toContain(tempDirs[0]);
   });
 
   it("refreshes stored tracks and records structured errors without throwing", async () => {

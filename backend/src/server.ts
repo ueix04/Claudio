@@ -317,6 +317,26 @@ app.get("/api/taste-profile", async (_req, res) => {
   res.json(profile);
 });
 
+app.get("/api/music-sources/local-library", async (_req, res) => {
+  try {
+    const status = await musicSources.getLocalLibraryStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: getErrorMessage(error) });
+  }
+});
+
+app.post("/api/music-sources/local-library/rescan", async (_req, res) => {
+  try {
+    const status = await musicSources.getLocalLibraryStatus({
+      forceRefresh: true,
+    });
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: getErrorMessage(error) });
+  }
+});
+
 app.post("/api/netease/sync", async (_req, res) => {
   try {
     const account = await netease.getUserAccount();
@@ -1414,7 +1434,11 @@ async function initializeStartupRadioProgram() {
   try {
     const state = await db.getState();
     const snapshot = await db.getNeteaseSnapshot();
-    const hasUserMusicContext = state.playlists.length > 0 || Boolean(snapshot?.playlists.length);
+    const localLibraryStatus = await musicSources.getLocalLibraryStatus({ sampleLimit: 0 });
+    const hasUserMusicContext =
+      state.playlists.length > 0
+      || Boolean(snapshot?.playlists.length)
+      || (localLibraryStatus.enabled && localLibraryStatus.trackCount > 0);
 
     if (!hasUserMusicContext) {
       console.log("[radio] skip startup program: no playlist context available yet");

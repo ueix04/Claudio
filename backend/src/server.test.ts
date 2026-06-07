@@ -160,6 +160,31 @@ describe("API Server", () => {
     expect(await res.text()).toBe("local wav body");
   });
 
+  it("GET/POST /api/music-sources/local-library 返回状态并支持重扫", async () => {
+    const musicSources = await import("./music-sources/index.js");
+    const firstFilePath = await createTempMusicFile("Scan Artist - First Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(firstFilePath);
+    musicSources.clearLocalLibraryCacheForTests();
+
+    const initialRes = await fetch(`http://localhost:${port}/api/music-sources/local-library`);
+    expect(initialRes.status).toBe(200);
+    const initialBody = await initialRes.json() as { trackCount: number; sampleTracks: unknown[] };
+    expect(initialBody.trackCount).toBe(1);
+    expect(initialBody.sampleTracks).toHaveLength(1);
+
+    await fs.writeFile(path.join(path.dirname(firstFilePath), "Scan Artist - Second Song.mp3"), "new audio");
+    const rescanRes = await fetch(`http://localhost:${port}/api/music-sources/local-library/rescan`, {
+      method: "POST",
+    });
+
+    expect(rescanRes.status).toBe(200);
+    const rescanBody = await rescanRes.json() as { trackCount: number; sampleTracks: Array<{ title: string }> };
+    expect(rescanBody.trackCount).toBe(2);
+    expect(rescanBody.sampleTracks.map((track) => track.title)).toContain("Second Song");
+    expect(JSON.stringify(rescanBody)).not.toContain(path.dirname(firstFilePath));
+  });
+
   it("POST /api/netease/sync 同步并保存网易云歌单快照", async () => {
     const netease = await import("./netease.js");
     const db = await import("./db.js");

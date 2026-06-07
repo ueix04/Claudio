@@ -39,6 +39,19 @@ export interface LocalLibraryPlaybackFile {
   contentType: string;
 }
 
+export interface LocalLibraryStatus {
+  source: typeof LOCAL_LIBRARY_SOURCE_ID;
+  enabled: boolean;
+  configuredDirectoryCount: number;
+  availableDirectoryCount: number;
+  trackCount: number;
+  maxFiles: number;
+  scanCacheMs: number;
+  scannedAt?: number;
+  sampleTracks: MusicSourceTrack[];
+  message: string;
+}
+
 let libraryCache: LocalLibraryCache | null = null;
 
 function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
@@ -323,6 +336,57 @@ async function findLocalTrack(sourceTrackId: string): Promise<LocalLibraryTrack 
   return tracks.find((track) => track.sourceTrackId === sourceTrackId) ?? null;
 }
 
+export async function getLocalLibraryStatus(
+  options?: {
+    forceRefresh?: boolean;
+    sampleLimit?: number;
+  },
+): Promise<LocalLibraryStatus> {
+  const enabled = isLocalLibraryEnabled();
+  const directories = getLocalMusicDirectories();
+  const availableDirectoryCount = directories.filter((dir) => existsSync(dir)).length;
+  const sampleLimit = options?.sampleLimit ?? 8;
+  const tracks = enabled
+    ? await scanLocalLibraryTracks({ forceRefresh: options?.forceRefresh })
+    : [];
+
+  return {
+    source: LOCAL_LIBRARY_SOURCE_ID,
+    enabled,
+    configuredDirectoryCount: directories.length,
+    availableDirectoryCount,
+    trackCount: tracks.length,
+    maxFiles: getMaxFiles(),
+    scanCacheMs: getScanCacheMs(),
+    scannedAt: enabled ? libraryCache?.scannedAt : undefined,
+    sampleTracks: tracks.slice(0, sampleLimit).map(toPublicTrack),
+    message: enabled
+      ? `Local library directories: ${availableDirectoryCount}/${directories.length}; playable files: ${tracks.length}`
+      : "Local music library is disabled. Set LOCAL_MUSIC_DIRS to enable it.",
+  };
+}
+
+export async function summarizeLocalLibraryForPrompt(limit = 20): Promise<string> {
+  if (!isLocalLibraryEnabled()) {
+    return "";
+  }
+
+  const tracks = await scanLocalLibraryTracks();
+  if (tracks.length === 0) {
+    return "";
+  }
+
+  const lines = tracks
+    .slice(0, limit)
+    .map((track) => {
+      const album = track.album ? ` | album=${track.album}` : "";
+      return `- source=local_library | ${track.title} - ${track.artist}${album}`;
+    })
+    .join("\n");
+
+  return `本地音乐文件库（已扫描 ${tracks.length} 首，可优先用于可靠播放；使用这些歌曲时请原样返回 title 和 artist，不要返回本地文件路径）：\n${lines}`;
+}
+
 async function resolveLocalPlayableUrl(sourceTrackId: string): Promise<PlayableUrlResult> {
   if (!isLocalLibraryEnabled()) {
     throw new MusicSourceError(
@@ -400,22 +464,11 @@ export const localLibraryAdapter: MusicSourceAdapter = {
   },
 
   async healthCheck() {
-    const directories = getLocalMusicDirectories();
-    const enabled = isLocalLibraryEnabled();
-    if (!enabled) {
-      return {
-        source: LOCAL_LIBRARY_SOURCE_ID,
-        ok: false,
-        message: "Local music library is disabled. Set LOCAL_MUSIC_DIRS to enable it.",
-        checkedAt: Date.now(),
-      };
-    }
-
-    const tracks = await scanLocalLibraryTracks();
+    const status = await getLocalLibraryStatus({ sampleLimit: 0 });
     return {
       source: LOCAL_LIBRARY_SOURCE_ID,
-      ok: tracks.length > 0,
-      message: `Local library directories: ${directories.length}; playable files: ${tracks.length}`,
+      ok: status.enabled && status.trackCount > 0,
+      message: status.message,
       checkedAt: Date.now(),
     };
   },

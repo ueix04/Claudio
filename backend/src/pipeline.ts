@@ -136,10 +136,11 @@ async function gatherMusicContext(
   });
 
   const playlistContext = db.summarizePlaylists();
-  const [ncmPlaylistContext, snapshot, profile, weatherContext] = await Promise.all([
+  const [ncmPlaylistContext, snapshot, profile, localLibraryContext, weatherContext] = await Promise.all([
     buildNcmPlaylistContext(),
     db.getNeteaseSnapshot(),
     tasteProfile.getTasteProfile(),
+    musicSources.summarizeLocalLibraryForPrompt(options?.candidateLimit ?? 20),
     options?.weatherMode
       ? buildWeatherContext(options.weatherMode)
       : options?.includeOptionalWeather
@@ -150,7 +151,10 @@ async function gatherMusicContext(
   const candidatePool = snapshot && profile
     ? tasteProfile.buildRecommendationCandidates(snapshot, profile, state.playHistory, options?.candidateLimit ?? 20)
     : [];
-  const candidateContext = tasteProfile.summarizeRecommendationCandidates(candidatePool);
+  const candidateContext = [
+    tasteProfile.summarizeRecommendationCandidates(candidatePool),
+    localLibraryContext,
+  ].filter(Boolean).join("\n\n");
   const localCandidateMap = new Map(candidatePool.map((candidate) => [candidate.id, candidate]));
   const mergedPlaylistContext = [playlistContext, ncmPlaylistContext]
     .filter(Boolean)
@@ -340,7 +344,7 @@ Please program a 20-40 minute radio session for “the station right after the s
 - The opening should sound like a real DJ opening the mic: warm, companionable, never like a system notice
 - The intro should happen only once, like the real start of a show, not like every song is a fresh opening
 - Order the songs naturally so each handoff feels deliberate
-- Prefer the local candidate library. If you use it, return id, title, and artist exactly as provided
+- Prefer the local candidate library. For numeric Netease candidates, return id/title/artist exactly; for local_library file candidates, return title/artist exactly and omit id
 - Output 6 to 10 songs, enough for roughly 20-40 minutes
 - Include a speechPlan: intro before the first song, then only short talk or bumper spots every 2-3 songs
 
@@ -350,7 +354,7 @@ Return JSON only. Required fields:
 - plannedMinutes: target duration, an integer from 20 to 40
 - say: the opening line for the UI, natural English, 20-65 words
 - ttsText: same meaning as say, but you may add light inline performance tags
-- lineup: an array of songs. Each item includes title (required), artist (optional), id (required when matched from the local candidate library), mood (optional), reason (optional)
+- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates, omitted for local_library file candidates), mood (optional), reason (optional)
 - speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
 - reason: why this set is arranged this way, natural English, 14-30 words
 `;
@@ -372,7 +376,7 @@ ${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
 - 节目开场要像真实 DJ 开麦，温柔、有陪伴感，不要太像公告
 - 开场对白只能像节目真正开始时说一次，不要像每首歌前都在重新开场
 - 歌单按顺序编排，前后过渡自然
-- 优先使用本地候选曲库；如果用了候选曲库，必须原样返回 id、title、artist
+- 优先使用本地候选曲库；命中网易云数字 id 候选时原样返回 id、title、artist，命中 local_library 本地文件候选时只原样返回 title、artist，不要返回本地路径
 - 输出 6 到 10 首歌，整体约 20 到 40 分钟
 - 增加 speechPlan：第一首前是 intro，之后每 2 到 3 首歌才安排一次 short_say 或 bumper
 
@@ -382,7 +386,7 @@ ${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
 - plannedMinutes: 目标时长，20 到 40 之间的整数
 - say: 开场对白，给前端显示，中文 40-120 字
 - ttsText: 给 TTS 的版本，语义与 say 一致，可加入适度行内标签
-- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（候选曲库命中时必填）、mood（选填）、reason（选填）
+- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填，命中 local_library 本地文件候选时省略）、mood（选填）、reason（选填）
 - speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
 - reason: 说明这档节目为什么这么编排，中文 30-80 字
 `;
@@ -418,7 +422,7 @@ The listener wants to reshape the current set through chat. Build a tighter mini
 - Start by replying like a DJ to the listener and briefly explain why this new set fits
 - The reply must continue the current show. Do not reintroduce yourself and do not sound like a rebooted program
 - Prefer adjusting within the listener's taste instead of drifting away from their library
-- Prefer the local candidate library. If you use it, return id, title, and artist exactly as provided
+- Prefer the local candidate library. For numeric Netease candidates, return id/title/artist exactly; for local_library file candidates, return title/artist exactly and omit id
 - Output 3 to 5 songs
 - The first song must feel ready to cut to immediately
 
@@ -426,7 +430,7 @@ Return JSON only. Required fields:
 - title: optional show title
 - say: the DJ's reply to the listener, natural English, 16-44 words
 - ttsText: same meaning as say, but you may add light inline performance tags
-- lineup: an array of songs. Each item includes title (required), artist (optional), id (required when matched from the local candidate library), mood (optional), reason (optional)
+- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates, omitted for local_library file candidates), mood (optional), reason (optional)
 - reason: why this switch works, natural English, 12-28 words
 `;
   }
@@ -448,7 +452,7 @@ ${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
 - 开头先像 DJ 回应用户，说明为什么换这组歌
 - 回应必须承接当前节目，不要重新自我介绍，不要像节目重新开播
 - 优先用用户歌单口味做调整，不要完全脱离他的库
-- 优先使用本地候选曲库；如果用了候选曲库，必须原样返回 id、title、artist
+- 优先使用本地候选曲库；命中网易云数字 id 候选时原样返回 id、title、artist，命中 local_library 本地文件候选时只原样返回 title、artist，不要返回本地路径
 - 输出 3 到 5 首歌
 - 歌单第一首应当适合立刻切过去播放
 
@@ -456,7 +460,7 @@ ${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
 - title: 节目标题，可选
 - say: DJ 对用户的回应，中文 35-100 字
 - ttsText: 给 TTS 的版本，语义与 say 一致，可加入适度行内标签
-- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（候选曲库命中时必填）、mood（选填）、reason（选填）
+- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填，命中 local_library 本地文件候选时省略）、mood（选填）、reason（选填）
 - reason: 说明这次为什么这么换歌，中文 30-80 字
 `;
 }

@@ -25,9 +25,11 @@ export {
   LOCAL_LIBRARY_SOURCE_ID,
   clearLocalLibraryCacheForTests,
   getLocalLibraryFileForPlayback,
+  getLocalLibraryStatus,
   getLocalMusicDirectories,
   isLocalLibraryEnabled,
   localLibraryAdapter,
+  summarizeLocalLibraryForPrompt,
 } from "./local-library.js";
 export { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter };
 export {
