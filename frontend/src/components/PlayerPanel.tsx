@@ -1012,6 +1012,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const listenReady = Boolean(listenCheck.startedAt && rawListenElapsedMs >= LISTEN_CHECK_TARGET_MS);
     const listenComplete = Boolean(listenCheck.completedAt)
       || (listenReady && listenCheckedCount === LISTEN_CHECK_ITEMS.length);
+    const listenAuditReady = programAudit?.ok === true;
     const listenCheckLabel = listenComplete
       ? "DONE"
       : listenCheck.startedAt ? listenReady ? "READY" : "RUNNING" : "STANDBY";
@@ -1032,6 +1033,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         || listenCheck.needsFollowUp,
     );
     const startListenCheck = () => {
+      if (!listenAuditReady) return;
       setListenCheck({
         ...createEmptyListenCheck(),
         startedAt: Date.now(),
@@ -1154,7 +1156,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               ></div>
             </div>
             <div className="mt-4 flex flex-wrap gap-3">
-              <button className="sync-pill" onClick={startListenCheck}>
+              <button className="sync-pill" onClick={startListenCheck} disabled={!listenAuditReady}>
                 {listenCheck.startedAt ? "RESTART" : "START 20 MIN"}
               </button>
               <button
@@ -1168,6 +1170,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 <span className="sync-pill pointer-events-none">SAVED</span>
               )}
             </div>
+            {!listenAuditReady && (
+              <div className="panel-empty mt-4">
+                Program audit must be clear before a 20-minute listen check can start
+              </div>
+            )}
             <div className="mt-4 grid md:grid-cols-3 gap-3">
               {LISTEN_CHECK_ITEMS.map((item) => {
                 const checked = listenCheck.checks[item.id];
