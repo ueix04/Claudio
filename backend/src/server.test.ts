@@ -1116,6 +1116,157 @@ describe("WebSocket Server", () => {
     ws.close();
   });
 
+  it("20 分钟控制节目连续切歌时保持审计通过且不重复开场", async () => {
+    const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    const tts = await import("./tts.js");
+    const netease = await import("./netease.js");
+
+    const tracks = Array.from({ length: 6 }, (_, index) => ({
+      id: String(index + 1),
+      name: `Program Song ${index + 1}`,
+      artist: `Program Artist ${index + 1}`,
+      url: `url-${index + 1}`,
+      picUrl: `pic-${index + 1}`,
+      duration: 240000,
+      source: "netease_legacy",
+      sourceTrackId: String(index + 1),
+      urlSource: "netease_legacy",
+    }));
+    let currentState = {
+      status: "playing",
+      currentTrack: tracks[0],
+      radioQueue: tracks,
+      currentQueueIndex: 0,
+      currentProgram: {
+        source: "startup",
+        sessionId: "startup_long_program",
+        generatedAt: 1,
+        title: "Long Program Validation",
+        mood: "steady night flow",
+        summary: "A controlled long-form program for runtime validation.",
+        plannedMinutes: 24,
+        speechPlan: [
+          { beforeTrackIndex: 0, type: "intro", note: "开场只在节目启动时说一次" },
+          { beforeTrackIndex: 2, type: "short_say", note: "两首歌后短讲一次" },
+          { beforeTrackIndex: 4, type: "bumper", note: "轻量 station ID" },
+        ],
+      },
+      chatHistory: [
+        { role: "dj", text: "今晚先把这一段慢慢铺开。", timestamp: 1 },
+      ],
+      playHistory: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+        currentProgram: patch.currentProgram ?? currentState.currentProgram,
+        chatHistory: patch.chatHistory ?? currentState.chatHistory,
+        playHistory: patch.playHistory ?? currentState.playHistory,
+      };
+      return currentState;
+    });
+    vi.mocked(db.advanceRadioQueue).mockImplementation(async () => {
+      const nextIndex = (currentState.currentQueueIndex + 1) % currentState.radioQueue.length;
+      currentState = {
+        ...currentState,
+        currentQueueIndex: nextIndex,
+        currentTrack: currentState.radioQueue[nextIndex],
+      };
+      return currentState;
+    });
+    vi.mocked(db.addChatMessage).mockImplementation(async (message: any) => {
+      currentState = {
+        ...currentState,
+        chatHistory: [
+          ...currentState.chatHistory,
+          {
+            role: message.role,
+            text: message.text,
+            timestamp: message.timestamp ?? Date.now(),
+          },
+        ],
+      };
+      return currentState;
+    });
+    vi.mocked(db.recordPlay).mockImplementation(async (title: string, artist: string) => {
+      currentState = {
+        ...currentState,
+        playHistory: [
+          { title, artist, playedAt: Date.now() },
+          ...currentState.playHistory,
+        ],
+      };
+      return currentState;
+    });
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      say: "前两首把节奏铺稳了，下一首把情绪再往里收一点。",
+      ttsText: "前两首把节奏铺稳了，下一首把情绪再往里收一点。",
+    });
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/long-program.wav",
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}-fresh`);
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    const waitForTrack = async (trackName: string) => {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`timeout waiting for ${trackName}`)), 3000);
+        const check = setInterval(() => {
+          if (messages.some((m) => m.type === "track" && m.data?.name === trackName)) {
+            clearInterval(check);
+            clearTimeout(timeout);
+            resolve();
+          }
+        }, 10);
+      });
+    };
+
+    for (const track of [...tracks.slice(1), tracks[0]]) {
+      ws.send(JSON.stringify({ type: "queue_next" }));
+      await waitForTrack(track.name);
+
+      const auditRes = await fetch(`http://localhost:${port}/api/radio/program-audit`);
+      expect(auditRes.status).toBe(200);
+      const audit = await auditRes.json() as { ok: boolean; plannedMinutes: number; issues: unknown[] };
+      expect(audit.ok).toBe(true);
+      expect(audit.plannedMinutes).toBeGreaterThanOrEqual(20);
+      expect(audit.issues).toHaveLength(0);
+    }
+
+    const djMessages = messages.filter((m) => m.type === "dj_message");
+    expect(djMessages).toHaveLength(2);
+    expect(djMessages[0].data?.text).toBe("前两首把节奏铺稳了，下一首把情绪再往里收一点。");
+    expect(String(djMessages[1].data?.text)).toContain("Claudio FM");
+    expect(claude.callJsonLLM).toHaveBeenCalledTimes(1);
+    expect(currentState.chatHistory.map((message: { text: string }) => message.text).join("\n")).not.toMatch(
+      /欢迎回来|欢迎收听|我是\s*Claudio|天气/,
+    );
+
+    ws.close();
+  });
+
   it("chat 里的换风格请求会触发节目重编", async () => {
     const db = await import("./db.js");
     const pipeline = await import("./pipeline.js");
