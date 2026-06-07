@@ -227,6 +227,13 @@ export type ProgramAuditCheck = {
 export type ProgramExperienceAudit = {
   ok: boolean;
   generatedAt: number;
+  program?: {
+    sessionId?: string;
+    title?: string;
+    mood?: string;
+    source?: string;
+    generatedAt?: number;
+  };
   trackCount: number;
   plannedMinutes: number;
   speechSlotCount: number;
@@ -253,6 +260,13 @@ export type ListenCheckRecord = {
     trackCount: number;
     speechSlotCount: number;
     issueCount: number;
+  };
+  programContinuity?: {
+    ok: boolean;
+    startedSessionId?: string;
+    completedSessionId?: string;
+    startedGeneratedAt?: number;
+    completedGeneratedAt?: number;
   };
   programSnapshot?: {
     sessionId?: string;
@@ -300,6 +314,7 @@ export type ListenAcceptanceSummary = {
     durationMs: number;
     needsFollowUp: boolean;
     issueCount: number | null;
+    programContinuityOk: boolean | null;
   };
   criteria: ListenAcceptanceCriterion[];
   generatedAt: number;

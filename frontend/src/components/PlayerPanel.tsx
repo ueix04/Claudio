@@ -60,6 +60,9 @@ type ListenCheckState = {
   startedAt: number | null;
   completedAt: number | null;
   savedRecordId: string | null;
+  programSessionId: string | null;
+  programGeneratedAt: number | null;
+  programTitle: string | null;
   checks: Record<ListenCheckId, boolean>;
   note: string;
   needsFollowUp: boolean;
@@ -77,6 +80,9 @@ const createEmptyListenCheck = (): ListenCheckState => ({
   startedAt: null,
   completedAt: null,
   savedRecordId: null,
+  programSessionId: null,
+  programGeneratedAt: null,
+  programTitle: null,
   checks: {
     program: false,
     dj: false,
@@ -98,6 +104,9 @@ const loadListenCheckState = (): ListenCheckState => {
       startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
       completedAt: typeof parsed.completedAt === "number" ? parsed.completedAt : null,
       savedRecordId: typeof parsed.savedRecordId === "string" ? parsed.savedRecordId : null,
+      programSessionId: typeof parsed.programSessionId === "string" ? parsed.programSessionId : null,
+      programGeneratedAt: typeof parsed.programGeneratedAt === "number" ? parsed.programGeneratedAt : null,
+      programTitle: typeof parsed.programTitle === "string" ? parsed.programTitle : null,
       checks: {
         program: Boolean(parsed.checks?.program),
         dj: Boolean(parsed.checks?.dj),
@@ -229,15 +238,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             checks: listenCheck.checks,
             note: listenCheck.note,
             needsFollowUp: listenCheck.needsFollowUp,
-            programAudit: programAudit
-              ? {
-                  ok: programAudit.ok,
-                  plannedMinutes: programAudit.plannedMinutes,
-                  trackCount: programAudit.trackCount,
-                  speechSlotCount: programAudit.speechSlotCount,
-                  issueCount: programAudit.issues.length,
-                }
-              : undefined,
+            startedProgram: {
+              sessionId: listenCheck.programSessionId ?? undefined,
+              generatedAt: listenCheck.programGeneratedAt ?? undefined,
+            },
           }),
         });
         if (!res.ok) {
@@ -266,7 +270,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [listenCheck, onListenCheckSaved, programAudit]);
+  }, [listenCheck, onListenCheckSaved]);
 
   useEffect(() => {
     const toEmoji = (description: string) => {
@@ -1026,6 +1030,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       ? "text-[#4ade80]"
       : listenAcceptance?.status === "needs_review" ? "text-[#facc15]" : "claudio-theme-text-muted";
     const listenCheckLocked = Boolean(listenCheck.completedAt || listenCheck.savedRecordId);
+    const listenProgramLocked = Boolean(listenCheck.programSessionId || listenCheck.programGeneratedAt);
     const hasListenDraft = Boolean(
       listenCheck.startedAt
         || listenCheckedCount > 0
@@ -1034,9 +1039,13 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     );
     const startListenCheck = () => {
       if (!listenAuditReady) return;
+      const programGeneratedAt = programAudit?.program?.generatedAt;
       setListenCheck({
         ...createEmptyListenCheck(),
         startedAt: Date.now(),
+        programSessionId: programAudit?.program?.sessionId ?? null,
+        programGeneratedAt: typeof programGeneratedAt === "number" ? programGeneratedAt : null,
+        programTitle: programAudit?.program?.title ?? null,
       });
     };
     const resetListenCheck = () => {
@@ -1073,7 +1082,14 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const hasCleanListenRecord = (record: ListenCheckRecord) =>
       record.programAudit?.issueCount === 0
         && countRecordChecks(record) === LISTEN_CHECK_ITEMS.length
-        && record.needsFollowUp !== true;
+        && record.needsFollowUp !== true
+        && record.programContinuity?.ok === true;
+    const getRecordStatusLabel = (record: ListenCheckRecord) => {
+      if (record.needsFollowUp) return "follow-up";
+      if (record.programContinuity?.ok === false) return "program changed";
+      if (!record.programContinuity) return "no session";
+      return `${record.programAudit?.issueCount ?? 0} issues`;
+    };
 
     return (
       <div className="flex flex-col gap-6">
@@ -1148,7 +1164,18 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                   {listenReady ? "YES" : "NO"}
                 </span>
               </div>
+              <div className="stat-card">
+                <span className="stat-label">SESSION</span>
+                <span className={`stat-value ${listenProgramLocked ? "text-[#4ade80]" : "claudio-theme-text-muted"}`}>
+                  {listenProgramLocked ? "LOCKED" : "--"}
+                </span>
+              </div>
             </div>
+            {listenCheck.programTitle && (
+              <div className="panel-empty mt-4">
+                Locked program: {listenCheck.programTitle}
+              </div>
+            )}
             <div className="mt-4 h-[5px] overflow-hidden rounded-full bg-[color:var(--claudio-border)]">
               <div
                 className="h-full bg-[color:var(--claudio-accent)] transition-all duration-300"
@@ -1290,7 +1317,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         ? "text-[#4ade80]"
                         : "text-[#facc15]"
                     }`}>
-                      {record.needsFollowUp ? "follow-up" : `${record.programAudit?.issueCount ?? 0} issues`}
+                      {getRecordStatusLabel(record)}
                     </span>
                   </div>
                 ))

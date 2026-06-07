@@ -1,4 +1,4 @@
-import type { AppState, ChatMessage, RadioSpeechSlot, Track } from "./db.js";
+import type { AppState, ChatMessage, RadioProgram, RadioSpeechSlot, Track } from "./db.js";
 import { buildDefaultSpeechPlan, estimateProgramMinutes } from "./radio-session.js";
 
 type AuditStatus = "pass" | "warning" | "fail";
@@ -13,6 +13,13 @@ export interface ProgramAuditCheck {
 export interface ProgramExperienceAudit {
   ok: boolean;
   generatedAt: number;
+  program?: {
+    sessionId?: string;
+    title?: string;
+    mood?: string;
+    source?: RadioProgram["source"];
+    generatedAt?: number;
+  };
   trackCount: number;
   plannedMinutes: number;
   speechSlotCount: number;
@@ -167,6 +174,15 @@ export function auditProgramExperience(state: AppState): ProgramExperienceAudit 
   return {
     ok: checks.every((check) => check.status === "pass"),
     generatedAt: Date.now(),
+    program: state.currentProgram
+      ? {
+          sessionId: state.currentProgram.sessionId,
+          title: state.currentProgram.title,
+          mood: state.currentProgram.mood,
+          source: state.currentProgram.source,
+          generatedAt: state.currentProgram.generatedAt,
+        }
+      : undefined,
     trackCount: queue.length,
     plannedMinutes,
     speechSlotCount: speechPlan.length,

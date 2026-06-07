@@ -17,6 +17,13 @@ const makeRecord = (patch: Partial<ListenCheckRecord> = {}): ListenCheckRecord =
     speechSlotCount: 3,
     issueCount: 0,
   },
+  programContinuity: {
+    ok: true,
+    startedSessionId: "startup_test",
+    completedSessionId: "startup_test",
+    startedGeneratedAt: 1,
+    completedGeneratedAt: 1,
+  },
   recordedAt: 1_200_002,
   ...patch,
 });
@@ -87,5 +94,32 @@ describe("listen acceptance summary", () => {
       "listen_new_clean",
       "listen_new_clean",
     ]);
+  });
+
+  it("requires continuous program evidence before accepting a 20-minute listen", () => {
+    const missingContinuity = summarizeListenAcceptance([
+      makeRecord({ programContinuity: undefined }),
+    ]);
+
+    expect(missingContinuity.ready).toBe(false);
+    expect(missingContinuity.status).toBe("needs_review");
+    expect(missingContinuity.criteria.every((criterion) => !criterion.passed)).toBe(true);
+    expect(missingContinuity.criteria[0].detail).toContain("continuous program evidence");
+
+    const changedProgram = summarizeListenAcceptance([
+      makeRecord({
+        programContinuity: {
+          ok: false,
+          startedSessionId: "startup_old",
+          completedSessionId: "startup_new",
+          startedGeneratedAt: 1,
+          completedGeneratedAt: 2,
+        },
+      }),
+    ]);
+
+    expect(changedProgram.ready).toBe(false);
+    expect(changedProgram.latestRecord?.programContinuityOk).toBe(false);
+    expect(changedProgram.criteria.every((criterion) => !criterion.passed)).toBe(true);
   });
 });

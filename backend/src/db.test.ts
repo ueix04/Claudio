@@ -221,6 +221,13 @@ describe("db.ts", () => {
         speechSlotCount: 3,
         issueCount: 0,
       },
+      programContinuity: {
+        ok: true,
+        startedSessionId: "startup_test",
+        completedSessionId: "startup_test",
+        startedGeneratedAt: 1,
+        completedGeneratedAt: 1,
+      },
       programSnapshot: {
         sessionId: "startup_test",
         title: "Night Flow",
@@ -245,6 +252,11 @@ describe("db.ts", () => {
       note: "20 minutes felt cohesive.",
       needsFollowUp: false,
       programAudit: { ok: true, issueCount: 0 },
+      programContinuity: {
+        ok: true,
+        startedSessionId: "startup_test",
+        completedSessionId: "startup_test",
+      },
       programSnapshot: {
         sessionId: "startup_test",
         title: "Night Flow",

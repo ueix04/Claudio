@@ -76,6 +76,13 @@ export interface ListenCheckRecord {
     speechSlotCount: number;
     issueCount: number;
   };
+  programContinuity?: {
+    ok: boolean;
+    startedSessionId?: string;
+    completedSessionId?: string;
+    startedGeneratedAt?: number;
+    completedGeneratedAt?: number;
+  };
   programSnapshot?: {
     sessionId?: string;
     title?: string;

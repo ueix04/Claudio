@@ -568,6 +568,48 @@ function buildListenProgramSnapshot(state: db.AppState): db.ListenCheckRecord["p
   };
 }
 
+function getBoundedString(value: unknown, maxLength = 120): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxLength) : undefined;
+}
+
+function getOptionalFiniteNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function buildListenProgramContinuity(
+  state: db.AppState,
+  startedProgram: unknown,
+): db.ListenCheckRecord["programContinuity"] {
+  const started = startedProgram && typeof startedProgram === "object"
+    ? startedProgram as Record<string, unknown>
+    : {};
+  const startedSessionId = getBoundedString(started.sessionId);
+  const completedSessionId = state.currentProgram?.sessionId;
+  const startedGeneratedAt = getOptionalFiniteNumber(started.generatedAt);
+  const completedGeneratedAt = state.currentProgram?.generatedAt;
+  const sessionMatches = Boolean(
+    startedSessionId
+      && completedSessionId
+      && startedSessionId === completedSessionId,
+  );
+  const generatedAtMatches = Boolean(
+    startedGeneratedAt !== undefined
+      && completedGeneratedAt !== undefined
+      && startedGeneratedAt === completedGeneratedAt,
+  );
+
+  return {
+    ok: sessionMatches || generatedAtMatches,
+    startedSessionId,
+    completedSessionId,
+    startedGeneratedAt,
+    completedGeneratedAt,
+  };
+}
+
 app.post("/api/radio/listen-checks", async (req, res) => {
   const body = req.body as Record<string, any>;
   const startedAt = Number(body?.startedAt);
@@ -608,6 +650,7 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     note,
     needsFollowUp,
     programAudit,
+    programContinuity: buildListenProgramContinuity(state, body?.startedProgram),
     programSnapshot: buildListenProgramSnapshot(state),
   });
   res.status(201).json(record);

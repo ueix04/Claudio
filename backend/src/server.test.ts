@@ -406,6 +406,13 @@ describe("API Server", () => {
         speechSlotCount: 3,
         issueCount: 0,
       },
+      programContinuity: {
+        ok: true,
+        startedSessionId: "startup_test",
+        completedSessionId: "startup_test",
+        startedGeneratedAt: 1,
+        completedGeneratedAt: 1,
+      },
       programSnapshot: {
         sessionId: "startup_test",
         title: "Night Flow",
@@ -438,6 +445,10 @@ describe("API Server", () => {
           speechSlotCount: 99,
           issueCount: 99,
         },
+        startedProgram: {
+          sessionId: "startup_test",
+          generatedAt: 1,
+        },
       }),
     });
 
@@ -454,6 +465,13 @@ describe("API Server", () => {
         trackCount: 6,
         speechSlotCount: 3,
         issueCount: 0,
+      },
+      programContinuity: {
+        ok: true,
+        startedSessionId: "startup_test",
+        completedSessionId: "startup_test",
+        startedGeneratedAt: 1,
+        completedGeneratedAt: 1,
       },
       programSnapshot: expect.objectContaining({
         currentQueueIndex: 0,
@@ -484,6 +502,13 @@ describe("API Server", () => {
         trackCount: 6,
         speechSlotCount: 3,
         issueCount: 0,
+      },
+      programContinuity: {
+        ok: true,
+        startedSessionId: "startup_test",
+        completedSessionId: "startup_test",
+        startedGeneratedAt: 1,
+        completedGeneratedAt: 1,
       },
       recordedAt: 1_200_002,
     }]);

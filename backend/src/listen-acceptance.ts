@@ -29,6 +29,7 @@ export interface ListenAcceptanceSummary {
     durationMs: number;
     needsFollowUp: boolean;
     issueCount: number | null;
+    programContinuityOk: boolean | null;
   };
   criteria: ListenAcceptanceCriterion[];
   generatedAt: number;
@@ -65,12 +66,16 @@ const CRITERIA: Array<{
 const getIssueCount = (record: ListenCheckRecord) =>
   typeof record.programAudit?.issueCount === "number" ? record.programAudit.issueCount : null;
 
+const hasProgramContinuityEvidence = (record: ListenCheckRecord) =>
+  record.programContinuity?.ok === true;
+
 const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAcceptanceCriterionId) =>
   record.durationMs >= TARGET_LISTEN_MS
     && record.checks[criterion] === true
     && record.needsFollowUp !== true
     && record.programAudit?.ok === true
-    && getIssueCount(record) === 0;
+    && getIssueCount(record) === 0
+    && hasProgramContinuityEvidence(record);
 
 const isReviewRecord = (record: ListenCheckRecord) =>
   record.durationMs >= TARGET_LISTEN_MS
@@ -79,6 +84,7 @@ const isReviewRecord = (record: ListenCheckRecord) =>
       || !record.programAudit
       || record.programAudit.ok !== true
       || getIssueCount(record) !== 0
+      || !hasProgramContinuityEvidence(record)
     );
 
 function getLatestReviewRecord(records: ListenCheckRecord[]) {
@@ -94,6 +100,9 @@ function describeReviewRecord(record: ListenCheckRecord): string {
   if (!record.programAudit) {
     return "A newer 20-minute listen has no program audit snapshot. Save a clean listen after it to pass this criterion.";
   }
+  if (record.programAudit.ok === true && getIssueCount(record) === 0 && !hasProgramContinuityEvidence(record)) {
+    return "A newer 20-minute listen has no continuous program evidence. Save a clean listen without changing programs to pass this criterion.";
+  }
   return `A newer 20-minute listen has ${getIssueCount(record) ?? "unknown"} audit issues. Save a clean listen after it to pass this criterion.`;
 }
 
@@ -106,6 +115,9 @@ function describeBlocker(records: ListenCheckRecord[], latestReviewRecord?: List
   if (!latest.programAudit) return "Latest listen record has no program audit snapshot.";
   if (latest.programAudit.ok !== true || getIssueCount(latest) !== 0) {
     return `Latest listen record has ${getIssueCount(latest) ?? "unknown"} audit issues.`;
+  }
+  if (!hasProgramContinuityEvidence(latest)) {
+    return "Latest listen record is missing continuous program evidence.";
   }
   return "Latest listen record is missing this subjective confirmation.";
 }
@@ -154,6 +166,7 @@ export function summarizeListenAcceptance(
           durationMs: latest.durationMs,
           needsFollowUp: latest.needsFollowUp === true,
           issueCount: getIssueCount(latest),
+          programContinuityOk: latest.programContinuity?.ok ?? null,
         }
       : undefined,
     criteria,
