@@ -8,6 +8,9 @@ const makeRecord = (patch: Partial<ListenCheckRecord> = {}): ListenCheckRecord =
   completedAt: 1_200_001,
   durationMs: 1_200_000,
   playbackMs: 1_200_000,
+  playbackSegments: [
+    { trackId: "track-1", title: "Song A", artist: "Artist A", playedMs: 1_200_000 },
+  ],
   checks: { program: true, dj: true, context: true },
   note: "Felt cohesive.",
   needsFollowUp: false,
@@ -135,6 +138,21 @@ describe("listen acceptance summary", () => {
 
     expect(summary.ready).toBe(false);
     expect(summary.latestRecord?.durationMs).toBe(1_500_000);
+    expect(summary.latestRecord?.playbackMs).toBe(600_000);
+    expect(summary.criteria[0].detail).toContain("actual playback");
+  });
+
+  it("uses playback segment evidence when it is more conservative", () => {
+    const summary = summarizeListenAcceptance([
+      makeRecord({
+        playbackMs: 1_200_000,
+        playbackSegments: [
+          { trackId: "track-1", title: "Song A", artist: "Artist A", playedMs: 600_000 },
+        ],
+      }),
+    ]);
+
+    expect(summary.ready).toBe(false);
     expect(summary.latestRecord?.playbackMs).toBe(600_000);
     expect(summary.criteria[0].detail).toContain("actual playback");
   });

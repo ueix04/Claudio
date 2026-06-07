@@ -208,6 +208,9 @@ describe("db.ts", () => {
       completedAt: 1_700_001_200_000,
       durationMs: 1_200_000,
       playbackMs: 1_200_000,
+      playbackSegments: [
+        { trackId: "1", title: "Song A", artist: "Artist A", playedMs: 1_200_000 },
+      ],
       checks: {
         program: true,
         dj: true,
@@ -250,6 +253,9 @@ describe("db.ts", () => {
     expect(records[0]).toMatchObject({
       durationMs: 1_200_000,
       playbackMs: 1_200_000,
+      playbackSegments: [
+        { trackId: "1", title: "Song A", artist: "Artist A", playedMs: 1_200_000 },
+      ],
       checks: { program: true, dj: true, context: true },
       note: "20 minutes felt cohesive.",
       needsFollowUp: false,

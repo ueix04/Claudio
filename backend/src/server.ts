@@ -610,6 +610,46 @@ function buildListenProgramContinuity(
   };
 }
 
+function normalizeListenPlaybackSegments(
+  value: unknown,
+  maxPlaybackMs: number,
+): db.ListenCheckRecord["playbackSegments"] {
+  if (!Array.isArray(value) || maxPlaybackMs <= 0) return undefined;
+
+  let remainingMs = Math.max(0, Math.round(maxPlaybackMs));
+  const segments: NonNullable<db.ListenCheckRecord["playbackSegments"]> = [];
+  const byTrackId = new Map<string, NonNullable<db.ListenCheckRecord["playbackSegments"]>[number]>();
+
+  for (const rawSegment of value.slice(0, 100)) {
+    if (remainingMs <= 0) break;
+    if (!rawSegment || typeof rawSegment !== "object") continue;
+
+    const segment = rawSegment as Record<string, unknown>;
+    const trackId = getBoundedString(segment.trackId, 160);
+    const playedMs = Math.round(Number(segment.playedMs));
+    if (!trackId || !Number.isFinite(playedMs) || playedMs <= 0) continue;
+
+    const clippedPlayedMs = Math.min(playedMs, remainingMs);
+    remainingMs -= clippedPlayedMs;
+    const existing = byTrackId.get(trackId);
+    if (existing) {
+      existing.playedMs += clippedPlayedMs;
+      continue;
+    }
+
+    const normalized = {
+      trackId,
+      title: getBoundedString(segment.title, 160) ?? "Unknown Title",
+      artist: getBoundedString(segment.artist, 160) ?? "Unknown Artist",
+      playedMs: clippedPlayedMs,
+    };
+    byTrackId.set(trackId, normalized);
+    segments.push(normalized);
+  }
+
+  return segments.length > 0 ? segments.slice(0, 20) : undefined;
+}
+
 app.post("/api/radio/listen-checks", async (req, res) => {
   const body = req.body as Record<string, any>;
   const startedAt = Number(body?.startedAt);
@@ -651,6 +691,7 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     completedAt,
     durationMs,
     playbackMs,
+    playbackSegments: normalizeListenPlaybackSegments(body?.playbackSegments, playbackMs),
     checks: normalizedChecks,
     note,
     needsFollowUp,

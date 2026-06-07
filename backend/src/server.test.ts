@@ -397,6 +397,9 @@ describe("API Server", () => {
       completedAt: 1_200_001,
       durationMs: 1_200_000,
       playbackMs: 1_200_000,
+      playbackSegments: [
+        { trackId: "track-1", title: "Song 1", artist: "Artist 1", playedMs: 1_200_000 },
+      ],
       checks: { program: true, dj: true, context: true },
       note: "No repeated greetings.",
       needsFollowUp: false,
@@ -437,6 +440,9 @@ describe("API Server", () => {
         startedAt: record.startedAt,
         completedAt: record.completedAt,
         playbackMs: record.playbackMs,
+        playbackSegments: [
+          { trackId: "track-1", title: "Song 1", artist: "Artist 1", playedMs: 1_300_000 },
+        ],
         checks: record.checks,
         note: record.note,
         needsFollowUp: record.needsFollowUp,
@@ -459,6 +465,9 @@ describe("API Server", () => {
     expect(db.addListenCheckRecord).toHaveBeenCalledWith(expect.objectContaining({
       durationMs: 1_200_000,
       playbackMs: 1_200_000,
+      playbackSegments: [
+        { trackId: "track-1", title: "Song 1", artist: "Artist 1", playedMs: 1_200_000 },
+      ],
       checks: { program: true, dj: true, context: true },
       note: "No repeated greetings.",
       needsFollowUp: false,
@@ -497,6 +506,9 @@ describe("API Server", () => {
       completedAt: 1_200_001,
       durationMs: 1_200_000,
       playbackMs: 1_200_000,
+      playbackSegments: [
+        { trackId: "track-1", title: "Song 1", artist: "Artist 1", playedMs: 1_200_000 },
+      ],
       checks: { program: true, dj: true, context: true },
       note: "Clean long listen.",
       needsFollowUp: false,

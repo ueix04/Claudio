@@ -63,6 +63,12 @@ export interface ListenCheckRecord {
   completedAt: number;
   durationMs: number;
   playbackMs?: number;
+  playbackSegments?: Array<{
+    trackId: string;
+    title: string;
+    artist: string;
+    playedMs: number;
+  }>;
   checks: {
     program: boolean;
     dj: boolean;

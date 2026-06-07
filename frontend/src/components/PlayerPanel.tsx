@@ -56,10 +56,17 @@ type PlayerDisplayMode = "playlist" | "clock";
 type SettingsPanel = "root" | "theme" | "display" | "audio";
 type WeatherBadge = { emoji: string; summary: string };
 type ListenCheckId = "program" | "dj" | "context";
+type ListenPlaybackSegment = {
+  trackId: string;
+  title: string;
+  artist: string;
+  playedMs: number;
+};
 type ListenCheckState = {
   startedAt: number | null;
   completedAt: number | null;
   playbackMs: number;
+  playbackSegments: ListenPlaybackSegment[];
   lastPlaybackTickAt: number | null;
   lastPlaybackTrackKey: string | null;
   lastPlaybackPositionSec: number | null;
@@ -84,6 +91,7 @@ const createEmptyListenCheck = (): ListenCheckState => ({
   startedAt: null,
   completedAt: null,
   playbackMs: 0,
+  playbackSegments: [],
   lastPlaybackTickAt: null,
   lastPlaybackTrackKey: null,
   lastPlaybackPositionSec: null,
@@ -112,6 +120,19 @@ const loadListenCheckState = (): ListenCheckState => {
       startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
       completedAt: typeof parsed.completedAt === "number" ? parsed.completedAt : null,
       playbackMs: typeof parsed.playbackMs === "number" && parsed.playbackMs > 0 ? parsed.playbackMs : 0,
+      playbackSegments: Array.isArray(parsed.playbackSegments)
+        ? parsed.playbackSegments.flatMap((segment) => {
+            const trackId = typeof segment.trackId === "string" ? segment.trackId.trim().slice(0, 160) : "";
+            const playedMs = Number(segment.playedMs);
+            if (!trackId || !Number.isFinite(playedMs) || playedMs <= 0) return [];
+            return [{
+              trackId,
+              title: typeof segment.title === "string" ? segment.title.trim().slice(0, 160) : "Unknown Title",
+              artist: typeof segment.artist === "string" ? segment.artist.trim().slice(0, 160) : "Unknown Artist",
+              playedMs: Math.round(playedMs),
+            }];
+          }).slice(0, 20)
+        : [],
       lastPlaybackTickAt: null,
       lastPlaybackTrackKey: null,
       lastPlaybackPositionSec: null,
@@ -159,6 +180,23 @@ const formatMonthDayLabel = (date: Date) =>
 
 const toPercent = (value: number, total: number) =>
   total <= 0 ? 0 : Math.round((value / total) * 100);
+
+const addListenPlaybackSegment = (
+  segments: ListenPlaybackSegment[],
+  segment: ListenPlaybackSegment,
+): ListenPlaybackSegment[] => {
+  if (segment.playedMs <= 0) return segments;
+  const existingIndex = segments.findIndex((item) => item.trackId === segment.trackId);
+  if (existingIndex === -1) {
+    return [...segments, segment].slice(-20);
+  }
+
+  return segments.map((item, index) => (
+    index === existingIndex
+      ? { ...item, playedMs: item.playedMs + segment.playedMs }
+      : item
+  ));
+};
 
 export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   playerState,
@@ -228,6 +266,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         ? Math.max(0, playerState.currentTime)
         : 0;
       const isPlaybackActive = playerState.isPlaying && Boolean(currentTrackKey);
+      const fallbackSegmentTrackId = [
+        playerState.currentTrack?.title,
+        playerState.currentTrack?.artist,
+      ].filter(Boolean).join("::");
+      const segmentTrackId = playerState.currentTrack?.id ?? (fallbackSegmentTrackId || null);
       const nowMs = Date.now();
       const sameTrack = isPlaybackActive && current.lastPlaybackTrackKey === currentTrackKey;
       const positionDeltaMs = sameTrack && current.lastPlaybackPositionSec !== null
@@ -249,10 +292,19 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       const nextPositionSec = isPlaybackActive || currentTrackKey
         ? currentPositionSec
         : current.lastPlaybackPositionSec;
+      const nextPlaybackSegments = playedDeltaMs > 0 && segmentTrackId
+        ? addListenPlaybackSegment(current.playbackSegments, {
+            trackId: segmentTrackId,
+            title: playerState.currentTrack?.title ?? "Unknown Title",
+            artist: playerState.currentTrack?.artist ?? "Unknown Artist",
+            playedMs: Math.round(playedDeltaMs),
+          })
+        : current.playbackSegments;
       const allChecksPassed = LISTEN_CHECK_ITEMS.every((item) => current.checks[item.id]);
       if (!allChecksPassed || nextPlaybackMs < LISTEN_CHECK_TARGET_MS) {
         if (
           nextPlaybackMs === current.playbackMs
+          && nextPlaybackSegments === current.playbackSegments
           && current.lastPlaybackTickAt === (isPlaybackActive ? nowMs : null)
           && current.lastPlaybackTrackKey === nextTrackKey
           && current.lastPlaybackPositionSec === nextPositionSec
@@ -262,6 +314,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         return {
           ...current,
           playbackMs: nextPlaybackMs,
+          playbackSegments: nextPlaybackSegments,
           lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
           lastPlaybackTrackKey: nextTrackKey,
           lastPlaybackPositionSec: nextPositionSec,
@@ -270,6 +323,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       return {
         ...current,
         playbackMs: nextPlaybackMs,
+        playbackSegments: nextPlaybackSegments,
         lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
         lastPlaybackTrackKey: nextTrackKey,
         lastPlaybackPositionSec: nextPositionSec,
@@ -299,6 +353,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             startedAt: listenCheck.startedAt,
             completedAt: listenCheck.completedAt,
             playbackMs: listenCheck.playbackMs,
+            playbackSegments: listenCheck.playbackSegments,
             checks: listenCheck.checks,
             note: listenCheck.note,
             needsFollowUp: listenCheck.needsFollowUp,
@@ -1386,9 +1441,17 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         {" · "}
                         {countRecordChecks(record)}/{LISTEN_CHECK_ITEMS.length} checks
                         {" · "}
+                        {record.playbackSegments?.length ?? 0} tracks
+                        {" · "}
                         {record.programAudit?.plannedMinutes ?? 0} min
                       </span>
-                      {record.programSnapshot?.tracks.length ? (
+                      {record.playbackSegments?.length ? (
+                        <span className="truncate text-xs text-[#71717a]">
+                          {record.playbackSegments.slice(0, 3).map((segment) =>
+                            `${segment.title} - ${segment.artist} ${formatPlaybackTime(Math.floor(segment.playedMs / 1000))}`,
+                          ).join(" / ")}
+                        </span>
+                      ) : record.programSnapshot?.tracks.length ? (
                         <span className="truncate text-xs text-[#71717a]">
                           {record.programSnapshot.tracks.slice(0, 3).map((track) => `${track.name} - ${track.artist}`).join(" / ")}
                         </span>

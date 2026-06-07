@@ -73,11 +73,24 @@ const getPlaybackMs = (record: ListenCheckRecord) =>
     ? record.playbackMs
     : record.durationMs;
 
+const getPlaybackSegmentMs = (record: ListenCheckRecord) =>
+  Array.isArray(record.playbackSegments)
+    ? record.playbackSegments.reduce((total, segment) => (
+        total + (Number.isFinite(segment.playedMs) && segment.playedMs > 0 ? segment.playedMs : 0)
+      ), 0)
+    : 0;
+
+const getPlaybackEvidenceMs = (record: ListenCheckRecord) => {
+  const playbackMs = getPlaybackMs(record);
+  const segmentMs = getPlaybackSegmentMs(record);
+  return segmentMs > 0 ? Math.min(playbackMs, segmentMs) : playbackMs;
+};
+
 const hasProgramContinuityEvidence = (record: ListenCheckRecord) =>
   record.programContinuity?.ok === true;
 
 const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAcceptanceCriterionId) =>
-  getPlaybackMs(record) >= TARGET_LISTEN_MS
+  getPlaybackEvidenceMs(record) >= TARGET_LISTEN_MS
     && record.checks[criterion] === true
     && record.needsFollowUp !== true
     && record.programAudit?.ok === true
@@ -85,7 +98,7 @@ const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAccep
     && hasProgramContinuityEvidence(record);
 
 const isReviewRecord = (record: ListenCheckRecord) =>
-  getPlaybackMs(record) >= TARGET_LISTEN_MS
+  getPlaybackEvidenceMs(record) >= TARGET_LISTEN_MS
     && (
       record.needsFollowUp === true
       || !record.programAudit
@@ -117,7 +130,7 @@ function describeBlocker(records: ListenCheckRecord[], latestReviewRecord?: List
   if (latestReviewRecord) return describeReviewRecord(latestReviewRecord);
   const latest = records[0];
   if (!latest) return "No saved 20-minute listen check yet.";
-  if (getPlaybackMs(latest) < TARGET_LISTEN_MS) return "Latest listen record has less than 20 minutes of actual playback.";
+  if (getPlaybackEvidenceMs(latest) < TARGET_LISTEN_MS) return "Latest listen record has less than 20 minutes of actual playback.";
   if (latest.needsFollowUp === true) return "Latest listen record is marked for follow-up.";
   if (!latest.programAudit) return "Latest listen record has no program audit snapshot.";
   if (latest.programAudit.ok !== true || getIssueCount(latest) !== 0) {
@@ -151,7 +164,7 @@ export function summarizeListenAcceptance(
             recordId: record.id,
             recordedAt: record.recordedAt,
             durationMs: record.durationMs,
-            playbackMs: getPlaybackMs(record),
+            playbackMs: getPlaybackEvidenceMs(record),
             note: record.note,
           }
         : undefined,
@@ -172,7 +185,7 @@ export function summarizeListenAcceptance(
           id: latest.id,
           recordedAt: latest.recordedAt,
           durationMs: latest.durationMs,
-          playbackMs: getPlaybackMs(latest),
+          playbackMs: getPlaybackEvidenceMs(latest),
           needsFollowUp: latest.needsFollowUp === true,
           issueCount: getIssueCount(latest),
           programContinuityOk: latest.programContinuity?.ok ?? null,
