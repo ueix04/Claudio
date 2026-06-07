@@ -1056,6 +1056,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       ? "text-[#4ade80]"
       : listenAcceptance?.status === "needs_review" ? "text-[#facc15]" : "claudio-theme-text-muted";
     const listenCheckLocked = Boolean(listenCheck.completedAt || listenCheck.savedRecordId);
+    const listenConfirmEnabled = Boolean(listenCheck.startedAt && listenReady && !listenCheckLocked);
     const listenProgramLocked = Boolean(listenCheck.programSessionId || listenCheck.programGeneratedAt);
     const hasListenDraft = Boolean(
       listenCheck.startedAt
@@ -1080,6 +1081,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       setListenCheck(createEmptyListenCheck());
     };
     const toggleListenCheck = (id: ListenCheckId) => {
+      if (!listenConfirmEnabled) return;
       setListenCheck((current) => ({
         ...current,
         completedAt: null,
@@ -1240,6 +1242,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                     key={item.id}
                     type="button"
                     onClick={() => toggleListenCheck(item.id)}
+                    disabled={!listenConfirmEnabled}
                     className={`insight-row text-left transition-colors ${
                       checked ? "border-[color:var(--claudio-accent)]" : ""
                     }`}
