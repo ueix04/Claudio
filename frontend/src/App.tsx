@@ -22,6 +22,8 @@ function AppLayout() {
     ttsAudioRef,
     isSyncingLibrary,
     lastSyncSummary,
+    localLibraryStatus,
+    isRescanningLocalLibrary,
     utilityNotice,
     statusText,
     isTriggerBusy,
@@ -44,6 +46,7 @@ function AppLayout() {
     setUserAvatarUrl,
     syncNeteaseLibrary,
     retryFailedLibrarySync,
+    rescanLocalLibrary,
     playSavedTrack,
     showUtilityNotice,
   } = useWebSocket();
@@ -74,6 +77,8 @@ function AppLayout() {
                   tasteProfile={tasteProfile}
                   isSyncingLibrary={isSyncingLibrary}
                   lastSyncSummary={lastSyncSummary}
+                  localLibraryStatus={localLibraryStatus}
+                  isRescanningLocalLibrary={isRescanningLocalLibrary}
                   utilityNotice={utilityNotice}
                   visualizerBars={visualizerBars}
                   onPlayPause={onPlayPause}
@@ -90,6 +95,7 @@ function AppLayout() {
                   onTrigger={sendTrigger}
                   onSyncLibrary={syncNeteaseLibrary}
                   onRetryFailedSync={retryFailedLibrarySync}
+                  onRescanLocalLibrary={rescanLocalLibrary}
                   isTriggerBusy={isTriggerBusy}
                   statusText={statusText}
                   status={status}

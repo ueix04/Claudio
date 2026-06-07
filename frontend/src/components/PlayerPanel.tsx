@@ -3,6 +3,7 @@ import { AUDIO_EFFECT_OPTIONS } from "../audio-effects";
 import {
   AppStatus,
   FavoriteTrackItem,
+  LocalLibraryStatus,
   PlayHistoryEntry,
   PlayerState,
   SyncSummary,
@@ -19,6 +20,8 @@ interface PlayerPanelProps {
   tasteProfile: TasteProfile | null;
   isSyncingLibrary: boolean;
   lastSyncSummary: SyncSummary | null;
+  localLibraryStatus: LocalLibraryStatus | null;
+  isRescanningLocalLibrary: boolean;
   utilityNotice: string | null;
   visualizerBars: number[];
   onPlayPause: () => void;
@@ -35,6 +38,7 @@ interface PlayerPanelProps {
   onTrigger: (mode: TriggerMode) => void;
   onSyncLibrary: () => void;
   onRetryFailedSync: () => void;
+  onRescanLocalLibrary: () => void;
   isTriggerBusy: boolean;
   statusText: string;
   status: AppStatus;
@@ -61,6 +65,9 @@ const formatTrackDuration = (duration?: number) => {
 const formatHistoryTime = (timestamp: number) =>
   new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
+const formatScanTime = (timestamp?: number) =>
+  timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "--";
+
 const formatDateLabel = (date: Date) =>
   date.toLocaleDateString("en-US", { weekday: "long" }).toUpperCase();
 
@@ -77,6 +84,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   tasteProfile,
   isSyncingLibrary,
   lastSyncSummary,
+  localLibraryStatus,
+  isRescanningLocalLibrary,
   utilityNotice,
   visualizerBars,
   onPlayPause,
@@ -93,6 +102,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   onTrigger,
   onSyncLibrary,
   onRetryFailedSync,
+  onRescanLocalLibrary,
   isTriggerBusy,
   statusText,
   status,
@@ -195,6 +205,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         ...playerState.playlist.slice(0, currentPlaylistIndex),
       ]
     : playerState.playlist;
+  const librarySignalText = localLibraryStatus?.enabled
+    ? localLibraryStatus.trackCount > 0
+      ? `${localLibraryStatus.trackCount} local tracks`
+      : "Local library empty"
+    : "Library standby";
 
   const updateVolumeFromClientX = useCallback((clientX: number) => {
     const track = volumeTrackRef.current;
@@ -561,7 +576,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         <div className="mb-6 flex w-full max-w-3xl items-center justify-between rounded-[20px] border claudio-theme-border bg-[color:var(--claudio-surface-strong)] px-5 py-4">
           <div>
             <div className="text-[10px] uppercase tracking-[0.22em] claudio-theme-text-muted">SIGNAL</div>
-            <div className="mt-2 text-sm claudio-theme-text-strong">Library standby</div>
+            <div className="mt-2 text-sm claudio-theme-text-strong">{librarySignalText}</div>
           </div>
           {renderVisualizer("wide")}
         </div>
@@ -834,9 +849,67 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const failedCount = lastSyncSummary?.failedPlaylists.length ?? 0;
     const languageMix = tasteProfile?.languageMix ?? { chinese: 0, latin: 0, mixed: 0, other: 0 };
     const totalTracks = tasteProfile?.totalTrackCount ?? 0;
+    const localStatusLabel = localLibraryStatus?.enabled
+      ? localLibraryStatus.trackCount > 0 ? "READY" : "EMPTY"
+      : "STANDBY";
 
     return (
       <div className="flex flex-col gap-6">
+        <section className="panel-card">
+          <div className="panel-card-head">
+            <span>LOCAL LIBRARY</span>
+            <span>{localStatusLabel}</span>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={onRescanLocalLibrary}
+              disabled={isRescanningLocalLibrary || !localLibraryStatus?.enabled}
+              className="sync-pill"
+            >
+              {isRescanningLocalLibrary ? "SCANNING..." : "RESCAN"}
+            </button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="stat-card">
+              <span className="stat-label">TRACKS</span>
+              <span className="stat-value">{localLibraryStatus?.trackCount ?? 0}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">DIRS</span>
+              <span className="stat-value">
+                {localLibraryStatus ? `${localLibraryStatus.availableDirectoryCount}/${localLibraryStatus.configuredDirectoryCount}` : "0/0"}
+              </span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">LIMIT</span>
+              <span className="stat-value">{localLibraryStatus?.maxFiles ?? 0}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">SCANNED</span>
+              <span className="stat-value">{formatScanTime(localLibraryStatus?.scannedAt)}</span>
+            </div>
+          </div>
+          {!localLibraryStatus?.enabled ? (
+            <div className="panel-empty mt-4">No local library detected</div>
+          ) : localLibraryStatus.sampleTracks.length === 0 ? (
+            <div className="panel-empty mt-4">No local tracks found</div>
+          ) : (
+            <div className="mt-4 grid md:grid-cols-2 gap-3">
+              {localLibraryStatus.sampleTracks.slice(0, 6).map((track) => (
+                <div key={track.sourceTrackId} className="insight-row">
+                  <div className="flex flex-col min-w-0">
+                    <span className="truncate text-sm claudio-theme-text-strong">{track.title}</span>
+                    <span className="truncate text-xs text-[#71717a]">
+                      {[track.artist, track.album].filter(Boolean).join(" · ")}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-[#4ade80]">LOCAL</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         <section className="panel-card">
           <div className="panel-card-head">
             <span>TASTE PROFILE</span>

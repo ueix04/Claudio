@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { PlayerState } from "../types";
+import type { LocalLibraryStatus, PlayerState } from "../types";
 import { ChatPanel } from "./ChatPanel";
 import { LayoutManager } from "./LayoutManager";
 import { PlayerPanel } from "./PlayerPanel";
@@ -33,6 +33,27 @@ const playerState: PlayerState = {
   isOnAir: true,
 };
 
+const localLibraryStatus: LocalLibraryStatus = {
+  source: "local_library",
+  enabled: true,
+  configuredDirectoryCount: 1,
+  availableDirectoryCount: 1,
+  trackCount: 2,
+  maxFiles: 2000,
+  scanCacheMs: 60000,
+  scannedAt: 123456789,
+  message: "Local library directories: 1/1; playable files: 2",
+  sampleTracks: [
+    {
+      source: "local_library",
+      sourceTrackId: "local_1",
+      title: "Local Song",
+      artist: "Local Artist",
+      album: "Local Album",
+    },
+  ],
+};
+
 describe("split panel harmony", () => {
   it("keeps the player progress rail inside the dock divider", () => {
     const markup = renderToStaticMarkup(
@@ -44,6 +65,8 @@ describe("split panel harmony", () => {
           tasteProfile={null}
           isSyncingLibrary={false}
           lastSyncSummary={null}
+          localLibraryStatus={localLibraryStatus}
+          isRescanningLocalLibrary={false}
           utilityNotice={null}
           visualizerBars={Array.from({ length: 12 }, () => 0.2)}
           onPlayPause={() => {}}
@@ -60,6 +83,7 @@ describe("split panel harmony", () => {
           onTrigger={() => {}}
           onSyncLibrary={() => {}}
           onRetryFailedSync={() => {}}
+          onRescanLocalLibrary={() => {}}
           isTriggerBusy={false}
           statusText="Now playing"
           status="playing"
@@ -72,6 +96,51 @@ describe("split panel harmony", () => {
     expect(markup).toContain("claudio-bottom-bar");
     expect(markup.indexOf("player-dock-progress")).toBeLessThan(markup.indexOf("player-dock-grid"));
     expect(markup).toMatch(/1:05<\/span><span class="flex-shrink-0">\/<\/span><span class="flex-shrink-0">3:20/);
+  });
+
+  it("shows local library readiness in the empty player state", () => {
+    const markup = renderToStaticMarkup(
+      <LayoutManager>
+        <PlayerPanel
+          playerState={{
+            ...playerState,
+            currentTrack: null,
+            playlist: [],
+            queueCount: 0,
+            isPlaying: false,
+          }}
+          favoriteTracks={[]}
+          playHistory={[]}
+          tasteProfile={null}
+          isSyncingLibrary={false}
+          lastSyncSummary={null}
+          localLibraryStatus={localLibraryStatus}
+          isRescanningLocalLibrary={false}
+          utilityNotice={null}
+          visualizerBars={Array.from({ length: 12 }, () => 0.2)}
+          onPlayPause={() => {}}
+          onNext={() => {}}
+          onPrevious={() => {}}
+          onSeek={() => {}}
+          onVolumeChange={() => {}}
+          onToggleFavorite={() => {}}
+          onSelectTrack={() => {}}
+          onPlaySavedTrack={() => {}}
+          onUserAvatarUpload={async () => {}}
+          onFullscreenToggle={() => {}}
+          isFullscreen={false}
+          onTrigger={() => {}}
+          onSyncLibrary={() => {}}
+          onRetryFailedSync={() => {}}
+          onRescanLocalLibrary={() => {}}
+          isTriggerBusy={false}
+          statusText="Now playing"
+          status="playing"
+        />
+      </LayoutManager>,
+    );
+
+    expect(markup).toContain("2 local tracks");
   });
 
   it("uses the same bottom bar skin in the chat panel", () => {

@@ -192,3 +192,25 @@ export type FavoriteTrackItem = {
   url?: string;
   isResolved: boolean;
 };
+
+export type LocalLibrarySampleTrack = {
+  source: "local_library";
+  sourceTrackId: string;
+  title: string;
+  artist: string;
+  album?: string;
+  duration?: number;
+};
+
+export type LocalLibraryStatus = {
+  source: "local_library";
+  enabled: boolean;
+  configuredDirectoryCount: number;
+  availableDirectoryCount: number;
+  trackCount: number;
+  maxFiles: number;
+  scanCacheMs: number;
+  scannedAt?: number;
+  sampleTracks: LocalLibrarySampleTrack[];
+  message: string;
+};

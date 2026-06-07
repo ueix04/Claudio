@@ -4,6 +4,7 @@ import type {
   ChatEntry,
   DjProfile,
   DJMessage,
+  LocalLibraryStatus,
   PlayHistoryEntry,
   SyncSummary,
   TasteProfile,
@@ -56,6 +57,8 @@ export function useWebSocket() {
   const [isSyncingLibrary, setIsSyncingLibrary] = useState(false);
   const [isUpdatingVoicePreset, setIsUpdatingVoicePreset] = useState(false);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
+  const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
+  const [isRescanningLocalLibrary, setIsRescanningLocalLibrary] = useState(false);
   const [utilityNotice, setUtilityNotice] = useState<string | null>(null);
   const [djProfile, setDjProfile] = useState<DjProfile | null>(null);
   const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(() => {
@@ -609,11 +612,12 @@ export function useWebSocket() {
 
   const refreshLibraryData = useCallback(async () => {
     try {
-      const [favoritesRes, historyRes, tasteRes, djTasteRes] = await Promise.all([
+      const [favoritesRes, historyRes, tasteRes, djTasteRes, localLibraryRes] = await Promise.all([
         fetch("/api/favorites"),
         fetch("/api/history"),
         fetch("/api/taste-profile"),
         fetch("/api/taste"),
+        fetch("/api/music-sources/local-library"),
       ]);
 
       if (favoritesRes.ok) {
@@ -631,6 +635,10 @@ export function useWebSocket() {
       if (djTasteRes.ok) {
         const profile = await djTasteRes.json() as DjProfile;
         setDjProfile(profile);
+      }
+      if (localLibraryRes.ok) {
+        const status = await localLibraryRes.json() as LocalLibraryStatus;
+        setLocalLibraryStatus(status);
       }
     } catch {
       // keep best-effort behavior
@@ -702,6 +710,27 @@ export function useWebSocket() {
       setIsSyncingLibrary(false);
     }
   }, [refreshLibraryData, showUtilityNotice]);
+
+  const rescanLocalLibrary = useCallback(async () => {
+    setIsRescanningLocalLibrary(true);
+    try {
+      const res = await fetch("/api/music-sources/local-library/rescan", { method: "POST" });
+      if (!res.ok) {
+        throw new Error(`Local rescan failed: ${res.status}`);
+      }
+      const status = await res.json() as LocalLibraryStatus;
+      setLocalLibraryStatus(status);
+      showUtilityNotice(
+        status.enabled
+          ? `Local library: ${status.trackCount} tracks`
+          : "Local library disabled",
+      );
+    } catch (error) {
+      showUtilityNotice(error instanceof Error ? error.message : "Local rescan failed");
+    } finally {
+      setIsRescanningLocalLibrary(false);
+    }
+  }, [showUtilityNotice]);
 
   useEffect(() => {
     playerStateRef.current = playerState;
@@ -1296,7 +1325,7 @@ export function useWebSocket() {
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, utilityNotice,
+    isSyncingLibrary, lastSyncSummary, localLibraryStatus, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
     onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,
@@ -1312,6 +1341,6 @@ export function useWebSocket() {
       window.localStorage.setItem(USER_AVATAR_STORAGE_KEY, dataUrl);
       setUserAvatarUrl(dataUrl);
     },
-    fetchPlaylists, syncNeteaseLibrary, retryFailedLibrarySync, showUtilityNotice, playSavedTrack,
+    fetchPlaylists, syncNeteaseLibrary, retryFailedLibrarySync, rescanLocalLibrary, showUtilityNotice, playSavedTrack,
   };
 }
