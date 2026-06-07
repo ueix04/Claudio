@@ -321,7 +321,10 @@ export type ListenAcceptanceSummary = {
     recordedAt: number;
     durationMs: number;
     playbackMs: number;
+    missingPlaybackMs: number;
+    checkCount: number;
     needsFollowUp: boolean;
+    programAuditOk: boolean | null;
     issueCount: number | null;
     programContinuityOk: boolean | null;
   };

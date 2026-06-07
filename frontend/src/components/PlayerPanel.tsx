@@ -1229,6 +1229,39 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       if (!record.programContinuity) return "no session";
       return `${record.programAudit?.issueCount ?? 0} issues`;
     };
+    const latestAcceptanceRecord = listenAcceptance?.latestRecord;
+    const acceptanceTargetMs = (listenAcceptance?.targetMinutes ?? 20) * 60_000;
+    const latestAcceptancePlaybackMs = latestAcceptanceRecord?.playbackMs ?? 0;
+    const latestAcceptanceMissingMs = latestAcceptanceRecord
+      ? Math.max(
+          0,
+          typeof latestAcceptanceRecord.missingPlaybackMs === "number"
+            ? latestAcceptanceRecord.missingPlaybackMs
+            : acceptanceTargetMs - latestAcceptancePlaybackMs,
+        )
+      : 0;
+    const latestAcceptanceCheckCount = latestAcceptanceRecord?.checkCount ?? 0;
+    const latestAcceptanceAuditLabel = latestAcceptanceRecord
+      ? latestAcceptanceRecord.programAuditOk === true && latestAcceptanceRecord.issueCount === 0
+        ? "OK"
+        : latestAcceptanceRecord.issueCount === null ? "--" : String(latestAcceptanceRecord.issueCount)
+      : "--";
+    const latestAcceptanceAuditClass = latestAcceptanceRecord
+      ? latestAcceptanceRecord.programAuditOk === true && latestAcceptanceRecord.issueCount === 0
+        ? "text-[#4ade80]"
+        : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const latestAcceptanceSessionLabel = latestAcceptanceRecord
+      ? latestAcceptanceRecord.programContinuityOk === true
+        ? "OK"
+        : latestAcceptanceRecord.programContinuityOk === false ? "CHANGE" : "--"
+      : "--";
+    const latestAcceptanceSessionClass = latestAcceptanceRecord
+      ? latestAcceptanceRecord.programContinuityOk === true ? "text-[#4ade80]" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const latestAcceptanceFollowUpClass = latestAcceptanceRecord?.needsFollowUp
+      ? "text-[#facc15]"
+      : latestAcceptanceRecord ? "text-[#4ade80]" : "claudio-theme-text-muted";
 
     return (
       <div className="flex flex-col gap-6">
@@ -1393,6 +1426,50 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 <span>ACCEPTANCE</span>
                 <span className={listenAcceptanceStatusClass}>{listenAcceptanceLabel}</span>
               </div>
+              {listenAcceptance && (
+                <div className="mt-3">
+                  {latestAcceptanceRecord ? (
+                    <div className="grid grid-cols-2 xl:grid-cols-6 gap-3">
+                      <div className="stat-card">
+                        <span className="stat-label">LATEST</span>
+                        <span className="stat-value">
+                          {formatPlaybackTime(Math.floor(latestAcceptancePlaybackMs / 1000))}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">MISSING</span>
+                        <span className={`stat-value ${latestAcceptanceMissingMs === 0 ? "text-[#4ade80]" : "text-[#facc15]"}`}>
+                          {formatPlaybackTime(Math.floor(latestAcceptanceMissingMs / 1000))}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">CHECKS</span>
+                        <span className={`stat-value ${
+                          latestAcceptanceCheckCount === LISTEN_CHECK_ITEMS.length ? "text-[#4ade80]" : "text-[#facc15]"
+                        }`}>
+                          {latestAcceptanceCheckCount}/{LISTEN_CHECK_ITEMS.length}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">AUDIT</span>
+                        <span className={`stat-value ${latestAcceptanceAuditClass}`}>{latestAcceptanceAuditLabel}</span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">SESSION</span>
+                        <span className={`stat-value ${latestAcceptanceSessionClass}`}>{latestAcceptanceSessionLabel}</span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">FOLLOW</span>
+                        <span className={`stat-value ${latestAcceptanceFollowUpClass}`}>
+                          {latestAcceptanceRecord.needsFollowUp ? "YES" : "NO"}
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="panel-empty">No saved listen evidence yet</div>
+                  )}
+                </div>
+              )}
               {!listenAcceptance ? (
                 <div className="panel-empty">No acceptance summary yet</div>
               ) : (

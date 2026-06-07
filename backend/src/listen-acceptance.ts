@@ -29,7 +29,10 @@ export interface ListenAcceptanceSummary {
     recordedAt: number;
     durationMs: number;
     playbackMs: number;
+    missingPlaybackMs: number;
+    checkCount: number;
     needsFollowUp: boolean;
+    programAuditOk: boolean | null;
     issueCount: number | null;
     programContinuityOk: boolean | null;
   };
@@ -88,6 +91,9 @@ const getPlaybackEvidenceMs = (record: ListenCheckRecord) => {
 
 const hasProgramContinuityEvidence = (record: ListenCheckRecord) =>
   record.programContinuity?.ok === true;
+
+const countSubjectiveChecks = (record: ListenCheckRecord) =>
+  CRITERIA.reduce((total, criterion) => total + (record.checks[criterion.id] ? 1 : 0), 0);
 
 const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAcceptanceCriterionId) =>
   getPlaybackEvidenceMs(record) >= TARGET_LISTEN_MS
@@ -174,6 +180,7 @@ export function summarizeListenAcceptance(
   });
   const ready = criteria.every((criterion) => criterion.passed);
   const latest = records[0];
+  const latestPlaybackMs = latest ? getPlaybackEvidenceMs(latest) : 0;
 
   return {
     ready,
@@ -185,8 +192,11 @@ export function summarizeListenAcceptance(
           id: latest.id,
           recordedAt: latest.recordedAt,
           durationMs: latest.durationMs,
-          playbackMs: getPlaybackEvidenceMs(latest),
+          playbackMs: latestPlaybackMs,
+          missingPlaybackMs: Math.max(0, TARGET_LISTEN_MS - latestPlaybackMs),
+          checkCount: countSubjectiveChecks(latest),
           needsFollowUp: latest.needsFollowUp === true,
+          programAuditOk: latest.programAudit?.ok ?? null,
           issueCount: getIssueCount(latest),
           programContinuityOk: latest.programContinuity?.ok ?? null,
         }

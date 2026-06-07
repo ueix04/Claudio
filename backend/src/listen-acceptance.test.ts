@@ -57,6 +57,14 @@ describe("listen acceptance summary", () => {
       playbackMs: 1_200_000,
       note: "Felt cohesive.",
     });
+    expect(summary.latestRecord).toMatchObject({
+      playbackMs: 1_200_000,
+      missingPlaybackMs: 0,
+      checkCount: 3,
+      programAuditOk: true,
+      issueCount: 0,
+      programContinuityOk: true,
+    });
   });
 
   it("keeps acceptance in review when the latest listen needs follow-up", () => {
@@ -139,6 +147,7 @@ describe("listen acceptance summary", () => {
     expect(summary.ready).toBe(false);
     expect(summary.latestRecord?.durationMs).toBe(1_500_000);
     expect(summary.latestRecord?.playbackMs).toBe(600_000);
+    expect(summary.latestRecord?.missingPlaybackMs).toBe(600_000);
     expect(summary.criteria[0].detail).toContain("actual playback");
   });
 
