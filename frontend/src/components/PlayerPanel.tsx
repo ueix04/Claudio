@@ -3,6 +3,7 @@ import { AUDIO_EFFECT_OPTIONS } from "../audio-effects";
 import {
   AppStatus,
   FavoriteTrackItem,
+  ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
   PlayHistoryEntry,
@@ -25,6 +26,7 @@ interface PlayerPanelProps {
   localLibraryStatus: LocalLibraryStatus | null;
   programAudit: ProgramExperienceAudit | null;
   listenCheckRecords: ListenCheckRecord[];
+  listenAcceptance: ListenAcceptanceSummary | null;
   isRescanningLocalLibrary: boolean;
   utilityNotice: string | null;
   visualizerBars: number[];
@@ -147,6 +149,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   localLibraryStatus,
   programAudit,
   listenCheckRecords,
+  listenAcceptance,
   isRescanningLocalLibrary,
   utilityNotice,
   visualizerBars,
@@ -1015,6 +1018,12 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const listenCheckStatusClass = listenComplete
       ? "text-[#4ade80]"
       : listenCheck.startedAt ? "claudio-theme-accent" : "claudio-theme-text-muted";
+    const listenAcceptanceLabel = listenAcceptance
+      ? listenAcceptance.ready ? "READY" : listenAcceptance.status === "needs_review" ? "REVIEW" : "WAITING"
+      : "WAITING";
+    const listenAcceptanceStatusClass = listenAcceptance?.ready
+      ? "text-[#4ade80]"
+      : listenAcceptance?.status === "needs_review" ? "text-[#facc15]" : "claudio-theme-text-muted";
     const listenCheckLocked = Boolean(listenCheck.completedAt || listenCheck.savedRecordId);
     const hasListenDraft = Boolean(
       listenCheck.startedAt
@@ -1204,6 +1213,29 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 className="claudio-input min-h-[82px] resize-none px-4 py-3 text-sm leading-relaxed"
                 placeholder="Notes after the 20-minute listen"
               />
+            </div>
+            <div className="mt-5 flex flex-col gap-3">
+              <div className="panel-card-head mb-0">
+                <span>ACCEPTANCE</span>
+                <span className={listenAcceptanceStatusClass}>{listenAcceptanceLabel}</span>
+              </div>
+              {!listenAcceptance ? (
+                <div className="panel-empty">No acceptance summary yet</div>
+              ) : (
+                listenAcceptance.criteria.map((criterion) => (
+                  <div key={criterion.id} className="insight-row items-start">
+                    <div className="flex flex-col min-w-0 gap-1">
+                      <span className="truncate text-sm claudio-theme-text-strong">{criterion.label}</span>
+                      <span className="text-xs text-[#71717a] leading-relaxed break-words">{criterion.detail}</span>
+                    </div>
+                    <span className={`text-[10px] uppercase ${
+                      criterion.passed ? "text-[#4ade80]" : "claudio-theme-text-muted"
+                    }`}>
+                      {criterion.passed ? "PASS" : "OPEN"}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
             <div className="mt-5 flex flex-col gap-3">
               <div className="panel-card-head mb-0">

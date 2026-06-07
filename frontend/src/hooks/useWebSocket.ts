@@ -4,6 +4,7 @@ import type {
   ChatEntry,
   DjProfile,
   DJMessage,
+  ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
   PlayHistoryEntry,
@@ -62,6 +63,7 @@ export function useWebSocket() {
   const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
   const [programAudit, setProgramAudit] = useState<ProgramExperienceAudit | null>(null);
   const [listenCheckRecords, setListenCheckRecords] = useState<ListenCheckRecord[]>([]);
+  const [listenAcceptance, setListenAcceptance] = useState<ListenAcceptanceSummary | null>(null);
   const [isRescanningLocalLibrary, setIsRescanningLocalLibrary] = useState(false);
   const [utilityNotice, setUtilityNotice] = useState<string | null>(null);
   const [djProfile, setDjProfile] = useState<DjProfile | null>(null);
@@ -616,7 +618,16 @@ export function useWebSocket() {
 
   const refreshLibraryData = useCallback(async () => {
     try {
-      const [favoritesRes, historyRes, tasteRes, djTasteRes, localLibraryRes, programAuditRes, listenChecksRes] = await Promise.all([
+      const [
+        favoritesRes,
+        historyRes,
+        tasteRes,
+        djTasteRes,
+        localLibraryRes,
+        programAuditRes,
+        listenChecksRes,
+        listenAcceptanceRes,
+      ] = await Promise.all([
         fetch("/api/favorites"),
         fetch("/api/history"),
         fetch("/api/taste-profile"),
@@ -624,6 +635,7 @@ export function useWebSocket() {
         fetch("/api/music-sources/local-library"),
         fetch("/api/radio/program-audit"),
         fetch("/api/radio/listen-checks?limit=3"),
+        fetch("/api/radio/listen-acceptance"),
       ]);
 
       if (favoritesRes.ok) {
@@ -653,6 +665,10 @@ export function useWebSocket() {
       if (listenChecksRes.ok) {
         const records = await listenChecksRes.json() as ListenCheckRecord[];
         setListenCheckRecords(records);
+      }
+      if (listenAcceptanceRes.ok) {
+        const summary = await listenAcceptanceRes.json() as ListenAcceptanceSummary;
+        setListenAcceptance(summary);
       }
     } catch {
       // keep best-effort behavior
@@ -1351,7 +1367,7 @@ export function useWebSocket() {
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, localLibraryStatus, programAudit, listenCheckRecords, isRescanningLocalLibrary, utilityNotice,
+    isSyncingLibrary, lastSyncSummary, localLibraryStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
     onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,

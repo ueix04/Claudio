@@ -12,6 +12,7 @@ import * as djLanguage from "./dj-language.js";
 import * as musicSources from "./music-sources/index.js";
 import * as netease from "./netease.js";
 import { auditProgramExperience } from "./program-audit.js";
+import { summarizeListenAcceptance } from "./listen-acceptance.js";
 import * as radioSession from "./radio-session.js";
 import * as radioStyle from "./radio-style.js";
 import * as tasteProfile from "./taste-profile.js";
@@ -541,6 +542,11 @@ app.get("/api/radio/listen-checks", async (req, res) => {
     ? Math.min(Math.round(parsedLimit), 20)
     : 10;
   res.json(await db.getListenCheckRecords(limit));
+});
+
+app.get("/api/radio/listen-acceptance", async (_req, res) => {
+  const records = await db.getListenCheckRecords(20);
+  res.json(summarizeListenAcceptance(records));
 });
 
 app.post("/api/radio/listen-checks", async (req, res) => {

@@ -402,6 +402,36 @@ describe("API Server", () => {
     expect(await getRes.json()).toHaveLength(1);
     expect(db.getListenCheckRecords).toHaveBeenCalledWith(5);
   });
+
+  it("GET /api/radio/listen-acceptance 汇总最终实听验收证据", async () => {
+    const db = await import("./db.js");
+    vi.mocked(db.getListenCheckRecords).mockResolvedValue([{
+      id: "listen_ready",
+      startedAt: 1,
+      completedAt: 1_200_001,
+      durationMs: 1_200_000,
+      checks: { program: true, dj: true, context: true },
+      note: "Clean long listen.",
+      needsFollowUp: false,
+      programAudit: {
+        ok: true,
+        plannedMinutes: 24,
+        trackCount: 6,
+        speechSlotCount: 3,
+        issueCount: 0,
+      },
+      recordedAt: 1_200_002,
+    }]);
+
+    const res = await fetch(`http://localhost:${port}/api/radio/listen-acceptance`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ready).toBe(true);
+    expect(body.criteria).toHaveLength(3);
+    expect(body.criteria.every((criterion: { passed: boolean }) => criterion.passed)).toBe(true);
+    expect(db.getListenCheckRecords).toHaveBeenCalledWith(20);
+  });
 });
 
 describe("WebSocket Server", () => {

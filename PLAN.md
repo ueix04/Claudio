@@ -208,6 +208,7 @@ Claudio 目前更像“AI 推荐歌曲 + 普通播放器”，还不够像一个
 - [x] 新增长时实听记录后端存档：`GET /api/radio/listen-checks`、`POST /api/radio/listen-checks`，完成 `LISTEN CHECK` 后会保存计时、三项确认和节目审计摘要。
 - [x] 前端 `LISTEN CHECK` 下方新增最近实听记录展示，保存成功后可以直接看到历史实听时长、确认项数量、节目分钟数和审计问题数。
 - [x] 长时实听记录新增备注和 follow-up 标记，听完 20 分钟后可以保存主观问题线索，而不是只留下勾选结果。
+- [x] 新增长时实听验收汇总：`GET /api/radio/listen-acceptance` 会把最近实听记录映射到 3 条最终验收标准，前端 `ACCEPTANCE` 区块直接显示证据是否就绪。
 
 风险记录：
 

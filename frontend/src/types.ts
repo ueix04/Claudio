@@ -256,3 +256,28 @@ export type ListenCheckRecord = {
   };
   recordedAt: number;
 };
+
+export type ListenAcceptanceCriterion = {
+  id: "program" | "dj" | "context";
+  label: string;
+  passed: boolean;
+  detail: string;
+  recordId?: string;
+  recordedAt?: number;
+};
+
+export type ListenAcceptanceSummary = {
+  ready: boolean;
+  status: "waiting" | "needs_review" | "ready";
+  targetMinutes: number;
+  totalRecords: number;
+  latestRecord?: {
+    id: string;
+    recordedAt: number;
+    durationMs: number;
+    needsFollowUp: boolean;
+    issueCount: number | null;
+  };
+  criteria: ListenAcceptanceCriterion[];
+  generatedAt: number;
+};

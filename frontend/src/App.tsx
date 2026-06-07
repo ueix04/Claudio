@@ -25,6 +25,7 @@ function AppLayout() {
     localLibraryStatus,
     programAudit,
     listenCheckRecords,
+    listenAcceptance,
     isRescanningLocalLibrary,
     utilityNotice,
     statusText,
@@ -83,6 +84,7 @@ function AppLayout() {
                   localLibraryStatus={localLibraryStatus}
                   programAudit={programAudit}
                   listenCheckRecords={listenCheckRecords}
+                  listenAcceptance={listenAcceptance}
                   isRescanningLocalLibrary={isRescanningLocalLibrary}
                   utilityNotice={utilityNotice}
                   visualizerBars={visualizerBars}
