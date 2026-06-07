@@ -207,6 +207,7 @@ describe("db.ts", () => {
       startedAt: 1_700_000_000_000,
       completedAt: 1_700_001_200_000,
       durationMs: 1_200_000,
+      playbackMs: 1_200_000,
       checks: {
         program: true,
         dj: true,
@@ -248,6 +249,7 @@ describe("db.ts", () => {
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
       durationMs: 1_200_000,
+      playbackMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
       note: "20 minutes felt cohesive.",
       needsFollowUp: false,

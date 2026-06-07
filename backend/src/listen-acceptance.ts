@@ -12,6 +12,7 @@ export interface ListenAcceptanceCriterion {
     recordId: string;
     recordedAt: number;
     durationMs: number;
+    playbackMs: number;
     note?: string;
   };
   recordId?: string;
@@ -27,6 +28,7 @@ export interface ListenAcceptanceSummary {
     id: string;
     recordedAt: number;
     durationMs: number;
+    playbackMs: number;
     needsFollowUp: boolean;
     issueCount: number | null;
     programContinuityOk: boolean | null;
@@ -66,11 +68,16 @@ const CRITERIA: Array<{
 const getIssueCount = (record: ListenCheckRecord) =>
   typeof record.programAudit?.issueCount === "number" ? record.programAudit.issueCount : null;
 
+const getPlaybackMs = (record: ListenCheckRecord) =>
+  typeof record.playbackMs === "number" && Number.isFinite(record.playbackMs)
+    ? record.playbackMs
+    : record.durationMs;
+
 const hasProgramContinuityEvidence = (record: ListenCheckRecord) =>
   record.programContinuity?.ok === true;
 
 const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAcceptanceCriterionId) =>
-  record.durationMs >= TARGET_LISTEN_MS
+  getPlaybackMs(record) >= TARGET_LISTEN_MS
     && record.checks[criterion] === true
     && record.needsFollowUp !== true
     && record.programAudit?.ok === true
@@ -78,7 +85,7 @@ const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAccep
     && hasProgramContinuityEvidence(record);
 
 const isReviewRecord = (record: ListenCheckRecord) =>
-  record.durationMs >= TARGET_LISTEN_MS
+  getPlaybackMs(record) >= TARGET_LISTEN_MS
     && (
       record.needsFollowUp === true
       || !record.programAudit
@@ -110,7 +117,7 @@ function describeBlocker(records: ListenCheckRecord[], latestReviewRecord?: List
   if (latestReviewRecord) return describeReviewRecord(latestReviewRecord);
   const latest = records[0];
   if (!latest) return "No saved 20-minute listen check yet.";
-  if (latest.durationMs < TARGET_LISTEN_MS) return "Latest listen record is shorter than 20 minutes.";
+  if (getPlaybackMs(latest) < TARGET_LISTEN_MS) return "Latest listen record has less than 20 minutes of actual playback.";
   if (latest.needsFollowUp === true) return "Latest listen record is marked for follow-up.";
   if (!latest.programAudit) return "Latest listen record has no program audit snapshot.";
   if (latest.programAudit.ok !== true || getIssueCount(latest) !== 0) {
@@ -144,6 +151,7 @@ export function summarizeListenAcceptance(
             recordId: record.id,
             recordedAt: record.recordedAt,
             durationMs: record.durationMs,
+            playbackMs: getPlaybackMs(record),
             note: record.note,
           }
         : undefined,
@@ -164,6 +172,7 @@ export function summarizeListenAcceptance(
           id: latest.id,
           recordedAt: latest.recordedAt,
           durationMs: latest.durationMs,
+          playbackMs: getPlaybackMs(latest),
           needsFollowUp: latest.needsFollowUp === true,
           issueCount: getIssueCount(latest),
           programContinuityOk: latest.programContinuity?.ok ?? null,

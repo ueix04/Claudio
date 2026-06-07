@@ -7,6 +7,7 @@ const makeRecord = (patch: Partial<ListenCheckRecord> = {}): ListenCheckRecord =
   startedAt: 1,
   completedAt: 1_200_001,
   durationMs: 1_200_000,
+  playbackMs: 1_200_000,
   checks: { program: true, dj: true, context: true },
   note: "Felt cohesive.",
   needsFollowUp: false,
@@ -50,6 +51,7 @@ describe("listen acceptance summary", () => {
     expect(summary.criteria[0].evidence).toMatchObject({
       recordId: "listen_ok",
       durationMs: 1_200_000,
+      playbackMs: 1_200_000,
       note: "Felt cohesive.",
     });
   });
@@ -121,5 +123,19 @@ describe("listen acceptance summary", () => {
     expect(changedProgram.ready).toBe(false);
     expect(changedProgram.latestRecord?.programContinuityOk).toBe(false);
     expect(changedProgram.criteria.every((criterion) => !criterion.passed)).toBe(true);
+  });
+
+  it("uses actual playback time instead of wall-clock duration", () => {
+    const summary = summarizeListenAcceptance([
+      makeRecord({
+        durationMs: 1_500_000,
+        playbackMs: 600_000,
+      }),
+    ]);
+
+    expect(summary.ready).toBe(false);
+    expect(summary.latestRecord?.durationMs).toBe(1_500_000);
+    expect(summary.latestRecord?.playbackMs).toBe(600_000);
+    expect(summary.criteria[0].detail).toContain("actual playback");
   });
 });

@@ -247,6 +247,7 @@ export type ListenCheckRecord = {
   startedAt: number;
   completedAt: number;
   durationMs: number;
+  playbackMs?: number;
   checks: {
     program: boolean;
     dj: boolean;
@@ -297,6 +298,7 @@ export type ListenAcceptanceCriterion = {
     recordId: string;
     recordedAt: number;
     durationMs: number;
+    playbackMs: number;
     note?: string;
   };
   recordId?: string;
@@ -312,6 +314,7 @@ export type ListenAcceptanceSummary = {
     id: string;
     recordedAt: number;
     durationMs: number;
+    playbackMs: number;
     needsFollowUp: boolean;
     issueCount: number | null;
     programContinuityOk: boolean | null;

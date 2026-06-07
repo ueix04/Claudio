@@ -62,6 +62,7 @@ export interface ListenCheckRecord {
   startedAt: number;
   completedAt: number;
   durationMs: number;
+  playbackMs?: number;
   checks: {
     program: boolean;
     dj: boolean;

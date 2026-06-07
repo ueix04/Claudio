@@ -396,6 +396,7 @@ describe("API Server", () => {
       startedAt: 1,
       completedAt: 1_200_001,
       durationMs: 1_200_000,
+      playbackMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
       note: "No repeated greetings.",
       needsFollowUp: false,
@@ -435,6 +436,7 @@ describe("API Server", () => {
       body: JSON.stringify({
         startedAt: record.startedAt,
         completedAt: record.completedAt,
+        playbackMs: record.playbackMs,
         checks: record.checks,
         note: record.note,
         needsFollowUp: record.needsFollowUp,
@@ -456,6 +458,7 @@ describe("API Server", () => {
     expect(await postRes.json()).toMatchObject({ id: "listen_test" });
     expect(db.addListenCheckRecord).toHaveBeenCalledWith(expect.objectContaining({
       durationMs: 1_200_000,
+      playbackMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
       note: "No repeated greetings.",
       needsFollowUp: false,
@@ -493,6 +496,7 @@ describe("API Server", () => {
       startedAt: 1,
       completedAt: 1_200_001,
       durationMs: 1_200_000,
+      playbackMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
       note: "Clean long listen.",
       needsFollowUp: false,

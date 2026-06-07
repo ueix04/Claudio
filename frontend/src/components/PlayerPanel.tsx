@@ -59,6 +59,8 @@ type ListenCheckId = "program" | "dj" | "context";
 type ListenCheckState = {
   startedAt: number | null;
   completedAt: number | null;
+  playbackMs: number;
+  lastPlaybackTickAt: number | null;
   savedRecordId: string | null;
   programSessionId: string | null;
   programGeneratedAt: number | null;
@@ -79,6 +81,8 @@ const LISTEN_CHECK_ITEMS: Array<{ id: ListenCheckId; label: string }> = [
 const createEmptyListenCheck = (): ListenCheckState => ({
   startedAt: null,
   completedAt: null,
+  playbackMs: 0,
+  lastPlaybackTickAt: null,
   savedRecordId: null,
   programSessionId: null,
   programGeneratedAt: null,
@@ -103,6 +107,8 @@ const loadListenCheckState = (): ListenCheckState => {
     return {
       startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
       completedAt: typeof parsed.completedAt === "number" ? parsed.completedAt : null,
+      playbackMs: typeof parsed.playbackMs === "number" && parsed.playbackMs > 0 ? parsed.playbackMs : 0,
+      lastPlaybackTickAt: null,
       savedRecordId: typeof parsed.savedRecordId === "string" ? parsed.savedRecordId : null,
       programSessionId: typeof parsed.programSessionId === "string" ? parsed.programSessionId : null,
       programGeneratedAt: typeof parsed.programGeneratedAt === "number" ? parsed.programGeneratedAt : null,
@@ -211,14 +217,33 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   useEffect(() => {
     setListenCheck((current) => {
       if (!current.startedAt || current.completedAt) return current;
+      const isPlaybackActive = playerState.isPlaying && Boolean(playerState.currentTrack);
+      const nowMs = now.getTime();
+      const nextPlaybackMs = isPlaybackActive
+        ? Math.min(
+            LISTEN_CHECK_TARGET_MS,
+            current.playbackMs + Math.max(0, nowMs - (current.lastPlaybackTickAt ?? nowMs)),
+          )
+        : current.playbackMs;
       const allChecksPassed = LISTEN_CHECK_ITEMS.every((item) => current.checks[item.id]);
-      if (!allChecksPassed || now.getTime() - current.startedAt < LISTEN_CHECK_TARGET_MS) return current;
+      if (!allChecksPassed || nextPlaybackMs < LISTEN_CHECK_TARGET_MS) {
+        if (nextPlaybackMs === current.playbackMs && current.lastPlaybackTickAt === (isPlaybackActive ? nowMs : null)) {
+          return current;
+        }
+        return {
+          ...current,
+          playbackMs: nextPlaybackMs,
+          lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
+        };
+      }
       return {
         ...current,
-        completedAt: Date.now(),
+        playbackMs: nextPlaybackMs,
+        lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
+        completedAt: nowMs,
       };
     });
-  }, [now]);
+  }, [now, playerState.currentTrack?.id, playerState.isPlaying]);
 
   useEffect(() => {
     if (!listenCheck.startedAt || !listenCheck.completedAt || listenCheck.savedRecordId) return;
@@ -235,6 +260,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
           body: JSON.stringify({
             startedAt: listenCheck.startedAt,
             completedAt: listenCheck.completedAt,
+            playbackMs: listenCheck.playbackMs,
             checks: listenCheck.checks,
             note: listenCheck.note,
             needsFollowUp: listenCheck.needsFollowUp,
@@ -1008,7 +1034,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       ? programAudit.issues
       : programAudit?.checks.slice(0, 4) ?? [];
     const rawListenElapsedMs = listenCheck.startedAt
-      ? Math.max(0, now.getTime() - listenCheck.startedAt)
+      ? listenCheck.playbackMs
       : 0;
     const listenElapsedMs = Math.min(rawListenElapsedMs, LISTEN_CHECK_TARGET_MS);
     const listenProgressPercent = Math.round((listenElapsedMs / LISTEN_CHECK_TARGET_MS) * 100);
@@ -1033,6 +1059,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const listenProgramLocked = Boolean(listenCheck.programSessionId || listenCheck.programGeneratedAt);
     const hasListenDraft = Boolean(
       listenCheck.startedAt
+        || listenCheck.playbackMs > 0
         || listenCheckedCount > 0
         || listenCheck.note.trim()
         || listenCheck.needsFollowUp,
@@ -1043,6 +1070,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       setListenCheck({
         ...createEmptyListenCheck(),
         startedAt: Date.now(),
+        lastPlaybackTickAt: playerState.isPlaying && playerState.currentTrack ? Date.now() : null,
         programSessionId: programAudit?.program?.sessionId ?? null,
         programGeneratedAt: typeof programGeneratedAt === "number" ? programGeneratedAt : null,
         programTitle: programAudit?.program?.title ?? null,
@@ -1077,6 +1105,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     };
     const formatListenRecordTime = (timestamp: number) =>
       `${new Date(timestamp).toLocaleDateString([], { month: "short", day: "2-digit" })} ${formatHistoryTime(timestamp)}`;
+    const getRecordPlaybackMs = (record: ListenCheckRecord) =>
+      typeof record.playbackMs === "number" ? record.playbackMs : record.durationMs;
     const countRecordChecks = (record: ListenCheckRecord) =>
       LISTEN_CHECK_ITEMS.filter((item) => record.checks[item.id]).length;
     const hasCleanListenRecord = (record: ListenCheckRecord) =>
@@ -1147,7 +1177,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             </div>
             <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
               <div className="stat-card">
-                <span className="stat-label">ELAPSED</span>
+                <span className="stat-label">PLAYED</span>
                 <span className="stat-value">{formatPlaybackTime(Math.floor(listenElapsedMs / 1000))}</span>
               </div>
               <div className="stat-card">
@@ -1267,7 +1297,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         <span className="text-xs text-[#71717a] leading-relaxed break-words">
                           {formatListenRecordTime(criterion.evidence.recordedAt)}
                           {" · "}
-                          {formatPlaybackTime(Math.floor(criterion.evidence.durationMs / 1000))}
+                          {formatPlaybackTime(Math.floor(criterion.evidence.playbackMs / 1000))}
                           {criterion.evidence.note ? ` · ${criterion.evidence.note}` : ""}
                         </span>
                       )}
@@ -1297,7 +1327,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                       </span>
                       <span className="truncate text-xs text-[#71717a]">
                         {record.programSnapshot?.title ? `${formatListenRecordTime(record.recordedAt)} · ` : ""}
-                        {formatPlaybackTime(Math.floor(record.durationMs / 1000))}
+                        {formatPlaybackTime(Math.floor(getRecordPlaybackMs(record) / 1000))}
                         {" · "}
                         {countRecordChecks(record)}/{LISTEN_CHECK_ITEMS.length} checks
                         {" · "}

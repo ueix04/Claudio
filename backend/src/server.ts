@@ -616,6 +616,10 @@ app.post("/api/radio/listen-checks", async (req, res) => {
   const completedAt = Number(body?.completedAt);
   const checks = body?.checks as Record<string, unknown> | undefined;
   const durationMs = completedAt - startedAt;
+  const rawPlaybackMs = Number(body?.playbackMs);
+  const playbackMs = Number.isFinite(rawPlaybackMs) && rawPlaybackMs >= 0
+    ? Math.min(Math.round(rawPlaybackMs), Math.max(0, durationMs))
+    : durationMs;
   const note = typeof body?.note === "string"
     ? body.note.trim().slice(0, 500)
     : "";
@@ -646,6 +650,7 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     startedAt,
     completedAt,
     durationMs,
+    playbackMs,
     checks: normalizedChecks,
     note,
     needsFollowUp,
