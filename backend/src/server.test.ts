@@ -353,6 +353,44 @@ describe("API Server", () => {
 
   it("GET/POST /api/radio/listen-checks 保存并返回长时实听记录", async () => {
     const db = await import("./db.js");
+    const tracks = Array.from({ length: 6 }, (_, index) => ({
+      id: `track-${index + 1}`,
+      name: `Song ${index + 1}`,
+      artist: `Artist ${index + 1}`,
+      url: `/audio/${index + 1}.mp3`,
+      duration: 240000,
+      source: "local_library",
+    }));
+    vi.mocked(db.getState).mockResolvedValue({
+      status: "playing",
+      currentTrack: tracks[0],
+      radioQueue: tracks,
+      currentQueueIndex: 0,
+      currentProgram: {
+        source: "startup",
+        sessionId: "startup_test",
+        title: "Night Flow",
+        mood: "quiet",
+        summary: "A restrained long-form set.",
+        plannedMinutes: 24,
+        speechPlan: [
+          { beforeTrackIndex: 0, type: "intro", note: "开场" },
+          { beforeTrackIndex: 2, type: "short_say", note: "短讲" },
+          { beforeTrackIndex: 5, type: "bumper", note: "station ID" },
+        ],
+        generatedAt: 1,
+      },
+      chatHistory: [
+        { role: "dj", text: "今晚先把这一段慢慢铺开。", timestamp: 1 },
+      ],
+      playHistory: [],
+      listenChecks: [],
+      djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: 1,
+    });
     const record = {
       id: "listen_test",
       startedAt: 1,
@@ -393,7 +431,13 @@ describe("API Server", () => {
         checks: record.checks,
         note: record.note,
         needsFollowUp: record.needsFollowUp,
-        programAudit: record.programAudit,
+        programAudit: {
+          ok: false,
+          plannedMinutes: 1,
+          trackCount: 1,
+          speechSlotCount: 99,
+          issueCount: 99,
+        },
       }),
     });
 
@@ -404,7 +448,13 @@ describe("API Server", () => {
       checks: { program: true, dj: true, context: true },
       note: "No repeated greetings.",
       needsFollowUp: false,
-      programAudit: expect.objectContaining({ issueCount: 0 }),
+      programAudit: {
+        ok: true,
+        plannedMinutes: 24,
+        trackCount: 6,
+        speechSlotCount: 3,
+        issueCount: 0,
+      },
       programSnapshot: expect.objectContaining({
         currentQueueIndex: 0,
         tracks: expect.any(Array),

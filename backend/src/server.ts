@@ -590,16 +590,15 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     context: checks?.context === true,
   };
 
-  const programAudit = body?.programAudit && typeof body.programAudit === "object"
-    ? {
-        ok: body.programAudit.ok === true,
-        plannedMinutes: Number(body.programAudit.plannedMinutes) || 0,
-        trackCount: Number(body.programAudit.trackCount) || 0,
-        speechSlotCount: Number(body.programAudit.speechSlotCount) || 0,
-        issueCount: Number(body.programAudit.issueCount) || 0,
-      }
-    : undefined;
   const state = await db.getState();
+  const audit = auditProgramExperience(state);
+  const programAudit = {
+    ok: audit.ok,
+    plannedMinutes: audit.plannedMinutes,
+    trackCount: audit.trackCount,
+    speechSlotCount: audit.speechSlotCount,
+    issueCount: audit.issues.length,
+  };
 
   const record = await db.addListenCheckRecord({
     startedAt,
