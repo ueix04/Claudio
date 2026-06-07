@@ -4,6 +4,7 @@ import type {
   ChatEntry,
   DjProfile,
   DJMessage,
+  ListenCheckRecord,
   LocalLibraryStatus,
   PlayHistoryEntry,
   ProgramExperienceAudit,
@@ -60,6 +61,7 @@ export function useWebSocket() {
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
   const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
   const [programAudit, setProgramAudit] = useState<ProgramExperienceAudit | null>(null);
+  const [listenCheckRecords, setListenCheckRecords] = useState<ListenCheckRecord[]>([]);
   const [isRescanningLocalLibrary, setIsRescanningLocalLibrary] = useState(false);
   const [utilityNotice, setUtilityNotice] = useState<string | null>(null);
   const [djProfile, setDjProfile] = useState<DjProfile | null>(null);
@@ -614,13 +616,14 @@ export function useWebSocket() {
 
   const refreshLibraryData = useCallback(async () => {
     try {
-      const [favoritesRes, historyRes, tasteRes, djTasteRes, localLibraryRes, programAuditRes] = await Promise.all([
+      const [favoritesRes, historyRes, tasteRes, djTasteRes, localLibraryRes, programAuditRes, listenChecksRes] = await Promise.all([
         fetch("/api/favorites"),
         fetch("/api/history"),
         fetch("/api/taste-profile"),
         fetch("/api/taste"),
         fetch("/api/music-sources/local-library"),
         fetch("/api/radio/program-audit"),
+        fetch("/api/radio/listen-checks?limit=3"),
       ]);
 
       if (favoritesRes.ok) {
@@ -646,6 +649,10 @@ export function useWebSocket() {
       if (programAuditRes.ok) {
         const audit = await programAuditRes.json() as ProgramExperienceAudit;
         setProgramAudit(audit);
+      }
+      if (listenChecksRes.ok) {
+        const records = await listenChecksRes.json() as ListenCheckRecord[];
+        setListenCheckRecords(records);
       }
     } catch {
       // keep best-effort behavior
@@ -1344,7 +1351,7 @@ export function useWebSocket() {
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, localLibraryStatus, programAudit, isRescanningLocalLibrary, utilityNotice,
+    isSyncingLibrary, lastSyncSummary, localLibraryStatus, programAudit, listenCheckRecords, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
     onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,
@@ -1361,5 +1368,6 @@ export function useWebSocket() {
       setUserAvatarUrl(dataUrl);
     },
     fetchPlaylists, syncNeteaseLibrary, retryFailedLibrarySync, rescanLocalLibrary, showUtilityNotice, playSavedTrack,
+    refreshLibraryData,
   };
 }

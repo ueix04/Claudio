@@ -24,6 +24,7 @@ function AppLayout() {
     lastSyncSummary,
     localLibraryStatus,
     programAudit,
+    listenCheckRecords,
     isRescanningLocalLibrary,
     utilityNotice,
     statusText,
@@ -49,6 +50,7 @@ function AppLayout() {
     retryFailedLibrarySync,
     rescanLocalLibrary,
     playSavedTrack,
+    refreshLibraryData,
     showUtilityNotice,
   } = useWebSocket();
 
@@ -80,6 +82,7 @@ function AppLayout() {
                   lastSyncSummary={lastSyncSummary}
                   localLibraryStatus={localLibraryStatus}
                   programAudit={programAudit}
+                  listenCheckRecords={listenCheckRecords}
                   isRescanningLocalLibrary={isRescanningLocalLibrary}
                   utilityNotice={utilityNotice}
                   visualizerBars={visualizerBars}
@@ -98,6 +101,7 @@ function AppLayout() {
                   onSyncLibrary={syncNeteaseLibrary}
                   onRetryFailedSync={retryFailedLibrarySync}
                   onRescanLocalLibrary={rescanLocalLibrary}
+                  onListenCheckSaved={refreshLibraryData}
                   isTriggerBusy={isTriggerBusy}
                   statusText={statusText}
                   status={status}

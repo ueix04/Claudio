@@ -3,6 +3,7 @@ import { AUDIO_EFFECT_OPTIONS } from "../audio-effects";
 import {
   AppStatus,
   FavoriteTrackItem,
+  ListenCheckRecord,
   LocalLibraryStatus,
   PlayHistoryEntry,
   PlayerState,
@@ -23,6 +24,7 @@ interface PlayerPanelProps {
   lastSyncSummary: SyncSummary | null;
   localLibraryStatus: LocalLibraryStatus | null;
   programAudit: ProgramExperienceAudit | null;
+  listenCheckRecords: ListenCheckRecord[];
   isRescanningLocalLibrary: boolean;
   utilityNotice: string | null;
   visualizerBars: number[];
@@ -41,6 +43,7 @@ interface PlayerPanelProps {
   onSyncLibrary: () => void;
   onRetryFailedSync: () => void;
   onRescanLocalLibrary: () => void;
+  onListenCheckSaved: () => void;
   isTriggerBusy: boolean;
   statusText: string;
   status: AppStatus;
@@ -137,6 +140,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   lastSyncSummary,
   localLibraryStatus,
   programAudit,
+  listenCheckRecords,
   isRescanningLocalLibrary,
   utilityNotice,
   visualizerBars,
@@ -155,6 +159,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   onSyncLibrary,
   onRetryFailedSync,
   onRescanLocalLibrary,
+  onListenCheckSaved,
   isTriggerBusy,
   statusText,
   status,
@@ -237,6 +242,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             ? { ...current, savedRecordId: record.id ?? null }
             : current
         ));
+        onListenCheckSaved();
       } catch {
         if (!cancelled) {
           listenCheckSaveKeyRef.current = null;
@@ -249,7 +255,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [listenCheck, programAudit]);
+  }, [listenCheck, onListenCheckSaved, programAudit]);
 
   useEffect(() => {
     const toEmoji = (description: string) => {
@@ -1021,6 +1027,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         savedRecordId: null,
       }));
     };
+    const formatListenRecordTime = (timestamp: number) =>
+      `${new Date(timestamp).toLocaleDateString([], { month: "short", day: "2-digit" })} ${formatHistoryTime(timestamp)}`;
+    const countRecordChecks = (record: ListenCheckRecord) =>
+      LISTEN_CHECK_ITEMS.filter((item) => record.checks[item.id]).length;
 
     return (
       <div className="flex flex-col gap-6">
@@ -1136,6 +1146,39 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                   </button>
                 );
               })}
+            </div>
+            <div className="mt-5 flex flex-col gap-3">
+              <div className="panel-card-head mb-0">
+                <span>RECENT LISTENS</span>
+                <span>{listenCheckRecords.length}</span>
+              </div>
+              {listenCheckRecords.length === 0 ? (
+                <div className="panel-empty">No saved listen checks yet</div>
+              ) : (
+                listenCheckRecords.map((record) => (
+                  <div key={record.id} className="insight-row">
+                    <div className="flex flex-col min-w-0 gap-1">
+                      <span className="truncate text-sm claudio-theme-text-strong">
+                        {formatListenRecordTime(record.recordedAt)}
+                      </span>
+                      <span className="truncate text-xs text-[#71717a]">
+                        {formatPlaybackTime(Math.floor(record.durationMs / 1000))}
+                        {" · "}
+                        {countRecordChecks(record)}/{LISTEN_CHECK_ITEMS.length} checks
+                        {" · "}
+                        {record.programAudit?.plannedMinutes ?? 0} min
+                      </span>
+                    </div>
+                    <span className={`text-[10px] uppercase ${
+                      record.programAudit?.issueCount === 0 && countRecordChecks(record) === LISTEN_CHECK_ITEMS.length
+                        ? "text-[#4ade80]"
+                        : "text-[#facc15]"
+                    }`}>
+                      {record.programAudit?.issueCount ?? 0} issues
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </section>

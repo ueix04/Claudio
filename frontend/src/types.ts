@@ -234,3 +234,23 @@ export type ProgramExperienceAudit = {
   checks: ProgramAuditCheck[];
   issues: ProgramAuditCheck[];
 };
+
+export type ListenCheckRecord = {
+  id: string;
+  startedAt: number;
+  completedAt: number;
+  durationMs: number;
+  checks: {
+    program: boolean;
+    dj: boolean;
+    context: boolean;
+  };
+  programAudit?: {
+    ok: boolean;
+    plannedMinutes: number;
+    trackCount: number;
+    speechSlotCount: number;
+    issueCount: number;
+  };
+  recordedAt: number;
+};

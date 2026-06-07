@@ -67,6 +67,7 @@ describe("split panel harmony", () => {
           lastSyncSummary={null}
           localLibraryStatus={localLibraryStatus}
           programAudit={null}
+          listenCheckRecords={[]}
           isRescanningLocalLibrary={false}
           utilityNotice={null}
           visualizerBars={Array.from({ length: 12 }, () => 0.2)}
@@ -85,6 +86,7 @@ describe("split panel harmony", () => {
           onSyncLibrary={() => {}}
           onRetryFailedSync={() => {}}
           onRescanLocalLibrary={() => {}}
+          onListenCheckSaved={() => {}}
           isTriggerBusy={false}
           statusText="Now playing"
           status="playing"
@@ -117,6 +119,7 @@ describe("split panel harmony", () => {
           lastSyncSummary={null}
           localLibraryStatus={localLibraryStatus}
           programAudit={null}
+          listenCheckRecords={[]}
           isRescanningLocalLibrary={false}
           utilityNotice={null}
           visualizerBars={Array.from({ length: 12 }, () => 0.2)}
@@ -135,6 +138,7 @@ describe("split panel harmony", () => {
           onSyncLibrary={() => {}}
           onRetryFailedSync={() => {}}
           onRescanLocalLibrary={() => {}}
+          onListenCheckSaved={() => {}}
           isTriggerBusy={false}
           statusText="Now playing"
           status="playing"
