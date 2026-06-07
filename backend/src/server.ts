@@ -549,6 +549,10 @@ app.post("/api/radio/listen-checks", async (req, res) => {
   const completedAt = Number(body?.completedAt);
   const checks = body?.checks as Record<string, unknown> | undefined;
   const durationMs = completedAt - startedAt;
+  const note = typeof body?.note === "string"
+    ? body.note.trim().slice(0, 500)
+    : "";
+  const needsFollowUp = body?.needsFollowUp === true;
 
   if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || durationMs < 0) {
     res.status(400).json({ error: "startedAt and completedAt must be valid timestamps" });
@@ -576,6 +580,8 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     completedAt,
     durationMs,
     checks: normalizedChecks,
+    note,
+    needsFollowUp,
     programAudit,
   });
   res.status(201).json(record);

@@ -207,6 +207,7 @@ Claudio 目前更像“AI 推荐歌曲 + 普通播放器”，还不够像一个
 - [x] 前端 `PROGRAM AUDIT` 卡片新增 `LISTEN CHECK`：支持 20 分钟计时、三项主观听感确认和浏览器本地保存，方便长时实听形成稳定记录。
 - [x] 新增长时实听记录后端存档：`GET /api/radio/listen-checks`、`POST /api/radio/listen-checks`，完成 `LISTEN CHECK` 后会保存计时、三项确认和节目审计摘要。
 - [x] 前端 `LISTEN CHECK` 下方新增最近实听记录展示，保存成功后可以直接看到历史实听时长、确认项数量、节目分钟数和审计问题数。
+- [x] 长时实听记录新增备注和 follow-up 标记，听完 20 分钟后可以保存主观问题线索，而不是只留下勾选结果。
 
 风险记录：
 

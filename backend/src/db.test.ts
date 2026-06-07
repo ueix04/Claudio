@@ -212,6 +212,8 @@ describe("db.ts", () => {
         dj: true,
         context: true,
       },
+      note: "20 minutes felt cohesive.",
+      needsFollowUp: false,
       programAudit: {
         ok: true,
         plannedMinutes: 24,
@@ -229,6 +231,8 @@ describe("db.ts", () => {
     expect(records[0]).toMatchObject({
       durationMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
+      note: "20 minutes felt cohesive.",
+      needsFollowUp: false,
       programAudit: { ok: true, issueCount: 0 },
     });
     expect(state.listenChecks[0].id).toBe(record.id);

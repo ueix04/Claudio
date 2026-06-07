@@ -359,6 +359,8 @@ describe("API Server", () => {
       completedAt: 1_200_001,
       durationMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
+      note: "No repeated greetings.",
+      needsFollowUp: false,
       programAudit: {
         ok: true,
         plannedMinutes: 24,
@@ -378,6 +380,8 @@ describe("API Server", () => {
         startedAt: record.startedAt,
         completedAt: record.completedAt,
         checks: record.checks,
+        note: record.note,
+        needsFollowUp: record.needsFollowUp,
         programAudit: record.programAudit,
       }),
     });
@@ -387,6 +391,8 @@ describe("API Server", () => {
     expect(db.addListenCheckRecord).toHaveBeenCalledWith(expect.objectContaining({
       durationMs: 1_200_000,
       checks: { program: true, dj: true, context: true },
+      note: "No repeated greetings.",
+      needsFollowUp: false,
       programAudit: expect.objectContaining({ issueCount: 0 }),
     }));
 

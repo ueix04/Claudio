@@ -59,6 +59,8 @@ type ListenCheckState = {
   completedAt: number | null;
   savedRecordId: string | null;
   checks: Record<ListenCheckId, boolean>;
+  note: string;
+  needsFollowUp: boolean;
 };
 
 const LISTEN_CHECK_STORAGE_KEY = "claudio-listen-check";
@@ -78,6 +80,8 @@ const createEmptyListenCheck = (): ListenCheckState => ({
     dj: false,
     context: false,
   },
+  note: "",
+  needsFollowUp: false,
 });
 
 const loadListenCheckState = (): ListenCheckState => {
@@ -97,6 +101,8 @@ const loadListenCheckState = (): ListenCheckState => {
         dj: Boolean(parsed.checks?.dj),
         context: Boolean(parsed.checks?.context),
       },
+      note: typeof parsed.note === "string" ? parsed.note.slice(0, 500) : "",
+      needsFollowUp: parsed.needsFollowUp === true,
     };
   } catch {
     return empty;
@@ -218,6 +224,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             startedAt: listenCheck.startedAt,
             completedAt: listenCheck.completedAt,
             checks: listenCheck.checks,
+            note: listenCheck.note,
+            needsFollowUp: listenCheck.needsFollowUp,
             programAudit: programAudit
               ? {
                   ok: programAudit.ok,
@@ -1007,6 +1015,13 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const listenCheckStatusClass = listenComplete
       ? "text-[#4ade80]"
       : listenCheck.startedAt ? "claudio-theme-accent" : "claudio-theme-text-muted";
+    const listenCheckLocked = Boolean(listenCheck.completedAt || listenCheck.savedRecordId);
+    const hasListenDraft = Boolean(
+      listenCheck.startedAt
+        || listenCheckedCount > 0
+        || listenCheck.note.trim()
+        || listenCheck.needsFollowUp,
+    );
     const startListenCheck = () => {
       setListenCheck({
         ...createEmptyListenCheck(),
@@ -1027,10 +1042,27 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         savedRecordId: null,
       }));
     };
+    const updateListenNote = (note: string) => {
+      setListenCheck((current) => ({
+        ...current,
+        note: note.slice(0, 500),
+      }));
+    };
+    const toggleListenFollowUp = () => {
+      setListenCheck((current) => ({
+        ...current,
+        needsFollowUp: !current.needsFollowUp,
+        savedRecordId: current.savedRecordId,
+      }));
+    };
     const formatListenRecordTime = (timestamp: number) =>
       `${new Date(timestamp).toLocaleDateString([], { month: "short", day: "2-digit" })} ${formatHistoryTime(timestamp)}`;
     const countRecordChecks = (record: ListenCheckRecord) =>
       LISTEN_CHECK_ITEMS.filter((item) => record.checks[item.id]).length;
+    const hasCleanListenRecord = (record: ListenCheckRecord) =>
+      record.programAudit?.issueCount === 0
+        && countRecordChecks(record) === LISTEN_CHECK_ITEMS.length
+        && record.needsFollowUp !== true;
 
     return (
       <div className="flex flex-col gap-6">
@@ -1119,7 +1151,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               <button
                 className="sync-pill"
                 onClick={resetListenCheck}
-                disabled={!listenCheck.startedAt && listenCheckedCount === 0}
+                disabled={!hasListenDraft}
               >
                 RESET
               </button>
@@ -1147,6 +1179,32 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 );
               })}
             </div>
+            <div className="mt-4 flex flex-col gap-3">
+              <button
+                type="button"
+                onClick={toggleListenFollowUp}
+                className={`insight-row text-left transition-colors ${
+                  listenCheck.needsFollowUp ? "border-[#facc15]" : ""
+                }`}
+                disabled={!listenCheck.startedAt || listenCheckLocked}
+              >
+                <span className="truncate text-sm claudio-theme-text-strong">FOLLOW-UP NEEDED</span>
+                <span className={`text-[10px] uppercase ${
+                  listenCheck.needsFollowUp ? "text-[#facc15]" : "claudio-theme-text-muted"
+                }`}>
+                  {listenCheck.needsFollowUp ? "YES" : "NO"}
+                </span>
+              </button>
+              <textarea
+                value={listenCheck.note}
+                onChange={(event) => updateListenNote(event.target.value)}
+                disabled={!listenCheck.startedAt || listenCheckLocked}
+                maxLength={500}
+                rows={3}
+                className="claudio-input min-h-[82px] resize-none px-4 py-3 text-sm leading-relaxed"
+                placeholder="Notes after the 20-minute listen"
+              />
+            </div>
             <div className="mt-5 flex flex-col gap-3">
               <div className="panel-card-head mb-0">
                 <span>RECENT LISTENS</span>
@@ -1168,13 +1226,16 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         {" · "}
                         {record.programAudit?.plannedMinutes ?? 0} min
                       </span>
+                      {record.note && (
+                        <span className="text-xs text-[#71717a] leading-relaxed break-words">{record.note}</span>
+                      )}
                     </div>
                     <span className={`text-[10px] uppercase ${
-                      record.programAudit?.issueCount === 0 && countRecordChecks(record) === LISTEN_CHECK_ITEMS.length
+                      hasCleanListenRecord(record)
                         ? "text-[#4ade80]"
                         : "text-[#facc15]"
                     }`}>
-                      {record.programAudit?.issueCount ?? 0} issues
+                      {record.needsFollowUp ? "follow-up" : `${record.programAudit?.issueCount ?? 0} issues`}
                     </span>
                   </div>
                 ))

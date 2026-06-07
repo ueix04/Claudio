@@ -67,6 +67,8 @@ export interface ListenCheckRecord {
     dj: boolean;
     context: boolean;
   };
+  note?: string;
+  needsFollowUp?: boolean;
   programAudit?: {
     ok: boolean;
     plannedMinutes: number;
