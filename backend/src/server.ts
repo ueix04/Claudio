@@ -11,6 +11,7 @@ import * as claude from "./claude.js";
 import * as djLanguage from "./dj-language.js";
 import * as musicSources from "./music-sources/index.js";
 import * as netease from "./netease.js";
+import { auditProgramExperience } from "./program-audit.js";
 import * as radioSession from "./radio-session.js";
 import * as radioStyle from "./radio-style.js";
 import * as tasteProfile from "./taste-profile.js";
@@ -527,6 +528,11 @@ app.get("/api/plan/today", async (_req, res) => {
     queueLength: state.chatHistory.length,
     lastInteraction: state.lastInteraction,
   });
+});
+
+app.get("/api/radio/program-audit", async (_req, res) => {
+  const state = await db.getState();
+  res.json(auditProgramExperience(state));
 });
 
 app.get("/api/taste", async (_req, res) => {

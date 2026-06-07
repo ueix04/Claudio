@@ -300,6 +300,55 @@ describe("API Server", () => {
     expect(body.retriedCount).toBe(1);
     expect(body.recoveredCount).toBe(1);
   });
+
+  it("GET /api/radio/program-audit 返回当前节目体验审计", async () => {
+    const db = await import("./db.js");
+    const tracks = Array.from({ length: 5 }, (_, index) => ({
+      id: `track-${index + 1}`,
+      name: `Song ${index + 1}`,
+      artist: `Artist ${index + 1}`,
+      url: `/audio/${index + 1}.mp3`,
+      duration: 240000,
+    }));
+    vi.mocked(db.getState).mockResolvedValue({
+      status: "playing",
+      currentTrack: tracks[0],
+      radioQueue: tracks,
+      currentQueueIndex: 0,
+      currentProgram: {
+        source: "startup",
+        title: "Audit Set",
+        mood: "steady",
+        summary: "A restrained long-form set.",
+        plannedMinutes: 20,
+        speechPlan: [
+          { beforeTrackIndex: 0, type: "intro", note: "开场" },
+          { beforeTrackIndex: 2, type: "short_say", note: "短讲" },
+          { beforeTrackIndex: 4, type: "bumper", note: "station ID" },
+        ],
+        generatedAt: 1,
+      },
+      chatHistory: [
+        { role: "dj", text: "今晚先把这一段慢慢铺开。", timestamp: 1 },
+        { role: "dj", text: "下一首把情绪再往里收一点。", timestamp: 2 },
+      ],
+      playHistory: [],
+      djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: 1,
+    });
+
+    const res = await fetch(`http://localhost:${port}/api/radio/program-audit`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.trackCount).toBe(5);
+    expect(body.plannedMinutes).toBe(20);
+    expect(body.checks.map((check: { id: string }) => check.id)).toContain("speech_cadence");
+  });
 });
 
 describe("WebSocket Server", () => {
