@@ -61,6 +61,8 @@ type ListenCheckState = {
   completedAt: number | null;
   playbackMs: number;
   lastPlaybackTickAt: number | null;
+  lastPlaybackTrackKey: string | null;
+  lastPlaybackPositionSec: number | null;
   savedRecordId: string | null;
   programSessionId: string | null;
   programGeneratedAt: number | null;
@@ -83,6 +85,8 @@ const createEmptyListenCheck = (): ListenCheckState => ({
   completedAt: null,
   playbackMs: 0,
   lastPlaybackTickAt: null,
+  lastPlaybackTrackKey: null,
+  lastPlaybackPositionSec: null,
   savedRecordId: null,
   programSessionId: null,
   programGeneratedAt: null,
@@ -109,6 +113,8 @@ const loadListenCheckState = (): ListenCheckState => {
       completedAt: typeof parsed.completedAt === "number" ? parsed.completedAt : null,
       playbackMs: typeof parsed.playbackMs === "number" && parsed.playbackMs > 0 ? parsed.playbackMs : 0,
       lastPlaybackTickAt: null,
+      lastPlaybackTrackKey: null,
+      lastPlaybackPositionSec: null,
       savedRecordId: typeof parsed.savedRecordId === "string" ? parsed.savedRecordId : null,
       programSessionId: typeof parsed.programSessionId === "string" ? parsed.programSessionId : null,
       programGeneratedAt: typeof parsed.programGeneratedAt === "number" ? parsed.programGeneratedAt : null,
@@ -217,33 +223,65 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   useEffect(() => {
     setListenCheck((current) => {
       if (!current.startedAt || current.completedAt) return current;
-      const isPlaybackActive = playerState.isPlaying && Boolean(playerState.currentTrack);
-      const nowMs = now.getTime();
+      const currentTrackKey = playerState.currentTrack?.id ?? playerState.currentTrack?.url ?? null;
+      const currentPositionSec = Number.isFinite(playerState.currentTime)
+        ? Math.max(0, playerState.currentTime)
+        : 0;
+      const isPlaybackActive = playerState.isPlaying && Boolean(currentTrackKey);
+      const nowMs = Date.now();
+      const sameTrack = isPlaybackActive && current.lastPlaybackTrackKey === currentTrackKey;
+      const positionDeltaMs = sameTrack && current.lastPlaybackPositionSec !== null
+        ? Math.max(0, (currentPositionSec - current.lastPlaybackPositionSec) * 1000)
+        : 0;
+      const wallDeltaMs = current.lastPlaybackTickAt !== null
+        ? Math.max(0, nowMs - current.lastPlaybackTickAt)
+        : 0;
+      const playedDeltaMs = isPlaybackActive
+        ? Math.min(positionDeltaMs, wallDeltaMs)
+        : 0;
       const nextPlaybackMs = isPlaybackActive
         ? Math.min(
             LISTEN_CHECK_TARGET_MS,
-            current.playbackMs + Math.max(0, nowMs - (current.lastPlaybackTickAt ?? nowMs)),
+            current.playbackMs + playedDeltaMs,
           )
         : current.playbackMs;
+      const nextTrackKey = isPlaybackActive ? currentTrackKey : currentTrackKey ?? current.lastPlaybackTrackKey;
+      const nextPositionSec = isPlaybackActive || currentTrackKey
+        ? currentPositionSec
+        : current.lastPlaybackPositionSec;
       const allChecksPassed = LISTEN_CHECK_ITEMS.every((item) => current.checks[item.id]);
       if (!allChecksPassed || nextPlaybackMs < LISTEN_CHECK_TARGET_MS) {
-        if (nextPlaybackMs === current.playbackMs && current.lastPlaybackTickAt === (isPlaybackActive ? nowMs : null)) {
+        if (
+          nextPlaybackMs === current.playbackMs
+          && current.lastPlaybackTickAt === (isPlaybackActive ? nowMs : null)
+          && current.lastPlaybackTrackKey === nextTrackKey
+          && current.lastPlaybackPositionSec === nextPositionSec
+        ) {
           return current;
         }
         return {
           ...current,
           playbackMs: nextPlaybackMs,
           lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
+          lastPlaybackTrackKey: nextTrackKey,
+          lastPlaybackPositionSec: nextPositionSec,
         };
       }
       return {
         ...current,
         playbackMs: nextPlaybackMs,
         lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
+        lastPlaybackTrackKey: nextTrackKey,
+        lastPlaybackPositionSec: nextPositionSec,
         completedAt: nowMs,
       };
     });
-  }, [now, playerState.currentTrack?.id, playerState.isPlaying]);
+  }, [
+    playerState.currentTrack?.id,
+    playerState.currentTrack?.url,
+    playerState.currentTime,
+    playerState.isPlaying,
+  ]);
 
   useEffect(() => {
     if (!listenCheck.startedAt || !listenCheck.completedAt || listenCheck.savedRecordId) return;
@@ -1068,10 +1106,18 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const startListenCheck = () => {
       if (!listenAuditReady) return;
       const programGeneratedAt = programAudit?.program?.generatedAt;
+      const startedAt = Date.now();
+      const currentTrackKey = playerState.currentTrack?.id ?? playerState.currentTrack?.url ?? null;
+      const currentPositionSec = Number.isFinite(playerState.currentTime)
+        ? Math.max(0, playerState.currentTime)
+        : 0;
+      const isPlaybackActive = playerState.isPlaying && Boolean(currentTrackKey);
       setListenCheck({
         ...createEmptyListenCheck(),
-        startedAt: Date.now(),
-        lastPlaybackTickAt: playerState.isPlaying && playerState.currentTrack ? Date.now() : null,
+        startedAt,
+        lastPlaybackTickAt: isPlaybackActive ? startedAt : null,
+        lastPlaybackTrackKey: currentTrackKey,
+        lastPlaybackPositionSec: currentTrackKey ? currentPositionSec : null,
         programSessionId: programAudit?.program?.sessionId ?? null,
         programGeneratedAt: typeof programGeneratedAt === "number" ? programGeneratedAt : null,
         programTitle: programAudit?.program?.title ?? null,
@@ -1082,15 +1128,21 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     };
     const toggleListenCheck = (id: ListenCheckId) => {
       if (!listenConfirmEnabled) return;
-      setListenCheck((current) => ({
-        ...current,
-        completedAt: null,
-        checks: {
+      setListenCheck((current) => {
+        const nextChecks = {
           ...current.checks,
           [id]: !current.checks[id],
-        },
-        savedRecordId: null,
-      }));
+        };
+        const allChecksPassed = LISTEN_CHECK_ITEMS.every((item) => nextChecks[item.id]);
+        return {
+          ...current,
+          completedAt: allChecksPassed && current.playbackMs >= LISTEN_CHECK_TARGET_MS
+            ? Date.now()
+            : null,
+          checks: nextChecks,
+          savedRecordId: null,
+        };
+      });
     };
     const updateListenNote = (note: string) => {
       setListenCheck((current) => ({
