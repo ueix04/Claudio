@@ -1373,6 +1373,7 @@ wss.on("connection", async (ws) => {
       if (payload.type === "queue_prefetch") {
         try {
           await primeUpcomingQueueWindow(PREFETCH_LOOKAHEAD_COUNT);
+          await broadcastStateSnapshot();
         } catch (error) {
           ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
         }

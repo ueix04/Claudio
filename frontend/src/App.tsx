@@ -18,6 +18,7 @@ function AppLayout() {
     isConnected,
     reconnecting,
     audioRef,
+    nextAudioRef,
     ttsAudioRef,
     isSyncingLibrary,
     lastSyncSummary,
@@ -59,6 +60,7 @@ function AppLayout() {
         <div className="app-shell-scaled">
           <div className="relative z-10 h-full w-full flex">
             <audio ref={audioRef} className="hidden" preload="auto" />
+            <audio ref={nextAudioRef} className="hidden" preload="auto" />
             <audio ref={ttsAudioRef} className="hidden" preload="auto" />
 
             <div

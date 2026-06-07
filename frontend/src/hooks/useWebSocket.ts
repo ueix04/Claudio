@@ -24,6 +24,22 @@ const normalizeVoicePreset = (value?: string): TtsPreset => value === "Dean" ? "
 const USER_DISPLAY_NAME = "xian";
 const DJ_DISPLAY_NAME = "CLAUDIO";
 const USER_AVATAR_STORAGE_KEY = "claudio-user-avatar";
+const MUSIC_FADE_MS = 420;
+const TTS_DUCK_RATIO = 0.34;
+const PRELOAD_READY_STATE = 2;
+
+type PlayableTrackInfo = TrackInfo & {
+  id?: string;
+};
+
+type PreloadedTrack = {
+  key: string;
+  url: string;
+  ready: boolean;
+};
+
+const getTrackPlaybackKey = (track?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null) =>
+  track?.id || track?.url || "";
 
 export function useWebSocket() {
   const [hasHydratedState, setHasHydratedState] = useState(false);
@@ -59,17 +75,24 @@ export function useWebSocket() {
   });
 
   const audioRef = useRef<HTMLAudioElement>(null);
+  const nextAudioRef = useRef<HTMLAudioElement>(null);
   const ttsAudioRef = useRef<HTMLAudioElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const ttsPlayingRef = useRef(false);
   const prefetchedTrackKeyRef = useRef<string | null>(null);
+  const preloadedTrackRef = useRef<PreloadedTrack | null>(null);
+  const activeMusicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const standbyMusicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRecoveryRef = useRef<{ trackKey?: string; url?: string; attempts: number }>({ attempts: 0 });
+  const userVolumeRef = useRef(0.8);
+  const fadeFramesRef = useRef<WeakMap<HTMLAudioElement, number>>(new WeakMap());
   const playerStateRef = useRef(playerState);
   const favoriteIdsRef = useRef<string[]>([]);
   const trackCatalogRef = useRef<Map<string, TrackInfo>>(new Map());
   const utilityNoticeTimerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const mediaSourcesRef = useRef<WeakMap<HTMLAudioElement, MediaElementAudioSourceNode>>(new WeakMap());
   const visualizerFrameRef = useRef<number | null>(null);
   const [, setCatalogVersion] = useState(0);
 
@@ -93,6 +116,125 @@ export function useWebSocket() {
       setUtilityNotice(null);
     }, 2400);
   }, []);
+
+  const getActiveMusicAudio = useCallback(() => {
+    if (!activeMusicAudioRef.current && audioRef.current) {
+      activeMusicAudioRef.current = audioRef.current;
+    }
+    return activeMusicAudioRef.current ?? audioRef.current;
+  }, []);
+
+  const getStandbyMusicAudio = useCallback(() => {
+    const primary = audioRef.current;
+    const secondary = nextAudioRef.current;
+    const active = getActiveMusicAudio();
+    const standby = active === primary ? secondary : primary;
+    standbyMusicAudioRef.current = standby ?? null;
+    return standby ?? null;
+  }, [getActiveMusicAudio]);
+
+  const getEffectiveMusicVolume = useCallback(() => (
+    userVolumeRef.current * (ttsPlayingRef.current ? TTS_DUCK_RATIO : 1)
+  ), []);
+
+  const fadeAudioVolume = useCallback((audio: HTMLAudioElement, targetVolume: number, duration = MUSIC_FADE_MS) => {
+    const frame = fadeFramesRef.current.get(audio);
+    if (frame !== undefined) {
+      window.cancelAnimationFrame(frame);
+      fadeFramesRef.current.delete(audio);
+    }
+
+    const boundedTarget = Math.min(1, Math.max(0, targetVolume));
+    if (duration <= 0) {
+      audio.volume = boundedTarget;
+      return;
+    }
+
+    const startVolume = audio.volume;
+    const startedAt = performance.now();
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      audio.volume = startVolume + ((boundedTarget - startVolume) * progress);
+      if (progress < 1) {
+        const nextFrame = window.requestAnimationFrame(step);
+        fadeFramesRef.current.set(audio, nextFrame);
+      } else {
+        fadeFramesRef.current.delete(audio);
+      }
+    };
+
+    const nextFrame = window.requestAnimationFrame(step);
+    fadeFramesRef.current.set(audio, nextFrame);
+  }, []);
+
+  const applyActiveMusicVolume = useCallback((duration = 180) => {
+    const active = getActiveMusicAudio();
+    if (active) {
+      fadeAudioVolume(active, getEffectiveMusicVolume(), duration);
+    }
+  }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume]);
+
+  const findNextPlaylistTrack = useCallback((): PlaylistTrack | null => {
+    const state = playerStateRef.current;
+    const playlist = state.playlist;
+    if (!state.currentTrack || playlist.length <= 1) {
+      return null;
+    }
+
+    const currentKey = getTrackPlaybackKey(state.currentTrack);
+    const currentIndex = playlist.findIndex((track) =>
+      track.isPlaying || track.id === currentKey || track.url === state.currentTrack?.url,
+    );
+    if (currentIndex === -1) {
+      return null;
+    }
+
+    const nextTrack = playlist[(currentIndex + 1) % playlist.length];
+    if (!nextTrack || getTrackPlaybackKey(nextTrack) === currentKey) {
+      return null;
+    }
+
+    return nextTrack;
+  }, []);
+
+  const preloadNextPlaylistTrack = useCallback(() => {
+    const standby = getStandbyMusicAudio();
+    const nextTrack = findNextPlaylistTrack();
+    if (!standby || !nextTrack?.url) {
+      return;
+    }
+
+    const key = getTrackPlaybackKey(nextTrack);
+    const existing = preloadedTrackRef.current;
+    if (
+      existing
+      && existing.key === key
+      && existing.url === nextTrack.url
+      && standby.dataset.preloadKey === key
+    ) {
+      return;
+    }
+
+    standby.pause();
+    standby.volume = 0;
+    standby.preload = "auto";
+    standby.dataset.preloadKey = key;
+    standby.dataset.playbackUrl = nextTrack.url;
+    if (standby.dataset.loadedUrl !== nextTrack.url) {
+      standby.src = nextTrack.url;
+      standby.dataset.loadedUrl = nextTrack.url;
+    }
+    preloadedTrackRef.current = {
+      key,
+      url: nextTrack.url,
+      ready: standby.readyState >= PRELOAD_READY_STATE,
+    };
+    try {
+      standby.load();
+    } catch {
+      // Some browsers throw if load is called while the media element is being torn down.
+    }
+  }, [findNextPlaylistTrack, getStandbyMusicAudio]);
 
   const rememberTrack = useCallback((track: TrackInfo) => {
     const next = new Map(trackCatalogRef.current);
@@ -129,12 +271,89 @@ export function useWebSocket() {
     };
   }, [toPlayableUrl]);
 
+  const startPreloadedTrack = useCallback((track: PlayableTrackInfo) => {
+    const incoming = getStandbyMusicAudio();
+    const outgoing = getActiveMusicAudio();
+    const key = getTrackPlaybackKey(track);
+    const preloaded = preloadedTrackRef.current;
+    if (
+      !incoming
+      || !outgoing
+      || !preloaded
+      || preloaded.key !== key
+      || preloaded.url !== track.url
+      || incoming.dataset.preloadKey !== key
+      || (!preloaded.ready && incoming.readyState < PRELOAD_READY_STATE)
+    ) {
+      return false;
+    }
+
+    activeMusicAudioRef.current = incoming;
+    standbyMusicAudioRef.current = outgoing;
+    preloadedTrackRef.current = null;
+    incoming.dataset.playbackKey = key;
+    incoming.dataset.playbackUrl = track.url;
+    incoming.volume = 0;
+
+    incoming.play()
+      .then(() => {
+        fadeAudioVolume(incoming, getEffectiveMusicVolume(), MUSIC_FADE_MS);
+        fadeAudioVolume(outgoing, 0, MUSIC_FADE_MS);
+        window.setTimeout(() => {
+          if (standbyMusicAudioRef.current === outgoing) {
+            outgoing.pause();
+            outgoing.removeAttribute("src");
+            delete outgoing.dataset.loadedUrl;
+            delete outgoing.dataset.preloadKey;
+            try {
+              outgoing.load();
+            } catch {}
+          }
+        }, MUSIC_FADE_MS + 80);
+      })
+      .catch((error) => {
+        console.error(error);
+        activeMusicAudioRef.current = outgoing;
+        standbyMusicAudioRef.current = incoming;
+        incoming.pause();
+        preloadedTrackRef.current = null;
+        if (outgoing.dataset.loadedUrl !== track.url) {
+          outgoing.src = track.url;
+          outgoing.dataset.loadedUrl = track.url;
+        }
+        outgoing.play().catch(console.error);
+        fadeAudioVolume(outgoing, getEffectiveMusicVolume(), MUSIC_FADE_MS);
+      });
+
+    return true;
+  }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume, getStandbyMusicAudio]);
+
   const playMusic = useCallback((url: string, title: string, artist: string, album?: string, id?: string, duration?: number) => {
-    const a = audioRef.current;
+    const a = getActiveMusicAudio();
     if (!a) return;
+    const track: PlayableTrackInfo = { id, url, title, artist, album, duration };
+    const trackKey = getTrackPlaybackKey(track);
+    const recovery = audioRecoveryRef.current;
+    if (recovery.trackKey !== trackKey || recovery.url !== url) {
+      audioRecoveryRef.current = { trackKey, url, attempts: 0 };
+    }
+
     prefetchedTrackKeyRef.current = null;
-    a.src = url;
-    a.play().catch(console.error);
+    const usedPreloadedAudio = startPreloadedTrack(track);
+    if (!usedPreloadedAudio) {
+      a.pause();
+      a.volume = 0;
+      a.dataset.playbackKey = trackKey;
+      a.dataset.playbackUrl = url;
+      if (a.dataset.loadedUrl !== url) {
+        a.src = url;
+        a.dataset.loadedUrl = url;
+      }
+      a.currentTime = 0;
+      a.play().catch(console.error);
+      fadeAudioVolume(a, getEffectiveMusicVolume(), MUSIC_FADE_MS);
+    }
+
     const isFavorite = id ? favoriteIdsRef.current.includes(id) : false;
     setPlayerState((p) => ({
       ...p,
@@ -145,7 +364,17 @@ export function useWebSocket() {
     }));
     setStatus("playing");
     rememberTrack({ id, url, title, artist, album, duration, isFavorite });
-  }, [rememberTrack]);
+    window.setTimeout(() => {
+      preloadNextPlaylistTrack();
+    }, 0);
+  }, [
+    fadeAudioVolume,
+    getActiveMusicAudio,
+    getEffectiveMusicVolume,
+    preloadNextPlaylistTrack,
+    rememberTrack,
+    startPreloadedTrack,
+  ]);
 
   const resolveAndPlayTrack = useCallback((data: WSTrackPayload) => {
     const normalized = normalizeTrack(data);
@@ -165,14 +394,15 @@ export function useWebSocket() {
         ? p.playlist
         : [...p.playlist, { id, title: normalized.title, artist: normalized.artist, album: normalized.album, duration: normalized.duration, isPlaying: false, url: normalized.url }];
       const finalPl = pl.map((t) => ({ ...t, isPlaying: t.id === id }));
-      playMusic(normalized.url, normalized.title, normalized.artist, normalized.album, id, normalized.duration);
       return { ...p, playlist: finalPl, queueCount: finalPl.length, status: "playing" as AppStatus };
     });
+    playMusic(normalized.url, normalized.title, normalized.artist, normalized.album, id, normalized.duration);
   }, [normalizeTrack, playMusic, rememberTrack]);
 
   const requestUpcomingPrefetch = useCallback(() => {
     const ws = wsRef.current;
     const currentTrack = playerStateRef.current.currentTrack;
+    preloadNextPlaylistTrack();
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentTrack || playerStateRef.current.queueCount < 2) {
       return;
     }
@@ -184,7 +414,7 @@ export function useWebSocket() {
 
     prefetchedTrackKeyRef.current = prefetchKey;
     ws.send(JSON.stringify({ type: "queue_prefetch" }));
-  }, []);
+  }, [preloadNextPlaylistTrack]);
 
   const requestQueueStep = useCallback((direction: "next" | "previous", fallback: () => void) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -215,22 +445,56 @@ export function useWebSocket() {
     requestQueueStep("previous", () => playRelativeTrackLocally(-1));
   }, [playRelativeTrackLocally, requestQueueStep]);
 
+  const handleActiveAudioFailure = useCallback((reason: "error" | "stalled" | "waiting") => {
+    const currentTrack = playerStateRef.current.currentTrack;
+    const trackKey = getTrackPlaybackKey(currentTrack);
+    if (!currentTrack || !trackKey) {
+      return;
+    }
+
+    if (reason !== "error") {
+      requestUpcomingPrefetch();
+      return;
+    }
+
+    const recovery = audioRecoveryRef.current;
+    const samePlayback = recovery.trackKey === trackKey && recovery.url === currentTrack.url;
+    const attempts = samePlayback ? recovery.attempts + 1 : 1;
+    audioRecoveryRef.current = {
+      trackKey,
+      url: currentTrack.url,
+      attempts,
+    };
+
+    if (attempts === 1 && currentTrack.id && wsRef.current?.readyState === WebSocket.OPEN) {
+      showUtilityNotice("Refreshing audio signal");
+      wsRef.current.send(JSON.stringify({ type: "queue_select", data: { trackId: currentTrack.id } }));
+      requestUpcomingPrefetch();
+      return;
+    }
+
+    showUtilityNotice("Skipping unavailable track");
+    requestQueueStep("next", () => playRelativeTrackLocally(1));
+  }, [playRelativeTrackLocally, requestQueueStep, requestUpcomingPrefetch, showUtilityNotice]);
+
   const onPlayPause = useCallback(() => {
-    const a = audioRef.current;
+    const a = getActiveMusicAudio();
     if (!a) return;
     const ct = playerStateRef.current.currentTrack;
     if (!ct?.url) return;
     a.paused ? a.play().catch(console.error) : a.pause();
-  }, []);
+  }, [getActiveMusicAudio]);
 
   const onSeek = useCallback((time: number) => {
-    if (audioRef.current) audioRef.current.currentTime = time;
-  }, []);
+    const active = getActiveMusicAudio();
+    if (active) active.currentTime = time;
+  }, [getActiveMusicAudio]);
 
   const onVolumeChange = useCallback((vol: number) => {
-    if (audioRef.current) audioRef.current.volume = vol;
+    userVolumeRef.current = vol;
+    applyActiveMusicVolume(80);
     setPlayerState((p) => ({ ...p, volume: vol }));
-  }, []);
+  }, [applyActiveMusicVolume]);
 
   const onToggleFavorite = useCallback(async (trackId: string) => {
     const nextFavorited = !favoriteIdsRef.current.includes(trackId);
@@ -313,10 +577,12 @@ export function useWebSocket() {
   const onReplayAudio = useCallback((messageId: string) => {
     const found = messages.find((m) => m.id === messageId);
     if (found?.audioUrl && ttsAudioRef.current) {
+      ttsPlayingRef.current = true;
+      applyActiveMusicVolume(160);
       ttsAudioRef.current.src = found.audioUrl;
       ttsAudioRef.current.play().catch(console.error);
     }
-  }, [messages]);
+  }, [applyActiveMusicVolume, messages]);
 
   const sendTrigger = useCallback((mode: TriggerMode) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -442,6 +708,23 @@ export function useWebSocket() {
   });
 
   useEffect(() => {
+    userVolumeRef.current = playerState.volume;
+  }, [playerState.volume]);
+
+  useEffect(() => {
+    if (!playerState.currentTrack || playerState.queueCount < 2) {
+      return;
+    }
+
+    requestUpcomingPrefetch();
+  }, [
+    playerState.currentTrack?.id,
+    playerState.currentTrack?.url,
+    playerState.queueCount,
+    requestUpcomingPrefetch,
+  ]);
+
+  useEffect(() => {
     favoriteIdsRef.current = favoriteIds;
     setPlayerState((prev) => {
       if (!prev.currentTrack) return prev;
@@ -461,9 +744,20 @@ export function useWebSocket() {
   }, [refreshLibraryData]);
 
   useEffect(() => {
-    const a = audioRef.current;
-    if (!a) return;
-    const onTU = () => {
+    const primary = audioRef.current;
+    const secondary = nextAudioRef.current;
+    if (!primary || !secondary) return;
+
+    activeMusicAudioRef.current = activeMusicAudioRef.current ?? primary;
+    standbyMusicAudioRef.current = standbyMusicAudioRef.current ?? secondary;
+    primary.volume = getEffectiveMusicVolume();
+    secondary.volume = 0;
+
+    const isActiveAudio = (audio: HTMLAudioElement) => audio === getActiveMusicAudio();
+
+    const onTU = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (!isActiveAudio(a)) return;
       setPlayerState((p) => {
         if (Math.abs(p.currentTime - a.currentTime) < 0.3) return p;
         return { ...p, currentTime: a.currentTime };
@@ -479,35 +773,107 @@ export function useWebSocket() {
         requestUpcomingPrefetch();
       }
     };
-    const onLM = () => {
+    const onLM = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (!isActiveAudio(a)) return;
       setPlayerState((p) => ({ ...p, duration: a.duration || p.duration }));
-      prefetchedTrackKeyRef.current = null;
     };
-    const onEnd = () => {
+    const onEnd = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (!isActiveAudio(a)) return;
       prefetchedTrackKeyRef.current = null;
       requestQueueStep("next", () => playRelativeTrackLocally(1));
     };
-    const onPl = () => { setPlayerState((p) => ({ ...p, isPlaying: true })); setStatus("playing"); };
-    const onPs = () => setPlayerState((p) => ({ ...p, isPlaying: false }));
-    a.addEventListener("timeupdate", onTU);
-    a.addEventListener("loadedmetadata", onLM);
-    a.addEventListener("ended", onEnd);
-    a.addEventListener("play", onPl);
-    a.addEventListener("pause", onPs);
-    return () => {
-      a.removeEventListener("timeupdate", onTU);
-      a.removeEventListener("loadedmetadata", onLM);
-      a.removeEventListener("ended", onEnd);
-      a.removeEventListener("play", onPl);
-      a.removeEventListener("pause", onPs);
+    const onPl = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (!isActiveAudio(a)) return;
+      setPlayerState((p) => ({ ...p, isPlaying: true }));
+      if (!ttsPlayingRef.current) {
+        setStatus("playing");
+      }
     };
-  }, [playRelativeTrackLocally, requestQueueStep, requestUpcomingPrefetch]);
+    const onPs = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (!isActiveAudio(a)) return;
+      setPlayerState((p) => ({ ...p, isPlaying: false }));
+    };
+    const onCanPlay = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      const preloaded = preloadedTrackRef.current;
+      if (preloaded && a.dataset.preloadKey === preloaded.key) {
+        preloadedTrackRef.current = {
+          ...preloaded,
+          ready: true,
+        };
+      }
+    };
+    const onWaiting = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (isActiveAudio(a)) {
+        handleActiveAudioFailure("waiting");
+      }
+    };
+    const onStalled = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (isActiveAudio(a)) {
+        handleActiveAudioFailure("stalled");
+      }
+    };
+    const onError = (event: Event) => {
+      const a = event.currentTarget as HTMLAudioElement;
+      if (isActiveAudio(a)) {
+        handleActiveAudioFailure("error");
+        return;
+      }
+
+      preloadedTrackRef.current = null;
+      delete a.dataset.preloadKey;
+      requestUpcomingPrefetch();
+    };
+
+    const audioElements = [primary, secondary];
+    audioElements.forEach((audio) => {
+      audio.addEventListener("timeupdate", onTU);
+      audio.addEventListener("loadedmetadata", onLM);
+      audio.addEventListener("ended", onEnd);
+      audio.addEventListener("play", onPl);
+      audio.addEventListener("pause", onPs);
+      audio.addEventListener("canplay", onCanPlay);
+      audio.addEventListener("canplaythrough", onCanPlay);
+      audio.addEventListener("waiting", onWaiting);
+      audio.addEventListener("stalled", onStalled);
+      audio.addEventListener("error", onError);
+    });
+
+    return () => {
+      audioElements.forEach((audio) => {
+        audio.removeEventListener("timeupdate", onTU);
+        audio.removeEventListener("loadedmetadata", onLM);
+        audio.removeEventListener("ended", onEnd);
+        audio.removeEventListener("play", onPl);
+        audio.removeEventListener("pause", onPs);
+        audio.removeEventListener("canplay", onCanPlay);
+        audio.removeEventListener("canplaythrough", onCanPlay);
+        audio.removeEventListener("waiting", onWaiting);
+        audio.removeEventListener("stalled", onStalled);
+        audio.removeEventListener("error", onError);
+      });
+    };
+  }, [
+    getActiveMusicAudio,
+    getEffectiveMusicVolume,
+    handleActiveAudioFailure,
+    playRelativeTrackLocally,
+    requestQueueStep,
+    requestUpcomingPrefetch,
+  ]);
 
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    const primary = audioRef.current;
+    const secondary = nextAudioRef.current;
+    if (!primary || !secondary) return;
 
-    const ensureAnalyser = async () => {
+    const ensureAnalyser = async (audio: HTMLAudioElement) => {
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext();
       }
@@ -520,12 +886,19 @@ export function useWebSocket() {
         }
       }
 
-      if (!mediaSourceRef.current) {
-        mediaSourceRef.current = ctx.createMediaElementSource(audio);
+      if (!mediaSourcesRef.current.get(audio)) {
+        const source = ctx.createMediaElementSource(audio);
+        mediaSourcesRef.current.set(audio, source);
         analyserRef.current = ctx.createAnalyser();
         analyserRef.current.fftSize = 128;
         analyserRef.current.smoothingTimeConstant = 0.82;
-        mediaSourceRef.current.connect(analyserRef.current);
+        source.connect(analyserRef.current);
+        analyserRef.current.connect(ctx.destination);
+      } else if (!analyserRef.current) {
+        analyserRef.current = ctx.createAnalyser();
+        analyserRef.current.fftSize = 128;
+        analyserRef.current.smoothingTimeConstant = 0.82;
+        mediaSourcesRef.current.get(audio)?.connect(analyserRef.current);
         analyserRef.current.connect(ctx.destination);
       }
 
@@ -540,8 +913,8 @@ export function useWebSocket() {
       setVisualizerBars((prev) => prev.map((_, index) => 0.04 + ((index % 5) * 0.01)));
     };
 
-    const startVisualizer = async () => {
-      const analyser = await ensureAnalyser();
+    const startVisualizer = async (audio: HTMLAudioElement) => {
+      const analyser = await ensureAnalyser(audio);
       if (!analyser) return;
 
       const buffer = new Uint8Array(analyser.frequencyBinCount);
@@ -569,53 +942,75 @@ export function useWebSocket() {
       visualizerFrameRef.current = window.requestAnimationFrame(tick);
     };
 
-    const handlePlay = () => {
-      void startVisualizer();
+    const handlePlay = (event: Event) => {
+      const audio = event.currentTarget as HTMLAudioElement;
+      if (audio === getActiveMusicAudio()) {
+        void startVisualizer(audio);
+      }
     };
-    const handleStop = () => {
-      stopVisualizer();
+    const handleStop = (event: Event) => {
+      const audio = event.currentTarget as HTMLAudioElement;
+      if (audio === getActiveMusicAudio()) {
+        stopVisualizer();
+      }
     };
 
-    audio.addEventListener("play", handlePlay);
-    audio.addEventListener("pause", handleStop);
-    audio.addEventListener("ended", handleStop);
+    const audioElements = [primary, secondary];
+    audioElements.forEach((audio) => {
+      audio.addEventListener("play", handlePlay);
+      audio.addEventListener("pause", handleStop);
+      audio.addEventListener("ended", handleStop);
+    });
 
-    if (!audio.paused && audio.currentSrc) {
-      void startVisualizer();
+    const active = getActiveMusicAudio();
+    if (active && !active.paused && active.currentSrc) {
+      void startVisualizer(active);
     }
 
     return () => {
-      audio.removeEventListener("play", handlePlay);
-      audio.removeEventListener("pause", handleStop);
-      audio.removeEventListener("ended", handleStop);
+      audioElements.forEach((audio) => {
+        audio.removeEventListener("play", handlePlay);
+        audio.removeEventListener("pause", handleStop);
+        audio.removeEventListener("ended", handleStop);
+      });
       stopVisualizer();
     };
-  }, []);
+  }, [getActiveMusicAudio]);
 
   useEffect(() => {
     const t = ttsAudioRef.current;
     if (!t) return;
+    const onPlay = () => {
+      ttsPlayingRef.current = true;
+      applyActiveMusicVolume(160);
+    };
     const onEnd = () => {
       ttsPlayingRef.current = false;
-      const isMusicPlaying = Boolean(audioRef.current && !audioRef.current.paused && audioRef.current.currentSrc);
+      applyActiveMusicVolume(220);
+      const active = getActiveMusicAudio();
+      const isMusicPlaying = Boolean(active && !active.paused && active.currentSrc);
       const nextStatus: AppStatus = isMusicPlaying ? "playing" : "idle";
       setStatus(nextStatus);
       setPlayerState((p) => ({ ...p, status: nextStatus }));
     };
     const onError = () => {
       ttsPlayingRef.current = false;
-      if (audioRef.current && !audioRef.current.paused && audioRef.current.currentSrc) {
+      applyActiveMusicVolume(220);
+      const active = getActiveMusicAudio();
+      if (active && !active.paused && active.currentSrc) {
         setStatus("playing");
         setPlayerState((p) => ({ ...p, status: "playing" }));
       }
     };
+    t.addEventListener("play", onPlay);
     t.addEventListener("ended", onEnd);
     t.addEventListener("error", onError);
     return () => {
+      t.removeEventListener("play", onPlay);
       t.removeEventListener("ended", onEnd);
       t.removeEventListener("error", onError);
     };
-  }, []);
+  }, [applyActiveMusicVolume, getActiveMusicAudio]);
 
   useEffect(() => {
     let disposed = false;
@@ -708,10 +1103,15 @@ export function useWebSocket() {
                   || activeTrack.url === normalizedTrack.url
                 ),
               );
-              if (audioRef.current && normalizedTrack.url && (!audioRef.current.currentSrc || !isSameTrack)) {
-                audioRef.current.src = normalizedTrack.url;
+              const active = getActiveMusicAudio();
+              if (active && normalizedTrack.url && (!active.currentSrc || !isSameTrack)) {
+                active.dataset.playbackKey = getTrackPlaybackKey(normalizedTrack);
+                active.dataset.playbackUrl = normalizedTrack.url;
+                active.src = normalizedTrack.url;
+                active.dataset.loadedUrl = normalizedTrack.url;
                 if ((d.status ?? "idle") === "playing") {
-                  audioRef.current.play().catch(console.error);
+                  active.play().catch(console.error);
+                  fadeAudioVolume(active, getEffectiveMusicVolume(), MUSIC_FADE_MS);
                 }
               }
             }
@@ -742,13 +1142,16 @@ export function useWebSocket() {
             }]);
             if (d.ttsAudioPath) {
               ttsPlayingRef.current = true;
+              applyActiveMusicVolume(160);
               setStatus("speaking");
               setPlayerState((p) => ({ ...p, status: "speaking" }));
               if (ttsAudioRef.current) {
                 ttsAudioRef.current.src = audioUrl ?? "";
                 ttsAudioRef.current.play().catch(() => {
                   ttsPlayingRef.current = false;
-                  if (audioRef.current && !audioRef.current.paused && audioRef.current.currentSrc) {
+                  applyActiveMusicVolume(220);
+                  const active = getActiveMusicAudio();
+                  if (active && !active.paused && active.currentSrc) {
                     setStatus("playing");
                     setPlayerState((p) => ({ ...p, status: "playing" }));
                   }
@@ -778,6 +1181,8 @@ export function useWebSocket() {
           case "segue": {
             const d = msg.data as WSSeguePayload;
             if (d.audioPath && ttsAudioRef.current) {
+              ttsPlayingRef.current = true;
+              applyActiveMusicVolume(160);
               ttsAudioRef.current.src = d.audioPath;
               ttsAudioRef.current.play().catch(console.error);
             }
@@ -848,7 +1253,16 @@ export function useWebSocket() {
       wsRef.current = null;
       ws?.close();
     };
-  }, [refreshLibraryData, rememberTrack, resolveAndPlayTrack, toPlayableUrl]);
+  }, [
+    applyActiveMusicVolume,
+    fadeAudioVolume,
+    getActiveMusicAudio,
+    getEffectiveMusicVolume,
+    refreshLibraryData,
+    rememberTrack,
+    resolveAndPlayTrack,
+    toPlayableUrl,
+  ]);
 
   const statusText =
     status === "thinking" ? "AI is thinking..."
@@ -878,7 +1292,7 @@ export function useWebSocket() {
     isUpdatingVoicePreset,
     userAvatarUrl,
     status, messages, djMessages, currentTrack: playerState.currentTrack,
-    isConnected, reconnecting, playerState, audioRef, ttsAudioRef,
+    isConnected, reconnecting, playerState, audioRef, nextAudioRef, ttsAudioRef,
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
