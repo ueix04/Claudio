@@ -50,6 +50,52 @@ type PlayerView = "list" | "favorites" | "taste";
 type PlayerDisplayMode = "playlist" | "clock";
 type SettingsPanel = "root" | "theme" | "display" | "audio";
 type WeatherBadge = { emoji: string; summary: string };
+type ListenCheckId = "program" | "dj" | "context";
+type ListenCheckState = {
+  startedAt: number | null;
+  completedAt: number | null;
+  checks: Record<ListenCheckId, boolean>;
+};
+
+const LISTEN_CHECK_STORAGE_KEY = "claudio-listen-check";
+const LISTEN_CHECK_TARGET_MS = 20 * 60 * 1000;
+const LISTEN_CHECK_ITEMS: Array<{ id: ListenCheckId; label: string }> = [
+  { id: "program", label: "PROGRAM FEEL" },
+  { id: "dj", label: "DJ RESTRAINT" },
+  { id: "context", label: "CONTEXT FLOW" },
+];
+
+const createEmptyListenCheck = (): ListenCheckState => ({
+  startedAt: null,
+  completedAt: null,
+  checks: {
+    program: false,
+    dj: false,
+    context: false,
+  },
+});
+
+const loadListenCheckState = (): ListenCheckState => {
+  const empty = createEmptyListenCheck();
+  if (typeof window === "undefined") return empty;
+
+  try {
+    const raw = window.localStorage.getItem(LISTEN_CHECK_STORAGE_KEY);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as Partial<ListenCheckState>;
+    return {
+      startedAt: typeof parsed.startedAt === "number" ? parsed.startedAt : null,
+      completedAt: typeof parsed.completedAt === "number" ? parsed.completedAt : null,
+      checks: {
+        program: Boolean(parsed.checks?.program),
+        dj: Boolean(parsed.checks?.dj),
+        context: Boolean(parsed.checks?.context),
+      },
+    };
+  } catch {
+    return empty;
+  }
+};
 
 const formatPlaybackTime = (timeInSeconds: number) => {
   if (isNaN(timeInSeconds)) return "0:00";
@@ -119,6 +165,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const [weatherBadge, setWeatherBadge] = useState<WeatherBadge | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsPanel, setSettingsPanel] = useState<SettingsPanel>("root");
+  const [listenCheck, setListenCheck] = useState<ListenCheckState>(() => loadListenCheckState());
   const volumeTrackRef = useRef<HTMLDivElement>(null);
   const activePointerIdRef = useRef<number | null>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
@@ -129,6 +176,22 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(LISTEN_CHECK_STORAGE_KEY, JSON.stringify(listenCheck));
+  }, [listenCheck]);
+
+  useEffect(() => {
+    setListenCheck((current) => {
+      if (!current.startedAt || current.completedAt) return current;
+      const allChecksPassed = LISTEN_CHECK_ITEMS.every((item) => current.checks[item.id]);
+      if (!allChecksPassed || now.getTime() - current.startedAt < LISTEN_CHECK_TARGET_MS) return current;
+      return {
+        ...current,
+        completedAt: Date.now(),
+      };
+    });
+  }, [now]);
 
   useEffect(() => {
     const toEmoji = (description: string) => {
@@ -865,6 +928,40 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const programAuditChecks = programAudit?.issues.length
       ? programAudit.issues
       : programAudit?.checks.slice(0, 4) ?? [];
+    const rawListenElapsedMs = listenCheck.startedAt
+      ? Math.max(0, now.getTime() - listenCheck.startedAt)
+      : 0;
+    const listenElapsedMs = Math.min(rawListenElapsedMs, LISTEN_CHECK_TARGET_MS);
+    const listenProgressPercent = Math.round((listenElapsedMs / LISTEN_CHECK_TARGET_MS) * 100);
+    const listenCheckedCount = LISTEN_CHECK_ITEMS.filter((item) => listenCheck.checks[item.id]).length;
+    const listenReady = Boolean(listenCheck.startedAt && rawListenElapsedMs >= LISTEN_CHECK_TARGET_MS);
+    const listenComplete = Boolean(listenCheck.completedAt)
+      || (listenReady && listenCheckedCount === LISTEN_CHECK_ITEMS.length);
+    const listenCheckLabel = listenComplete
+      ? "DONE"
+      : listenCheck.startedAt ? listenReady ? "READY" : "RUNNING" : "STANDBY";
+    const listenCheckStatusClass = listenComplete
+      ? "text-[#4ade80]"
+      : listenCheck.startedAt ? "claudio-theme-accent" : "claudio-theme-text-muted";
+    const startListenCheck = () => {
+      setListenCheck({
+        ...createEmptyListenCheck(),
+        startedAt: Date.now(),
+      });
+    };
+    const resetListenCheck = () => {
+      setListenCheck(createEmptyListenCheck());
+    };
+    const toggleListenCheck = (id: ListenCheckId) => {
+      setListenCheck((current) => ({
+        ...current,
+        completedAt: null,
+        checks: {
+          ...current.checks,
+          [id]: !current.checks[id],
+        },
+      }));
+    };
 
     return (
       <div className="flex flex-col gap-6">
@@ -913,6 +1010,71 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 </div>
               ))
             )}
+          </div>
+
+          <div className="mt-5 border-t claudio-theme-border pt-4">
+            <div className="panel-card-head">
+              <span>LISTEN CHECK</span>
+              <span className={listenCheckStatusClass}>{listenCheckLabel}</span>
+            </div>
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+              <div className="stat-card">
+                <span className="stat-label">ELAPSED</span>
+                <span className="stat-value">{formatPlaybackTime(Math.floor(listenElapsedMs / 1000))}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">TARGET</span>
+                <span className="stat-value">20:00</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">CHECKS</span>
+                <span className="stat-value">{listenCheckedCount}/{LISTEN_CHECK_ITEMS.length}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">READY</span>
+                <span className={`stat-value ${listenReady ? "text-[#4ade80]" : "claudio-theme-text-muted"}`}>
+                  {listenReady ? "YES" : "NO"}
+                </span>
+              </div>
+            </div>
+            <div className="mt-4 h-[5px] overflow-hidden rounded-full bg-[color:var(--claudio-border)]">
+              <div
+                className="h-full bg-[color:var(--claudio-accent)] transition-all duration-300"
+                style={{ width: `${listenProgressPercent}%` }}
+              ></div>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <button className="sync-pill" onClick={startListenCheck}>
+                {listenCheck.startedAt ? "RESTART" : "START 20 MIN"}
+              </button>
+              <button
+                className="sync-pill"
+                onClick={resetListenCheck}
+                disabled={!listenCheck.startedAt && listenCheckedCount === 0}
+              >
+                RESET
+              </button>
+            </div>
+            <div className="mt-4 grid md:grid-cols-3 gap-3">
+              {LISTEN_CHECK_ITEMS.map((item) => {
+                const checked = listenCheck.checks[item.id];
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => toggleListenCheck(item.id)}
+                    className={`insight-row text-left transition-colors ${
+                      checked ? "border-[color:var(--claudio-accent)]" : ""
+                    }`}
+                  >
+                    <span className="truncate text-sm claudio-theme-text-strong">{item.label}</span>
+                    <span className={`text-[10px] uppercase ${checked ? "text-[#4ade80]" : "claudio-theme-text-muted"}`}>
+                      {checked ? "PASS" : "OPEN"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </section>
 
