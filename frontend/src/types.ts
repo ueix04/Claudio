@@ -263,6 +263,12 @@ export type ListenAcceptanceCriterion = {
   planText: string;
   passed: boolean;
   detail: string;
+  evidence?: {
+    recordId: string;
+    recordedAt: number;
+    durationMs: number;
+    note?: string;
+  };
   recordId?: string;
   recordedAt?: number;
 };

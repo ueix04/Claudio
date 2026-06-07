@@ -1229,6 +1229,14 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         {criterion.planText}
                       </span>
                       <span className="text-xs text-[#71717a] leading-relaxed break-words">{criterion.detail}</span>
+                      {criterion.evidence && (
+                        <span className="text-xs text-[#71717a] leading-relaxed break-words">
+                          {formatListenRecordTime(criterion.evidence.recordedAt)}
+                          {" · "}
+                          {formatPlaybackTime(Math.floor(criterion.evidence.durationMs / 1000))}
+                          {criterion.evidence.note ? ` · ${criterion.evidence.note}` : ""}
+                        </span>
+                      )}
                     </div>
                     <span className={`text-[10px] uppercase ${
                       criterion.passed ? "text-[#4ade80]" : "claudio-theme-text-muted"

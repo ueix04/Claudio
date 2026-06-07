@@ -8,6 +8,12 @@ export interface ListenAcceptanceCriterion {
   planText: string;
   passed: boolean;
   detail: string;
+  evidence?: {
+    recordId: string;
+    recordedAt: number;
+    durationMs: number;
+    note?: string;
+  };
   recordId?: string;
   recordedAt?: number;
 }
@@ -66,7 +72,33 @@ const isCleanEvidenceRecord = (record: ListenCheckRecord, criterion: ListenAccep
     && record.programAudit?.ok === true
     && getIssueCount(record) === 0;
 
-function describeBlocker(records: ListenCheckRecord[]): string {
+const isReviewRecord = (record: ListenCheckRecord) =>
+  record.durationMs >= TARGET_LISTEN_MS
+    && (
+      record.needsFollowUp === true
+      || !record.programAudit
+      || record.programAudit.ok !== true
+      || getIssueCount(record) !== 0
+    );
+
+function getLatestReviewRecord(records: ListenCheckRecord[]) {
+  return records
+    .filter(isReviewRecord)
+    .sort((a, b) => b.recordedAt - a.recordedAt)[0];
+}
+
+function describeReviewRecord(record: ListenCheckRecord): string {
+  if (record.needsFollowUp === true) {
+    return "A newer 20-minute listen is marked for follow-up. Save a clean listen after it to pass this criterion.";
+  }
+  if (!record.programAudit) {
+    return "A newer 20-minute listen has no program audit snapshot. Save a clean listen after it to pass this criterion.";
+  }
+  return `A newer 20-minute listen has ${getIssueCount(record) ?? "unknown"} audit issues. Save a clean listen after it to pass this criterion.`;
+}
+
+function describeBlocker(records: ListenCheckRecord[], latestReviewRecord?: ListenCheckRecord): string {
+  if (latestReviewRecord) return describeReviewRecord(latestReviewRecord);
   const latest = records[0];
   if (!latest) return "No saved 20-minute listen check yet.";
   if (latest.durationMs < TARGET_LISTEN_MS) return "Latest listen record is shorter than 20 minutes.";
@@ -82,14 +114,27 @@ export function summarizeListenAcceptance(
   records: ListenCheckRecord[],
   generatedAt = Date.now(),
 ): ListenAcceptanceSummary {
+  const latestReviewRecord = getLatestReviewRecord(records);
+  const reviewCutoff = latestReviewRecord?.recordedAt ?? 0;
   const criteria = CRITERIA.map((criterion) => {
-    const record = records.find((candidate) => isCleanEvidenceRecord(candidate, criterion.id));
+    const record = records.find((candidate) => (
+      candidate.recordedAt > reviewCutoff
+      && isCleanEvidenceRecord(candidate, criterion.id)
+    ));
     return {
       id: criterion.id,
       label: criterion.label,
       planText: criterion.planText,
       passed: Boolean(record),
-      detail: record ? criterion.passDetail : describeBlocker(records),
+      detail: record ? criterion.passDetail : describeBlocker(records, latestReviewRecord),
+      evidence: record
+        ? {
+            recordId: record.id,
+            recordedAt: record.recordedAt,
+            durationMs: record.durationMs,
+            note: record.note,
+          }
+        : undefined,
       recordId: record?.id,
       recordedAt: record?.recordedAt,
     };

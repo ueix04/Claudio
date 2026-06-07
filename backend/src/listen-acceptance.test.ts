@@ -40,6 +40,11 @@ describe("listen acceptance summary", () => {
       "listen_ok",
       "listen_ok",
     ]);
+    expect(summary.criteria[0].evidence).toMatchObject({
+      recordId: "listen_ok",
+      durationMs: 1_200_000,
+      note: "Felt cohesive.",
+    });
   });
 
   it("keeps acceptance in review when the latest listen needs follow-up", () => {
@@ -52,5 +57,35 @@ describe("listen acceptance summary", () => {
     expect(summary.latestRecord?.needsFollowUp).toBe(true);
     expect(summary.criteria.every((criterion) => !criterion.passed)).toBe(true);
     expect(summary.criteria[0].detail).toContain("follow-up");
+  });
+
+  it("requires new clean evidence after a newer review record", () => {
+    const olderClean = makeRecord({
+      id: "listen_old_clean",
+      recordedAt: 1_200_002,
+    });
+    const newerProblem = makeRecord({
+      id: "listen_new_problem",
+      needsFollowUp: true,
+      recordedAt: 1_300_002,
+    });
+
+    const blocked = summarizeListenAcceptance([newerProblem, olderClean]);
+
+    expect(blocked.ready).toBe(false);
+    expect(blocked.criteria.every((criterion) => !criterion.passed)).toBe(true);
+
+    const newestClean = makeRecord({
+      id: "listen_new_clean",
+      recordedAt: 1_400_002,
+    });
+    const ready = summarizeListenAcceptance([newestClean, newerProblem, olderClean]);
+
+    expect(ready.ready).toBe(true);
+    expect(ready.criteria.map((criterion) => criterion.recordId)).toEqual([
+      "listen_new_clean",
+      "listen_new_clean",
+      "listen_new_clean",
+    ]);
   });
 });
