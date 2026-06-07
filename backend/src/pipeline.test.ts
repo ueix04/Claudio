@@ -480,20 +480,28 @@ describe("Pipeline Engine", () => {
         artist: "Artist B",
         picUrl: "pic-b",
         duration: 120,
-      }));
-    vi.mocked(netease.getPlayableUrl)
-      .mockResolvedValueOnce("url-a")
-      .mockResolvedValueOnce("url-b");
+      }))
+      .mockImplementation(async (keyword) => {
+        const index = vi.mocked(netease.searchSongs).mock.calls.length;
+        return mockNeteaseSearchTrack({
+          id: 100 + index,
+          name: `Fallback ${index}`,
+          artist: `Fallback Artist ${index}`,
+          duration: 240_000,
+        });
+      });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
 
     const result = await pipeline.runStartupRadioProgram();
 
     expect(result.programTitle).toBe("午间电台");
-    expect(result.tracks).toHaveLength(2);
+    expect(result.tracks.length).toBeGreaterThanOrEqual(6);
+    expect(result.tracks.length).toBeLessThanOrEqual(10);
     expect(db.setRadioQueue).toHaveBeenCalledWith(
-      [
+      expect.arrayContaining([
         expect.objectContaining({ id: "11", name: "Song A" }),
         expect.objectContaining({ id: "12", name: "Song B" }),
-      ],
+      ]),
       expect.objectContaining({
         currentIndex: 0,
         program: expect.objectContaining({
@@ -600,6 +608,73 @@ describe("Pipeline Engine", () => {
       }),
     );
     expect(db.setStatus).toHaveBeenLastCalledWith("playing");
+  });
+
+  it("keeps a full fallback startup queue even when all fallback tracks are recent", async () => {
+    vi.mocked(db.getState).mockResolvedValue({
+      ...baseState,
+      playHistory: [
+        { title: "Best Day Of My Life", artist: "American Authors", playedAt: 1 },
+        { title: "Sunflower", artist: "Post Malone, Swae Lee", playedAt: 2 },
+        { title: "Yellow", artist: "Coldplay", playedAt: 3 },
+        { title: "晴天", artist: "周杰伦", playedAt: 4 },
+        { title: "The Scientist", artist: "Coldplay", playedAt: 5 },
+        { title: "夜空中最亮的星", artist: "逃跑计划", playedAt: 6 },
+      ],
+    } as any);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(weather.getDefaultWeatherPromptContext).mockResolvedValue("Hong Kong cloudy, 24°C");
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("rate limited"));
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/fallback-startup.wav",
+    });
+    const fallbackTracks = [
+      { title: "Best Day Of My Life", artist: "American Authors" },
+      { title: "Sunflower", artist: "Post Malone, Swae Lee" },
+      { title: "Yellow", artist: "Coldplay" },
+      { title: "晴天", artist: "周杰伦" },
+      { title: "The Scientist", artist: "Coldplay" },
+      { title: "夜空中最亮的星", artist: "逃跑计划" },
+    ];
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword) => {
+      const raw = String(keyword);
+      const matched = fallbackTracks.find((track) => raw.startsWith(track.title));
+      const index = vi.mocked(netease.searchSongs).mock.calls.length;
+      return mockNeteaseSearchTrack({
+        id: 1000 + index,
+        name: matched?.title ?? raw,
+        artist: matched?.artist ?? `Fallback Artist ${index}`,
+        duration: 240_000,
+      });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
+
+    const result = await pipeline.runStartupRadioProgram({ background: true });
+
+    expect(result.tracks).toHaveLength(6);
+    expect(db.setRadioQueue).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Best Day Of My Life" }),
+        expect.objectContaining({ name: "Sunflower" }),
+        expect.objectContaining({ name: "Yellow" }),
+        expect.objectContaining({ name: "晴天" }),
+        expect.objectContaining({ name: "The Scientist" }),
+        expect.objectContaining({ name: "夜空中最亮的星" }),
+      ]),
+      expect.objectContaining({
+        program: expect.objectContaining({
+          source: "startup",
+          plannedMinutes: 24,
+        }),
+      }),
+    );
   });
 
   it("should build chat switch program from user request", async () => {

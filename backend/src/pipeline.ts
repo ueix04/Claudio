@@ -182,12 +182,36 @@ async function resolvePlayableTracks(
   return resolvePlayableTracksFromRequests(playList, FALLBACK_TRACKS[mode], localCandidateMap, avoidTracks);
 }
 
+function getPlayableTrackKey(track: PlayableTrack): string {
+  return normalizeTrackKey(track.name, track.artist);
+}
+
+function dedupePlayableTracks(tracks: PlayableTrack[]): PlayableTrack[] {
+  const seen = new Set<string>();
+  return tracks.filter((track) => {
+    const key = getPlayableTrackKey(track);
+    if (key === "::" || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
 async function resolvePlayableTracksFromRequests(
   playList: RequestedTrack[],
   fallbackTracks: Array<{ title: string; artist: string }>,
   localCandidateMap: Map<number, tasteProfile.RecommendationCandidate> = new Map(),
   avoidTracks: TrackIdentity[] = [],
+  options?: {
+    minTracks?: number;
+    maxTracks?: number;
+  },
 ): Promise<PlayableTrack[]> {
+  const minTracks = Math.max(1, options?.minTracks ?? 1);
+  const maxTracks = Math.max(minTracks, options?.maxTracks ?? Number.POSITIVE_INFINITY);
+  const limitTracks = (tracks: PlayableTrack[]) =>
+    Number.isFinite(maxTracks) ? tracks.slice(0, maxTracks) : tracks;
   const attempts = [...playList];
   if (attempts.length === 0) {
     attempts.push(...fallbackTracks);
@@ -238,22 +262,35 @@ async function resolvePlayableTracksFromRequests(
     });
 
   const preferredTracks = filterProgramTrackRepeats(playableTracks, avoidTracks);
-  if (preferredTracks.length > 0) {
-    return preferredTracks;
+  if (preferredTracks.length >= minTracks || (preferredTracks.length > 0 && minTracks <= 1)) {
+    return limitTracks(preferredTracks);
   }
 
+  const attemptedKeys = new Set(
+    attempts.map((track) => normalizeTrackKey(track.title, track.artist)),
+  );
+  const fallbackPlayableTracks: PlayableTrack[] = [];
   for (const fallback of fallbackTracks) {
+    if (attemptedKeys.has(normalizeTrackKey(fallback.title, fallback.artist))) {
+      continue;
+    }
     try {
       const track = await musicSources.resolveTrack(fallback.title, fallback.artist);
-      if (track && filterProgramTrackRepeats([track], avoidTracks).length > 0) {
-        return [track];
+      if (track) {
+        fallbackPlayableTracks.push(track);
       }
     } catch (error) {
       console.error(`Fallback track failed ${fallback.title}:`, error);
     }
   }
 
-  return playableTracks.slice(0, 1);
+  const combinedTracks = dedupePlayableTracks([...playableTracks, ...fallbackPlayableTracks]);
+  const freshCombinedTracks = filterProgramTrackRepeats(combinedTracks, avoidTracks);
+  if (freshCombinedTracks.length >= minTracks || combinedTracks.length < minTracks) {
+    return limitTracks(freshCombinedTracks.length > 0 ? freshCombinedTracks : combinedTracks);
+  }
+
+  return limitTracks(combinedTracks);
 }
 
 function normalizeTrackKey(title: string | undefined, artist: string | undefined): string {
@@ -609,6 +646,7 @@ export async function runStartupRadioProgram(
         STARTUP_FALLBACK_TRACKS,
         context.localCandidateMap,
         buildAvoidTracks(context),
+        { minTracks: STARTUP_FALLBACK_TRACKS.length, maxTracks: 10 },
       ),
     ]);
 
@@ -658,6 +696,7 @@ export async function runChatSwitchProgram(
         STARTUP_FALLBACK_TRACKS,
         context.localCandidateMap,
         buildAvoidTracks(context),
+        { minTracks: 3, maxTracks: 5 },
       ),
     ]);
 
