@@ -10,6 +10,7 @@ import {
   clearLocalLibraryCacheForTests,
   getLocalLibraryFileForPlayback,
   getLocalLibraryStatus,
+  getLocalLibraryTasteMatchSummary,
   getMusicSourceRuntimeStatus,
   inferStoredTrackSource,
   listMusicSourceAdapters,
@@ -115,6 +116,53 @@ describe("music source adapters", () => {
         ok: true,
       }),
     ]));
+  });
+
+  it("checks how much of the taste profile is covered by local library tracks", async () => {
+    const filePath = await createTempMusicFile("Match Artist - Match Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    clearLocalLibraryCacheForTests();
+
+    const summary = await getLocalLibraryTasteMatchSummary({
+      generatedAt: 1,
+      sourceSyncedAt: 1,
+      playlistCount: 1,
+      totalTrackCount: 2,
+      uniqueTrackCount: 2,
+      uniqueArtistCount: 2,
+      uniqueAlbumCount: 0,
+      languageMix: { chinese: 0, latin: 2, mixed: 0, other: 0 },
+      topArtists: [],
+      topAlbums: [],
+      topTracks: [
+        { id: 1, name: "Match Song", artist: "Match Artist", occurrences: 2, playlistCount: 1 },
+        { id: 2, name: "Missing Song", artist: "Missing Artist", occurrences: 1, playlistCount: 1 },
+      ],
+      titleKeywords: [],
+      artistKeywords: [],
+      playlistFingerprints: [],
+      summary: "taste",
+    });
+
+    expect(summary).toMatchObject({
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      enabled: true,
+      profileAvailable: true,
+      targetCount: 2,
+      matchedCount: 1,
+      coveragePercent: 50,
+    });
+    expect(summary.samples[0]).toMatchObject({
+      title: "Match Song",
+      artist: "Match Artist",
+      matched: true,
+      localTrack: {
+        title: "Match Song",
+        artist: "Match Artist",
+      },
+    });
+    expect(JSON.stringify(summary)).not.toContain(path.dirname(filePath));
   });
 
   it("infers legacy source identity for old numeric queue tracks", () => {

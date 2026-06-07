@@ -1,4 +1,5 @@
 import type { Track } from "../db.js";
+import type { TasteProfile } from "../taste-profile.js";
 import {
   LOCAL_LIBRARY_SOURCE_ID,
   isLocalLibraryEnabled,
@@ -64,6 +65,29 @@ export interface MusicSourceRuntimeStatus {
     role: "library" | "primary" | "fallback";
     enabled: boolean;
   }>;
+}
+
+export interface LocalLibraryTasteMatchSummary {
+  source: typeof LOCAL_LIBRARY_SOURCE_ID;
+  enabled: boolean;
+  profileAvailable: boolean;
+  checkedAt: number;
+  targetCount: number;
+  matchedCount: number;
+  coveragePercent: number;
+  samples: Array<{
+    title: string;
+    artist: string;
+    album?: string;
+    matched: boolean;
+    localTrack?: {
+      sourceTrackId: string;
+      title: string;
+      artist: string;
+      album?: string;
+    };
+  }>;
+  message: string;
 }
 
 export function getMusicSourceAdapter(source: MusicSourceId): MusicSourceAdapter {
@@ -143,6 +167,75 @@ export async function getMusicSourceRuntimeStatus(): Promise<MusicSourceRuntimeS
       },
     ],
     sources: sourceStatuses,
+  };
+}
+
+export async function getLocalLibraryTasteMatchSummary(
+  profile: TasteProfile | null,
+  options?: {
+    limit?: number;
+  },
+): Promise<LocalLibraryTasteMatchSummary> {
+  const checkedAt = Date.now();
+  const limit = options?.limit ?? 12;
+  const targetTracks = profile?.topTracks.slice(0, limit) ?? [];
+  const enabled = isLocalLibraryEnabled();
+
+  if (!profile || targetTracks.length === 0) {
+    return {
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      enabled,
+      profileAvailable: Boolean(profile),
+      checkedAt,
+      targetCount: 0,
+      matchedCount: 0,
+      coveragePercent: 0,
+      samples: [],
+      message: profile
+        ? "Taste profile has no top tracks to check yet."
+        : "No taste profile available. Sync your library before checking local coverage.",
+    };
+  }
+
+  const samples = await Promise.all(targetTracks.map(async (track) => {
+    const query = `${track.name} ${track.artist}`;
+    const matches = enabled
+      ? await localLibraryAdapter.search({ keyword: query, limit: 1 })
+      : [];
+    const localTrack = matches[0];
+
+    return {
+      title: track.name,
+      artist: track.artist,
+      album: track.album,
+      matched: Boolean(localTrack),
+      localTrack: localTrack
+        ? {
+            sourceTrackId: localTrack.sourceTrackId,
+            title: localTrack.title,
+            artist: localTrack.artist,
+            album: localTrack.album,
+          }
+        : undefined,
+    };
+  }));
+  const matchedCount = samples.filter((sample) => sample.matched).length;
+  const coveragePercent = targetTracks.length > 0
+    ? Math.round((matchedCount / targetTracks.length) * 100)
+    : 0;
+
+  return {
+    source: LOCAL_LIBRARY_SOURCE_ID,
+    enabled,
+    profileAvailable: true,
+    checkedAt,
+    targetCount: targetTracks.length,
+    matchedCount,
+    coveragePercent,
+    samples,
+    message: enabled
+      ? `Matched ${matchedCount}/${targetTracks.length} taste-profile tracks in local library.`
+      : "Local music library is disabled. Set LOCAL_MUSIC_DIRS to enable coverage checks.",
   };
 }
 

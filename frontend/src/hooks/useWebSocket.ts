@@ -7,6 +7,7 @@ import type {
   ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
+  LocalLibraryTasteMatchSummary,
   MusicSourceRuntimeStatus,
   PlayHistoryEntry,
   ProgramExperienceAudit,
@@ -63,6 +64,7 @@ export function useWebSocket() {
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
   const [musicSourceStatus, setMusicSourceStatus] = useState<MusicSourceRuntimeStatus | null>(null);
   const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
+  const [localLibraryMatchStatus, setLocalLibraryMatchStatus] = useState<LocalLibraryTasteMatchSummary | null>(null);
   const [programAudit, setProgramAudit] = useState<ProgramExperienceAudit | null>(null);
   const [listenCheckRecords, setListenCheckRecords] = useState<ListenCheckRecord[]>([]);
   const [listenAcceptance, setListenAcceptance] = useState<ListenAcceptanceSummary | null>(null);
@@ -627,6 +629,7 @@ export function useWebSocket() {
         djTasteRes,
         musicSourcesRes,
         localLibraryRes,
+        localLibraryMatchesRes,
         programAuditRes,
         listenChecksRes,
         listenAcceptanceRes,
@@ -637,6 +640,7 @@ export function useWebSocket() {
         fetch("/api/taste"),
         fetch("/api/music-sources"),
         fetch("/api/music-sources/local-library"),
+        fetch("/api/music-sources/local-library/matches"),
         fetch("/api/radio/program-audit"),
         fetch("/api/radio/listen-checks?limit=3"),
         fetch("/api/radio/listen-acceptance"),
@@ -665,6 +669,10 @@ export function useWebSocket() {
       if (localLibraryRes.ok) {
         const status = await localLibraryRes.json() as LocalLibraryStatus;
         setLocalLibraryStatus(status);
+      }
+      if (localLibraryMatchesRes.ok) {
+        const summary = await localLibraryMatchesRes.json() as LocalLibraryTasteMatchSummary;
+        setLocalLibraryMatchStatus(summary);
       }
       if (programAuditRes.ok) {
         const audit = await programAuditRes.json() as ProgramExperienceAudit;
@@ -758,6 +766,7 @@ export function useWebSocket() {
       }
       const status = await res.json() as LocalLibraryStatus;
       setLocalLibraryStatus(status);
+      await refreshLibraryData();
       showUtilityNotice(
         status.enabled
           ? `Local library: ${status.trackCount} tracks`
@@ -768,7 +777,7 @@ export function useWebSocket() {
     } finally {
       setIsRescanningLocalLibrary(false);
     }
-  }, [showUtilityNotice]);
+  }, [refreshLibraryData, showUtilityNotice]);
 
   useEffect(() => {
     playerStateRef.current = playerState;
@@ -1375,7 +1384,7 @@ export function useWebSocket() {
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, musicSourceStatus, localLibraryStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
+    isSyncingLibrary, lastSyncSummary, musicSourceStatus, localLibraryStatus, localLibraryMatchStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
     onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,

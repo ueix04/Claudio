@@ -134,6 +134,15 @@ export type TasteProfileAlbum = {
   count: number;
 };
 
+export type TasteProfileTrack = {
+  id: number;
+  name: string;
+  artist: string;
+  album?: string;
+  occurrences: number;
+  playlistCount: number;
+};
+
 export type TasteProfileKeyword = {
   term: string;
   count: number;
@@ -164,6 +173,7 @@ export type TasteProfile = {
   };
   topArtists: TasteProfileArtist[];
   topAlbums: TasteProfileAlbum[];
+  topTracks: TasteProfileTrack[];
   titleKeywords: TasteProfileKeyword[];
   artistKeywords: TasteProfileKeyword[];
   playlistFingerprints: TasteProfilePlaylistFingerprint[];
@@ -212,6 +222,29 @@ export type LocalLibraryStatus = {
   scanCacheMs: number;
   scannedAt?: number;
   sampleTracks: LocalLibrarySampleTrack[];
+  message: string;
+};
+
+export type LocalLibraryTasteMatchSummary = {
+  source: "local_library";
+  enabled: boolean;
+  profileAvailable: boolean;
+  checkedAt: number;
+  targetCount: number;
+  matchedCount: number;
+  coveragePercent: number;
+  samples: Array<{
+    title: string;
+    artist: string;
+    album?: string;
+    matched: boolean;
+    localTrack?: {
+      sourceTrackId: string;
+      title: string;
+      artist: string;
+      album?: string;
+    };
+  }>;
   message: string;
 };
 

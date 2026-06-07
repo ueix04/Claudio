@@ -337,6 +337,16 @@ app.get("/api/music-sources/local-library", async (_req, res) => {
   }
 });
 
+app.get("/api/music-sources/local-library/matches", async (_req, res) => {
+  try {
+    const profile = await tasteProfile.getTasteProfile();
+    const summary = await musicSources.getLocalLibraryTasteMatchSummary(profile);
+    res.json(summary);
+  } catch (error) {
+    res.status(500).json({ error: getErrorMessage(error) });
+  }
+});
+
 app.post("/api/music-sources/local-library/rescan", async (_req, res) => {
   try {
     const status = await musicSources.getLocalLibraryStatus({

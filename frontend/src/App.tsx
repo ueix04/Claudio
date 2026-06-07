@@ -24,6 +24,7 @@ function AppLayout() {
     lastSyncSummary,
     musicSourceStatus,
     localLibraryStatus,
+    localLibraryMatchStatus,
     programAudit,
     listenCheckRecords,
     listenAcceptance,
@@ -84,6 +85,7 @@ function AppLayout() {
                   lastSyncSummary={lastSyncSummary}
                   musicSourceStatus={musicSourceStatus}
                   localLibraryStatus={localLibraryStatus}
+                  localLibraryMatchStatus={localLibraryMatchStatus}
                   programAudit={programAudit}
                   listenCheckRecords={listenCheckRecords}
                   listenAcceptance={listenAcceptance}

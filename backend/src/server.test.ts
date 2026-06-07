@@ -213,6 +213,54 @@ describe("API Server", () => {
     expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
   });
 
+  it("GET /api/music-sources/local-library/matches 返回本地曲库口味命中率", async () => {
+    const musicSources = await import("./music-sources/index.js");
+    const tasteProfile = await import("./taste-profile.js");
+    const firstFilePath = await createTempMusicFile("Match Artist - Match Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(firstFilePath);
+    musicSources.clearLocalLibraryCacheForTests();
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue({
+      generatedAt: 1,
+      sourceSyncedAt: 1,
+      playlistCount: 1,
+      totalTrackCount: 2,
+      uniqueTrackCount: 2,
+      uniqueArtistCount: 2,
+      uniqueAlbumCount: 0,
+      languageMix: { chinese: 0, latin: 2, mixed: 0, other: 0 },
+      topArtists: [],
+      topAlbums: [],
+      topTracks: [
+        { id: 1, name: "Match Song", artist: "Match Artist", occurrences: 2, playlistCount: 1 },
+        { id: 2, name: "Missing Song", artist: "Missing Artist", occurrences: 1, playlistCount: 1 },
+      ],
+      titleKeywords: [],
+      artistKeywords: [],
+      playlistFingerprints: [],
+      summary: "taste",
+    });
+
+    const res = await fetch(`http://localhost:${port}/api/music-sources/local-library/matches`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      targetCount: number;
+      matchedCount: number;
+      coveragePercent: number;
+      samples: Array<{ title: string; matched: boolean; localTrack?: { title: string } }>;
+    };
+    expect(body.targetCount).toBe(2);
+    expect(body.matchedCount).toBe(1);
+    expect(body.coveragePercent).toBe(50);
+    expect(body.samples[0]).toMatchObject({
+      title: "Match Song",
+      matched: true,
+      localTrack: { title: "Match Song" },
+    });
+    expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
+  });
+
   it("POST /api/netease/sync 同步并保存网易云歌单快照", async () => {
     const netease = await import("./netease.js");
     const db = await import("./db.js");

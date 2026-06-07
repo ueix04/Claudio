@@ -6,6 +6,7 @@ import {
   ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
+  LocalLibraryTasteMatchSummary,
   MusicSourceRuntimeStatus,
   PlayHistoryEntry,
   PlayerState,
@@ -26,6 +27,7 @@ interface PlayerPanelProps {
   lastSyncSummary: SyncSummary | null;
   musicSourceStatus: MusicSourceRuntimeStatus | null;
   localLibraryStatus: LocalLibraryStatus | null;
+  localLibraryMatchStatus: LocalLibraryTasteMatchSummary | null;
   programAudit: ProgramExperienceAudit | null;
   listenCheckRecords: ListenCheckRecord[];
   listenAcceptance: ListenAcceptanceSummary | null;
@@ -209,6 +211,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   lastSyncSummary,
   musicSourceStatus,
   localLibraryStatus,
+  localLibraryMatchStatus,
   programAudit,
   listenCheckRecords,
   listenAcceptance,
@@ -1135,6 +1138,14 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const localStatusLabel = localLibraryStatus?.enabled
       ? localLibraryStatus.trackCount > 0 ? "READY" : "EMPTY"
       : "STANDBY";
+    const localMatchLabel = localLibraryMatchStatus
+      ? localLibraryMatchStatus.profileAvailable
+        ? `${localLibraryMatchStatus.coveragePercent}%`
+        : "NO PROFILE"
+      : "--";
+    const localMatchStatusClass = localLibraryMatchStatus?.profileAvailable
+      ? localLibraryMatchStatus.matchedCount > 0 ? "text-[#4ade80]" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
     const programAuditLabel = programAudit
       ? programAudit.ok ? "READY" : "CHECK"
       : "STANDBY";
@@ -1632,7 +1643,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               {isRescanningLocalLibrary ? "SCANNING..." : "RESCAN"}
             </button>
           </div>
-          <div className="mt-4 grid grid-cols-2 xl:grid-cols-4 gap-3">
+          <div className="mt-4 grid grid-cols-2 xl:grid-cols-5 gap-3">
             <div className="stat-card">
               <span className="stat-label">TRACKS</span>
               <span className="stat-value">{localLibraryStatus?.trackCount ?? 0}</span>
@@ -1651,7 +1662,39 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               <span className="stat-label">SCANNED</span>
               <span className="stat-value">{formatScanTime(localLibraryStatus?.scannedAt)}</span>
             </div>
+            <div className="stat-card">
+              <span className="stat-label">MATCH</span>
+              <span className={`stat-value ${localMatchStatusClass}`}>{localMatchLabel}</span>
+            </div>
           </div>
+          {localLibraryMatchStatus && (
+            <div className="mt-4">
+              <div className="text-xs text-[#71717a] leading-relaxed">
+                {localLibraryMatchStatus.profileAvailable
+                  ? `${localLibraryMatchStatus.matchedCount}/${localLibraryMatchStatus.targetCount} taste tracks matched locally`
+                  : localLibraryMatchStatus.message}
+              </div>
+              {localLibraryMatchStatus.samples.length > 0 && (
+                <div className="mt-3 grid md:grid-cols-2 gap-3">
+                  {localLibraryMatchStatus.samples.slice(0, 4).map((sample) => (
+                    <div key={`${sample.title}-${sample.artist}`} className="insight-row">
+                      <div className="flex flex-col min-w-0">
+                        <span className="truncate text-sm claudio-theme-text-strong">{sample.title}</span>
+                        <span className="truncate text-xs text-[#71717a]">
+                          {sample.localTrack
+                            ? `${sample.localTrack.title} · ${sample.localTrack.artist}`
+                            : sample.artist}
+                        </span>
+                      </div>
+                      <span className={`text-[10px] uppercase ${sample.matched ? "text-[#4ade80]" : "text-[#facc15]"}`}>
+                        {sample.matched ? "match" : "miss"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {!localLibraryStatus?.enabled ? (
             <div className="panel-empty mt-4">No local library detected</div>
           ) : localLibraryStatus.sampleTracks.length === 0 ? (
