@@ -30,6 +30,11 @@ describe("listen acceptance summary", () => {
     expect(summary.targetMinutes).toBe(20);
     expect(summary.criteria).toHaveLength(3);
     expect(summary.criteria.every((criterion) => criterion.passed)).toBe(true);
+    expect(summary.criteria.map((criterion) => criterion.planText)).toEqual([
+      "连续播放 20 分钟时，整体像一档节目，而不是一串推荐。",
+      "DJ 话术不重复、不频繁问候、不每次提天气。",
+      "用户能感觉 Claudio 在承接上下文和音乐情绪。",
+    ]);
     expect(summary.criteria.map((criterion) => criterion.recordId)).toEqual([
       "listen_ok",
       "listen_ok",

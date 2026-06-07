@@ -1225,7 +1225,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 listenAcceptance.criteria.map((criterion) => (
                   <div key={criterion.id} className="insight-row items-start">
                     <div className="flex flex-col min-w-0 gap-1">
-                      <span className="truncate text-sm claudio-theme-text-strong">{criterion.label}</span>
+                      <span className="text-sm claudio-theme-text-strong leading-relaxed break-words">
+                        {criterion.planText}
+                      </span>
                       <span className="text-xs text-[#71717a] leading-relaxed break-words">{criterion.detail}</span>
                     </div>
                     <span className={`text-[10px] uppercase ${

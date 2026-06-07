@@ -260,6 +260,7 @@ export type ListenCheckRecord = {
 export type ListenAcceptanceCriterion = {
   id: "program" | "dj" | "context";
   label: string;
+  planText: string;
   passed: boolean;
   detail: string;
   recordId?: string;

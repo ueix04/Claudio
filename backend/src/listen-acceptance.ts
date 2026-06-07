@@ -5,6 +5,7 @@ export type ListenAcceptanceCriterionId = "program" | "dj" | "context";
 export interface ListenAcceptanceCriterion {
   id: ListenAcceptanceCriterionId;
   label: string;
+  planText: string;
   passed: boolean;
   detail: string;
   recordId?: string;
@@ -29,20 +30,28 @@ export interface ListenAcceptanceSummary {
 
 const TARGET_LISTEN_MS = 20 * 60 * 1000;
 
-const CRITERIA: Array<{ id: ListenAcceptanceCriterionId; label: string; passDetail: string }> = [
+const CRITERIA: Array<{
+  id: ListenAcceptanceCriterionId;
+  label: string;
+  planText: string;
+  passDetail: string;
+}> = [
   {
     id: "program",
     label: "Program feel",
+    planText: "连续播放 20 分钟时，整体像一档节目，而不是一串推荐。",
     passDetail: "A clean 20-minute listen confirmed the set works as one program.",
   },
   {
     id: "dj",
     label: "DJ restraint",
+    planText: "DJ 话术不重复、不频繁问候、不每次提天气。",
     passDetail: "A clean 20-minute listen confirmed restrained DJ talk.",
   },
   {
     id: "context",
     label: "Context flow",
+    planText: "用户能感觉 Claudio 在承接上下文和音乐情绪。",
     passDetail: "A clean 20-minute listen confirmed the context and mood carry through.",
   },
 ];
@@ -78,6 +87,7 @@ export function summarizeListenAcceptance(
     return {
       id: criterion.id,
       label: criterion.label,
+      planText: criterion.planText,
       passed: Boolean(record),
       detail: record ? criterion.passDetail : describeBlocker(records),
       recordId: record?.id,
