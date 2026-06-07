@@ -221,6 +221,17 @@ describe("db.ts", () => {
         speechSlotCount: 3,
         issueCount: 0,
       },
+      programSnapshot: {
+        sessionId: "startup_test",
+        title: "Night Flow",
+        mood: "quiet",
+        source: "startup",
+        generatedAt: 1,
+        currentQueueIndex: 0,
+        tracks: [
+          { id: "1", name: "Song A", artist: "Artist A", source: "local_library", duration: 240000 },
+        ],
+      },
     });
 
     const records = await getListenCheckRecords();
@@ -234,6 +245,13 @@ describe("db.ts", () => {
       note: "20 minutes felt cohesive.",
       needsFollowUp: false,
       programAudit: { ok: true, issueCount: 0 },
+      programSnapshot: {
+        sessionId: "startup_test",
+        title: "Night Flow",
+        tracks: [
+          { id: "1", name: "Song A", artist: "Artist A", source: "local_library", duration: 240000 },
+        ],
+      },
     });
     expect(state.listenChecks[0].id).toBe(record.id);
   });

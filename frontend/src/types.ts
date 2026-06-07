@@ -254,6 +254,22 @@ export type ListenCheckRecord = {
     speechSlotCount: number;
     issueCount: number;
   };
+  programSnapshot?: {
+    sessionId?: string;
+    title?: string;
+    mood?: string;
+    source?: string;
+    generatedAt?: number;
+    currentQueueIndex: number;
+    tracks: Array<{
+      id: string;
+      name: string;
+      artist: string;
+      source?: string;
+      urlSource?: string;
+      duration?: number;
+    }>;
+  };
   recordedAt: number;
 };
 

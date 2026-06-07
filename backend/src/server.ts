@@ -549,6 +549,25 @@ app.get("/api/radio/listen-acceptance", async (_req, res) => {
   res.json(summarizeListenAcceptance(records));
 });
 
+function buildListenProgramSnapshot(state: db.AppState): db.ListenCheckRecord["programSnapshot"] {
+  return {
+    sessionId: state.currentProgram?.sessionId,
+    title: state.currentProgram?.title,
+    mood: state.currentProgram?.mood,
+    source: state.currentProgram?.source,
+    generatedAt: state.currentProgram?.generatedAt,
+    currentQueueIndex: state.currentQueueIndex,
+    tracks: state.radioQueue.slice(0, 10).map((track) => ({
+      id: track.id,
+      name: track.name,
+      artist: track.artist,
+      source: track.source,
+      urlSource: track.urlSource,
+      duration: track.duration,
+    })),
+  };
+}
+
 app.post("/api/radio/listen-checks", async (req, res) => {
   const body = req.body as Record<string, any>;
   const startedAt = Number(body?.startedAt);
@@ -580,6 +599,7 @@ app.post("/api/radio/listen-checks", async (req, res) => {
         issueCount: Number(body.programAudit.issueCount) || 0,
       }
     : undefined;
+  const state = await db.getState();
 
   const record = await db.addListenCheckRecord({
     startedAt,
@@ -589,6 +609,7 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     note,
     needsFollowUp,
     programAudit,
+    programSnapshot: buildListenProgramSnapshot(state),
   });
   res.status(201).json(record);
 });

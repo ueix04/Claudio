@@ -368,6 +368,17 @@ describe("API Server", () => {
         speechSlotCount: 3,
         issueCount: 0,
       },
+      programSnapshot: {
+        sessionId: "startup_test",
+        title: "Night Flow",
+        mood: "quiet",
+        source: "startup",
+        generatedAt: 1,
+        currentQueueIndex: 0,
+        tracks: [
+          { id: "track-1", name: "Song A", artist: "Artist A", source: "local_library", duration: 240000 },
+        ],
+      },
       recordedAt: 1_200_002,
     };
     vi.mocked(db.addListenCheckRecord).mockResolvedValue(record);
@@ -394,6 +405,10 @@ describe("API Server", () => {
       note: "No repeated greetings.",
       needsFollowUp: false,
       programAudit: expect.objectContaining({ issueCount: 0 }),
+      programSnapshot: expect.objectContaining({
+        currentQueueIndex: 0,
+        tracks: expect.any(Array),
+      }),
     }));
 
     const getRes = await fetch(`http://localhost:${port}/api/radio/listen-checks?limit=5`);

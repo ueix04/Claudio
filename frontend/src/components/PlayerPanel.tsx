@@ -1266,15 +1266,21 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                   <div key={record.id} className="insight-row">
                     <div className="flex flex-col min-w-0 gap-1">
                       <span className="truncate text-sm claudio-theme-text-strong">
-                        {formatListenRecordTime(record.recordedAt)}
+                        {record.programSnapshot?.title || formatListenRecordTime(record.recordedAt)}
                       </span>
                       <span className="truncate text-xs text-[#71717a]">
+                        {record.programSnapshot?.title ? `${formatListenRecordTime(record.recordedAt)} · ` : ""}
                         {formatPlaybackTime(Math.floor(record.durationMs / 1000))}
                         {" · "}
                         {countRecordChecks(record)}/{LISTEN_CHECK_ITEMS.length} checks
                         {" · "}
                         {record.programAudit?.plannedMinutes ?? 0} min
                       </span>
+                      {record.programSnapshot?.tracks.length ? (
+                        <span className="truncate text-xs text-[#71717a]">
+                          {record.programSnapshot.tracks.slice(0, 3).map((track) => `${track.name} - ${track.artist}`).join(" / ")}
+                        </span>
+                      ) : null}
                       {record.note && (
                         <span className="text-xs text-[#71717a] leading-relaxed break-words">{record.note}</span>
                       )}
