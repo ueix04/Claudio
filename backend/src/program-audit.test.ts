@@ -95,4 +95,33 @@ describe("program experience audit", () => {
       "line_repetition",
     ]));
   });
+
+  it("ignores DJ history from before the current program", () => {
+    const queue = Array.from({ length: 6 }, (_, index) => makeTrack(index + 1));
+    const audit = auditProgramExperience(makeState({
+      currentTrack: queue[0],
+      radioQueue: queue,
+      currentProgram: {
+        source: "startup",
+        title: "Fresh Program",
+        mood: "fresh start",
+        summary: "A new long-form session.",
+        plannedMinutes: 24,
+        speechPlan: [
+          { beforeTrackIndex: 0, type: "intro", note: "开场" },
+          { beforeTrackIndex: 2, type: "short_say", note: "承接" },
+          { beforeTrackIndex: 5, type: "bumper", note: "station ID" },
+        ],
+        generatedAt: 10_000,
+      },
+      chatHistory: [
+        { role: "dj", text: "晚上好，欢迎回来，我是 Claudio，今天的天气很适合慢慢听。", timestamp: 1 },
+        { role: "dj", text: "晚上好，欢迎回来，我是 Claudio，今天的天气很适合慢慢听。", timestamp: 2 },
+        { role: "dj", text: "我们把这段节目接稳，先让前几首歌自己展开。", timestamp: 10_001 },
+      ],
+    }));
+
+    expect(audit.ok).toBe(true);
+    expect(audit.djLineCount).toBe(1);
+  });
 });

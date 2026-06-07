@@ -550,6 +550,58 @@ describe("Pipeline Engine", () => {
     expect(prompt).not.toContain("中文 40-120 字");
   });
 
+  it("should fall back to a deterministic startup program when LLM is rate limited", async () => {
+    vi.mocked(db.getState).mockResolvedValue(baseState as any);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("【收藏】Coldplay - Yellow");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(weather.getDefaultWeatherPromptContext).mockResolvedValue("Hong Kong cloudy, 24°C");
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("rate limited"));
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/fallback-startup.wav",
+    });
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword) => {
+      const title = String(keyword).split(" ").slice(0, -1).join(" ") || String(keyword);
+      const index = vi.mocked(netease.searchSongs).mock.calls.length;
+      return mockNeteaseSearchTrack({
+        id: 900 + index,
+        name: title,
+        artist: `Fallback Artist ${index}`,
+        duration: 240_000,
+      });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
+
+    const result = await pipeline.runStartupRadioProgram({ background: true });
+
+    expect(result.status).toBe("success");
+    expect(result.programTitle).toBe("Claudio 续播电台");
+    expect(result.tracks).toHaveLength(6);
+    expect(db.setRadioQueue).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ name: expect.any(String), url: expect.stringContaining("fallback-url-") }),
+      ]),
+      expect.objectContaining({
+        currentIndex: 0,
+        program: expect.objectContaining({
+          source: "startup",
+          title: "Claudio 续播电台",
+          plannedMinutes: 24,
+          speechPlan: expect.arrayContaining([
+            expect.objectContaining({ beforeTrackIndex: 0, type: "intro" }),
+            expect.objectContaining({ type: "short_say" }),
+          ]),
+        }),
+      }),
+    );
+    expect(db.setStatus).toHaveBeenLastCalledWith("playing");
+  });
+
   it("should build chat switch program from user request", async () => {
     vi.mocked(db.getState).mockResolvedValue({
       ...baseState,

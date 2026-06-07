@@ -32,6 +32,8 @@ const STARTUP_FALLBACK_TRACKS = [
   { title: "Sunflower", artist: "Post Malone, Swae Lee" },
   { title: "Yellow", artist: "Coldplay" },
   { title: "晴天", artist: "周杰伦" },
+  { title: "The Scientist", artist: "Coldplay" },
+  { title: "夜空中最亮的星", artist: "逃跑计划" },
 ];
 
 async function buildNcmPlaylistContext(): Promise<string> {
@@ -465,6 +467,28 @@ ${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
 `;
 }
 
+function buildFallbackStartupProgramResponse(context: MusicContext): StationProgramResponse {
+  const language = djLanguage.resolveDjCopyLanguage(context.state.djProfile);
+  const useEnglish = language === "en";
+
+  return {
+    title: useEnglish ? "Continuity Set" : "Claudio 续播电台",
+    mood: useEnglish ? "steady, warm continuity" : "稳定、温和、自然续播",
+    plannedMinutes: 24,
+    speechPlan: radioSession.buildDefaultSpeechPlan(STARTUP_FALLBACK_TRACKS.length),
+    say: useEnglish
+      ? "I'll keep the station moving with a steady set first. Let the first few songs open the room, then I'll step in only when the handoff needs a light touch."
+      : "我先把节目接稳，让前几首歌自然展开。中间只在需要承接的时候短短说一句，先保证音乐不断、气氛不断。",
+    ttsText: useEnglish
+      ? "I'll keep the station moving with a steady set first. Let the first few songs open the room, then I'll step in only when the handoff needs a light touch."
+      : "我先把节目接稳，让前几首歌自然展开。中间只在需要承接的时候短短说一句，先保证音乐不断、气氛不断。",
+    lineup: STARTUP_FALLBACK_TRACKS,
+    reason: useEnglish
+      ? "Fallback programming keeps a complete long-form set available when the model is temporarily unavailable."
+      : "模型暂时不可用时，先用稳定候选曲保持一档完整节目可播放。",
+  };
+}
+
 async function speakDjText(
   text: string,
   profile: db.DjProfile,
@@ -562,7 +586,13 @@ export async function runStartupRadioProgram(
       candidateLimit: 28,
     });
     const prompt = buildStartupProgramPrompt(context);
-    const response = await claude.callJsonLLM<StationProgramResponse>(prompt, 35_000);
+    let response: StationProgramResponse;
+    try {
+      response = await claude.callJsonLLM<StationProgramResponse>(prompt, 35_000);
+    } catch (error) {
+      console.warn("[radio] startup LLM failed, using deterministic fallback program:", error);
+      response = buildFallbackStartupProgramResponse(context);
+    }
 
     if (!background) {
       await db.setStatus("speaking");

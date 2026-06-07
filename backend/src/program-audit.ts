@@ -40,9 +40,15 @@ function getSpeechPlan(state: AppState): RadioSpeechSlot[] {
   return buildDefaultSpeechPlan(queueLength);
 }
 
-function getDjLines(chatHistory: ChatMessage[]): string[] {
+function getDjLines(chatHistory: ChatMessage[], currentProgramGeneratedAt?: number): string[] {
   return chatHistory
-    .filter((message) => message.role === "dj")
+    .filter((message) => (
+      message.role === "dj"
+      && (
+        !currentProgramGeneratedAt
+        || message.timestamp >= currentProgramGeneratedAt
+      )
+    ))
     .map((message) => message.text.trim())
     .filter(Boolean);
 }
@@ -83,7 +89,7 @@ export function auditProgramExperience(state: AppState): ProgramExperienceAudit 
   const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
   const speechPlan = getSpeechPlan({ ...state, radioQueue: queue });
   const plannedMinutes = state.currentProgram?.plannedMinutes ?? estimateProgramMinutes(queue);
-  const djLines = getDjLines(state.chatHistory);
+  const djLines = getDjLines(state.chatHistory, state.currentProgram?.generatedAt);
   const checks: ProgramAuditCheck[] = [];
 
   checks.push(buildCheck(
