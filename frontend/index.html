@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Claudio - AI 情感电台" />
+    <meta name="theme-color" content="#101816" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=20260508-2" />
+    <link rel="shortcut icon" href="/favicon.svg?v=20260508-2" />
+    <link rel="apple-touch-icon" href="/favicon.svg?v=20260508-2" />
+    <link rel="manifest" href="/manifest.json" />
+    <title>Claudio - AI 情感电台</title>
+  </head>
+  <body class="bg-gray-950 text-white min-h-screen">
+    <div id="root"></div>
+    <script>
+      if ("serviceWorker" in navigator) {
+        const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+        if (isLocalhost) {
+          navigator.serviceWorker.getRegistrations().then((registrations) => {
+            registrations.forEach((registration) => registration.unregister());
+          });
+          if ("caches" in window) {
+            caches.keys().then((keys) => keys.forEach((key) => caches.delete(key)));
+          }
+        } else {
+          navigator.serviceWorker.register("/sw.js");
+        }
+      }
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "claudio-ai-radio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claudio - AI 情感电台 MVP",
+  "scripts": {
+    "dev": "concurrently -n BE,FE -c magenta,cyan \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write .",
+    "dev:backend": "npm -w backend run dev",
+    "dev:frontend": "npm -w frontend run dev",
+    "build": "npm -w backend run build && npm -w frontend run build"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

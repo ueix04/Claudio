@@ -1,0 +1,22 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="32" y1="24" x2="228" y2="232" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F1716"/>
+      <stop offset="1" stop-color="#1C2B25"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(156 88) rotate(134.341) scale(121.824)">
+      <stop stop-color="#2FE08A" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#2FE08A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="58" y1="53" x2="178" y2="197" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F1B36C"/>
+      <stop offset="1" stop-color="#52E08D"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="236" height="236" rx="56" fill="url(#bg)"/>
+  <rect x="10" y="10" width="236" height="236" rx="56" stroke="rgba(255,255,255,0.08)"/>
+  <rect x="10" y="10" width="236" height="236" rx="56" fill="url(#glow)"/>
+  <path d="M168 78C156.532 67.8938 142.545 62 127.182 62C91.1766 62 62 91.1015 62 127C62 162.899 91.1766 192 127.182 192C142.545 192 156.532 186.106 168 176" stroke="url(#mark)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="178" cy="127" r="13" fill="#52E08D"/>
+  <circle cx="178" cy="127" r="24" stroke="rgba(82,224,141,0.20)" stroke-width="8"/>
+</svg>

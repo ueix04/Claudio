@@ -1,0 +1,17 @@
+{
+  "name": "Claudio AI Radio",
+  "short_name": "Claudio",
+  "description": "AI 情感电台 - 懂你心情的音乐伴侣",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101816",
+  "theme_color": "#101816",
+  "icons": [
+    {
+      "src": "/favicon.svg?v=20260508-2",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
