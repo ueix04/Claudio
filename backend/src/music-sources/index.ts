@@ -13,6 +13,7 @@ import {
 import {
   MusicSourceAdapter,
   MusicSourceError,
+  MusicSourceHealth,
   MusicSourceId,
   MusicSourceTrack,
   PlayableTrack,
@@ -51,6 +52,20 @@ const PLAYABLE_URL_FALLBACKS: Partial<Record<MusicSourceId, MusicSourceId[]>> = 
   [NETEASE_LEGACY_SOURCE_ID]: [UNBLOCK_NETEASE_SOURCE_ID],
 };
 
+export interface MusicSourceRuntimeStatus {
+  generatedAt: number;
+  searchOrder: MusicSourceId[];
+  playableUrlFallbacks: Array<{
+    source: MusicSourceId;
+    fallbacks: MusicSourceId[];
+  }>;
+  sources: Array<MusicSourceHealth & {
+    displayName: string;
+    role: "library" | "primary" | "fallback";
+    enabled: boolean;
+  }>;
+}
+
 export function getMusicSourceAdapter(source: MusicSourceId): MusicSourceAdapter {
   const adapter = adapters.get(source);
   if (!adapter) {
@@ -72,6 +87,63 @@ function getPlayableUrlFallbacks(source: MusicSourceId): MusicSourceId[] {
       }
       return true;
     });
+}
+
+function getRuntimeSearchOrder(): MusicSourceId[] {
+  return [
+    ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
+    NETEASE_LEGACY_SOURCE_ID,
+  ];
+}
+
+function getSourceRole(source: MusicSourceId): "library" | "primary" | "fallback" {
+  if (source === LOCAL_LIBRARY_SOURCE_ID) return "library";
+  if (source === UNBLOCK_NETEASE_SOURCE_ID) return "fallback";
+  return "primary";
+}
+
+function isSourceEnabled(source: MusicSourceId): boolean {
+  if (source === LOCAL_LIBRARY_SOURCE_ID) return isLocalLibraryEnabled();
+  if (source === UNBLOCK_NETEASE_SOURCE_ID) return isUnblockNeteaseEnabled();
+  return true;
+}
+
+export async function getMusicSourceRuntimeStatus(): Promise<MusicSourceRuntimeStatus> {
+  const sourceStatuses = await Promise.all(
+    listMusicSourceAdapters().map(async (adapter) => {
+      let health: MusicSourceHealth;
+      try {
+        health = await adapter.healthCheck();
+      } catch (error) {
+        const normalized = normalizeMusicSourceError(adapter.id, error);
+        health = {
+          source: adapter.id,
+          ok: false,
+          message: normalized.message,
+          checkedAt: Date.now(),
+        };
+      }
+
+      return {
+        ...health,
+        displayName: adapter.displayName,
+        role: getSourceRole(adapter.id),
+        enabled: isSourceEnabled(adapter.id),
+      };
+    }),
+  );
+
+  return {
+    generatedAt: Date.now(),
+    searchOrder: getRuntimeSearchOrder(),
+    playableUrlFallbacks: [
+      {
+        source: NETEASE_LEGACY_SOURCE_ID,
+        fallbacks: getPlayableUrlFallbacks(NETEASE_LEGACY_SOURCE_ID),
+      },
+    ],
+    sources: sourceStatuses,
+  };
 }
 
 export function inferStoredTrackSource(
@@ -145,10 +217,7 @@ export async function resolveTrack(
   const query = artist ? `${title} ${artist}` : title;
   const searchSources = source
     ? [source]
-    : [
-      ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
-      NETEASE_LEGACY_SOURCE_ID,
-    ];
+    : getRuntimeSearchOrder();
   let lastError: MusicSourceError | null = null;
 
   for (const searchSource of searchSources) {

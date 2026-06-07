@@ -215,6 +215,26 @@ export type LocalLibraryStatus = {
   message: string;
 };
 
+export type MusicSourceId = "local_library" | "netease_legacy" | "unblock_netease";
+
+export type MusicSourceRuntimeStatus = {
+  generatedAt: number;
+  searchOrder: MusicSourceId[];
+  playableUrlFallbacks: Array<{
+    source: MusicSourceId;
+    fallbacks: MusicSourceId[];
+  }>;
+  sources: Array<{
+    source: MusicSourceId;
+    displayName: string;
+    role: "library" | "primary" | "fallback";
+    enabled: boolean;
+    ok: boolean;
+    message?: string;
+    checkedAt: number;
+  }>;
+};
+
 export type ProgramAuditStatus = "pass" | "warning" | "fail";
 
 export type ProgramAuditCheck = {

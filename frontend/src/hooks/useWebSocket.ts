@@ -7,6 +7,7 @@ import type {
   ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
+  MusicSourceRuntimeStatus,
   PlayHistoryEntry,
   ProgramExperienceAudit,
   SyncSummary,
@@ -60,6 +61,7 @@ export function useWebSocket() {
   const [isSyncingLibrary, setIsSyncingLibrary] = useState(false);
   const [isUpdatingVoicePreset, setIsUpdatingVoicePreset] = useState(false);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
+  const [musicSourceStatus, setMusicSourceStatus] = useState<MusicSourceRuntimeStatus | null>(null);
   const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
   const [programAudit, setProgramAudit] = useState<ProgramExperienceAudit | null>(null);
   const [listenCheckRecords, setListenCheckRecords] = useState<ListenCheckRecord[]>([]);
@@ -623,6 +625,7 @@ export function useWebSocket() {
         historyRes,
         tasteRes,
         djTasteRes,
+        musicSourcesRes,
         localLibraryRes,
         programAuditRes,
         listenChecksRes,
@@ -632,6 +635,7 @@ export function useWebSocket() {
         fetch("/api/history"),
         fetch("/api/taste-profile"),
         fetch("/api/taste"),
+        fetch("/api/music-sources"),
         fetch("/api/music-sources/local-library"),
         fetch("/api/radio/program-audit"),
         fetch("/api/radio/listen-checks?limit=3"),
@@ -653,6 +657,10 @@ export function useWebSocket() {
       if (djTasteRes.ok) {
         const profile = await djTasteRes.json() as DjProfile;
         setDjProfile(profile);
+      }
+      if (musicSourcesRes.ok) {
+        const status = await musicSourcesRes.json() as MusicSourceRuntimeStatus;
+        setMusicSourceStatus(status);
       }
       if (localLibraryRes.ok) {
         const status = await localLibraryRes.json() as LocalLibraryStatus;
@@ -1367,7 +1375,7 @@ export function useWebSocket() {
     statusText, isTriggerBusy, subtitle,
     visualizerBars,
     favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, localLibraryStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
+    isSyncingLibrary, lastSyncSummary, musicSourceStatus, localLibraryStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
     onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,

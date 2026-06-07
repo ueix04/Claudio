@@ -22,6 +22,7 @@ function AppLayout() {
     ttsAudioRef,
     isSyncingLibrary,
     lastSyncSummary,
+    musicSourceStatus,
     localLibraryStatus,
     programAudit,
     listenCheckRecords,
@@ -81,6 +82,7 @@ function AppLayout() {
                   tasteProfile={tasteProfile}
                   isSyncingLibrary={isSyncingLibrary}
                   lastSyncSummary={lastSyncSummary}
+                  musicSourceStatus={musicSourceStatus}
                   localLibraryStatus={localLibraryStatus}
                   programAudit={programAudit}
                   listenCheckRecords={listenCheckRecords}

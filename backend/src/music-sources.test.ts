@@ -10,6 +10,7 @@ import {
   clearLocalLibraryCacheForTests,
   getLocalLibraryFileForPlayback,
   getLocalLibraryStatus,
+  getMusicSourceRuntimeStatus,
   inferStoredTrackSource,
   listMusicSourceAdapters,
   refreshStoredTrackPlayableUrl,
@@ -79,6 +80,41 @@ describe("music source adapters", () => {
     expect(ids).toContain(LOCAL_LIBRARY_SOURCE_ID);
     expect(ids).toContain(NETEASE_LEGACY_SOURCE_ID);
     expect(ids).toContain(UNBLOCK_NETEASE_SOURCE_ID);
+  });
+
+  it("summarizes the runtime source order and fallback chain", async () => {
+    process.env.UNBLOCK_NETEASE_ENABLED = "true";
+    const filePath = await createTempMusicFile("Runtime Artist - Runtime Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    clearLocalLibraryCacheForTests();
+
+    const status = await getMusicSourceRuntimeStatus();
+
+    expect(status.searchOrder).toEqual([LOCAL_LIBRARY_SOURCE_ID, NETEASE_LEGACY_SOURCE_ID]);
+    expect(status.playableUrlFallbacks).toEqual([
+      { source: NETEASE_LEGACY_SOURCE_ID, fallbacks: [UNBLOCK_NETEASE_SOURCE_ID] },
+    ]);
+    expect(status.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: LOCAL_LIBRARY_SOURCE_ID,
+        role: "library",
+        enabled: true,
+        ok: true,
+      }),
+      expect.objectContaining({
+        source: NETEASE_LEGACY_SOURCE_ID,
+        role: "primary",
+        enabled: true,
+        ok: true,
+      }),
+      expect.objectContaining({
+        source: UNBLOCK_NETEASE_SOURCE_ID,
+        role: "fallback",
+        enabled: true,
+        ok: true,
+      }),
+    ]));
   });
 
   it("infers legacy source identity for old numeric queue tracks", () => {

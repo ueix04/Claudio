@@ -6,6 +6,7 @@ import {
   ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
+  MusicSourceRuntimeStatus,
   PlayHistoryEntry,
   PlayerState,
   ProgramExperienceAudit,
@@ -23,6 +24,7 @@ interface PlayerPanelProps {
   tasteProfile: TasteProfile | null;
   isSyncingLibrary: boolean;
   lastSyncSummary: SyncSummary | null;
+  musicSourceStatus: MusicSourceRuntimeStatus | null;
   localLibraryStatus: LocalLibraryStatus | null;
   programAudit: ProgramExperienceAudit | null;
   listenCheckRecords: ListenCheckRecord[];
@@ -205,6 +207,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   tasteProfile,
   isSyncingLibrary,
   lastSyncSummary,
+  musicSourceStatus,
   localLibraryStatus,
   programAudit,
   listenCheckRecords,
@@ -1113,6 +1116,22 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const failedCount = lastSyncSummary?.failedPlaylists.length ?? 0;
     const languageMix = tasteProfile?.languageMix ?? { chinese: 0, latin: 0, mixed: 0, other: 0 };
     const totalTracks = tasteProfile?.totalTrackCount ?? 0;
+    const formatSourceName = (source: string) =>
+      source === "local_library" ? "LOCAL"
+        : source === "netease_legacy" ? "NETEASE"
+          : source === "unblock_netease" ? "UNBLOCK" : source.toUpperCase();
+    const sourceStatusLabel = musicSourceStatus
+      ? musicSourceStatus.sources.some((source) => source.enabled && !source.ok) ? "CHECK" : "READY"
+      : "STANDBY";
+    const sourceStatusClass = musicSourceStatus
+      ? musicSourceStatus.sources.some((source) => source.enabled && !source.ok) ? "text-[#facc15]" : "text-[#4ade80]"
+      : "claudio-theme-text-muted";
+    const searchOrderLabel = musicSourceStatus?.searchOrder.length
+      ? musicSourceStatus.searchOrder.map(formatSourceName).join(" > ")
+      : "--";
+    const fallbackLabel = musicSourceStatus?.playableUrlFallbacks
+      .flatMap((item) => item.fallbacks.map((fallback) => `${formatSourceName(item.source)} > ${formatSourceName(fallback)}`))
+      .join(" / ") || "--";
     const localStatusLabel = localLibraryStatus?.enabled
       ? localLibraryStatus.trackCount > 0 ? "READY" : "EMPTY"
       : "STANDBY";
@@ -1549,6 +1568,54 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               )}
             </div>
           </div>
+        </section>
+
+        <section className="panel-card">
+          <div className="panel-card-head">
+            <span>MUSIC SOURCES</span>
+            <span className={sourceStatusClass}>{sourceStatusLabel}</span>
+          </div>
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="stat-card">
+              <span className="stat-label">SEARCH</span>
+              <span className="stat-value text-base leading-tight break-words">{searchOrderLabel}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">FALLBACK</span>
+              <span className="stat-value text-base leading-tight break-words">{fallbackLabel}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">SOURCES</span>
+              <span className="stat-value">{musicSourceStatus?.sources.length ?? 0}</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">CHECKED</span>
+              <span className="stat-value">{formatScanTime(musicSourceStatus?.generatedAt)}</span>
+            </div>
+          </div>
+          {!musicSourceStatus ? (
+            <div className="panel-empty mt-4">No source status yet</div>
+          ) : (
+            <div className="mt-4 grid md:grid-cols-3 gap-3">
+              {musicSourceStatus.sources.map((source) => (
+                <div key={source.source} className="insight-row items-start">
+                  <div className="flex flex-col min-w-0 gap-1">
+                    <span className="truncate text-sm claudio-theme-text-strong">{formatSourceName(source.source)}</span>
+                    <span className="text-xs text-[#71717a] leading-relaxed break-words">
+                      {source.message || source.displayName}
+                    </span>
+                  </div>
+                  <span className={`text-[10px] uppercase ${
+                    !source.enabled
+                      ? "claudio-theme-text-muted"
+                      : source.ok ? "text-[#4ade80]" : "text-[#facc15]"
+                  }`}>
+                    {!source.enabled ? "off" : source.ok ? source.role : "check"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="panel-card">

@@ -185,6 +185,34 @@ describe("API Server", () => {
     expect(JSON.stringify(rescanBody)).not.toContain(path.dirname(firstFilePath));
   });
 
+  it("GET /api/music-sources 返回主源备用源运行摘要", async () => {
+    const musicSources = await import("./music-sources/index.js");
+    const firstFilePath = await createTempMusicFile("Source Artist - Source Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(firstFilePath);
+    process.env.UNBLOCK_NETEASE_ENABLED = "true";
+    musicSources.clearLocalLibraryCacheForTests();
+
+    const res = await fetch(`http://localhost:${port}/api/music-sources`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      searchOrder: string[];
+      playableUrlFallbacks: Array<{ source: string; fallbacks: string[] }>;
+      sources: Array<{ source: string; role: string; enabled: boolean; ok: boolean }>;
+    };
+    expect(body.searchOrder).toEqual(["local_library", "netease_legacy"]);
+    expect(body.playableUrlFallbacks).toEqual([
+      { source: "netease_legacy", fallbacks: ["unblock_netease"] },
+    ]);
+    expect(body.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "local_library", role: "library", enabled: true, ok: true }),
+      expect.objectContaining({ source: "netease_legacy", role: "primary", enabled: true, ok: true }),
+      expect.objectContaining({ source: "unblock_netease", role: "fallback", enabled: true, ok: true }),
+    ]));
+    expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
+  });
+
   it("POST /api/netease/sync 同步并保存网易云歌单快照", async () => {
     const netease = await import("./netease.js");
     const db = await import("./db.js");

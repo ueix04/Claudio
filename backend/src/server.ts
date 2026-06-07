@@ -319,6 +319,15 @@ app.get("/api/taste-profile", async (_req, res) => {
   res.json(profile);
 });
 
+app.get("/api/music-sources", async (_req, res) => {
+  try {
+    const status = await musicSources.getMusicSourceRuntimeStatus();
+    res.json(status);
+  } catch (error) {
+    res.status(500).json({ error: getErrorMessage(error) });
+  }
+});
+
 app.get("/api/music-sources/local-library", async (_req, res) => {
   try {
     const status = await musicSources.getLocalLibraryStatus();
