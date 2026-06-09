@@ -54,6 +54,25 @@ const DISCOVERY_FALLBACK_DIRECTIONS = [
   },
 ];
 
+const MANUAL_PROGRAM_FALLBACK_TRACKS: Record<"morning_brief" | "mood_pick", Array<{ title: string; artist: string }>> = {
+  morning_brief: [
+    { title: "Best Day Of My Life", artist: "American Authors" },
+    { title: "Sunflower", artist: "Post Malone, Swae Lee" },
+    { title: "Yellow", artist: "Coldplay" },
+    { title: "晴天", artist: "周杰伦" },
+    { title: "Viva La Vida", artist: "Coldplay" },
+    { title: "夜空中最亮的星", artist: "逃跑计划" },
+  ],
+  mood_pick: [
+    { title: "The Scientist", artist: "Coldplay" },
+    { title: "Yellow", artist: "Coldplay" },
+    { title: "Let Her Go", artist: "Passenger" },
+    { title: "Sunflower", artist: "Post Malone, Swae Lee" },
+    { title: "Fix You", artist: "Coldplay" },
+    { title: "夜空中最亮的星", artist: "逃跑计划" },
+  ],
+};
+
 const CHAT_SWITCH_FALLBACK_TRACK_GROUPS = {
   electronic: [
     { title: "Strobe", artist: "deadmau5" },
@@ -570,15 +589,6 @@ async function addControlledDiscoveriesToProgram(
   });
 }
 
-async function resolvePlayableTracks(
-  mode: "morning_brief" | "mood_pick" | "random_discover",
-  playList: RequestedTrack[],
-  localCandidateMap: Map<number, tasteProfile.RecommendationCandidate> = new Map(),
-  avoidTracks: TrackIdentity[] = [],
-): Promise<PlayableTrack[]> {
-  return resolvePlayableTracksFromRequests(playList, FALLBACK_TRACKS[mode], localCandidateMap, avoidTracks);
-}
-
 function getPlayableTrackKey(track: PlayableTrack): string {
   return normalizeTrackKey(track.name, track.artist);
 }
@@ -832,6 +842,87 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 `;
 }
 
+function buildManualProgramPrompt(
+  mode: "morning_brief" | "mood_pick",
+  context: MusicContext,
+): string {
+  const { timeOfDay, weatherContext, recentHistory, feedbackContext, mergedPlaylistContext, candidateContext, state } = context;
+  const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
+  const useEnglish = language === "en";
+  const hostStyleGuide = radioStyle.buildHostStyleGuide(timeOfDay, weatherContext, language);
+  const modeLabel = mode === "morning_brief"
+    ? useEnglish ? "a fresh morning radio program" : "晨间电台节目"
+    : useEnglish ? "a mood-based radio program" : "基于当下心情的电台节目";
+
+  if (useEnglish) {
+    return `You are Claudio, an AI emotional radio DJ.
+Current time: ${timeOfDay}
+Current request: ${modeLabel}
+${weatherContext ? `Current weather: ${weatherContext}` : "Weather is not part of this request."}
+${hostStyleGuide}
+Recent chat and playback clues:
+${recentHistory || "none"}
+Explicit listener feedback:
+${feedbackContext || "none"}
+
+User playlists / snapshots / taste profile:
+${mergedPlaylistContext || "No playlist context yet"}
+${candidateContext ? `\n\nOnline candidate pool:\n${candidateContext}` : ""}
+
+Please refresh the station with a complete 20-40 minute radio program, not a single song. Requirements:
+- Keep music continuity first; the new set should be ready to play without blocking on future model calls
+- Prefer the online candidate pool. For numeric Netease candidates, return id/title/artist exactly
+- Output 6 to 10 songs
+- Make the first song reliable and familiar enough, then sequence the rest naturally
+- The DJ line should be specific and concise, 16-40 words
+- Include a sparse speechPlan: intro before the first song, then only short talk or bumper spots every 2-3 songs
+
+Return JSON only. Required fields:
+- title: optional show title
+- mood: the overall mood of this session
+- plannedMinutes: target duration, an integer from 20 to 40
+- say: the line shown in the UI, natural English, 16-40 words
+- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
+- speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
+- reason: why this set is arranged this way, natural English, 14-30 words
+`;
+  }
+
+  return `你是 Claudio，一位 AI 情感电台 DJ。
+当前时间：${timeOfDay}
+当前请求：${modeLabel}
+${weatherContext ? `当前天气：${weatherContext}` : "天气不是这次调整的依据。"}
+${hostStyleGuide}
+最近聊天和播放线索：
+${recentHistory || "无"}
+用户显性音乐反馈：
+${feedbackContext || "无"}
+
+用户歌单 / 快照 / 画像：
+${mergedPlaylistContext || "暂无歌单信息"}
+${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
+
+请刷新成一段完整的 20 到 40 分钟电台节目，不要只推荐单首歌。要求：
+- 音乐连续播放优先；新节目单要一次性准备好，不能依赖后续模型调用才能继续
+- 优先使用在线候选池；命中网易云数字 id 候选时原样返回 id、title、artist
+- 输出 6 到 10 首歌
+- 第一首要稳，后续顺序要自然、有承接
+- DJ 文案要具体、短，中文 35-90 字
+- 增加稀疏 speechPlan：第一首前是 intro，之后每 2 到 3 首歌才安排一次 short_say 或 bumper
+
+只输出 JSON，对象字段必须是：
+- title: 节目标题，可选
+- mood: 这段节目的整体氛围
+- plannedMinutes: 目标时长，20 到 40 之间的整数
+- say: 前端显示文案，中文 35-90 字
+- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
+- speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
+- reason: 说明这档节目为什么这么编排，中文 30-80 字
+`;
+}
+
 function buildChatSwitchProgramPrompt(
   userText: string,
   context: MusicContext,
@@ -928,6 +1019,83 @@ function buildFallbackStartupProgramResponse(context: MusicContext): StationProg
     reason: useEnglish
       ? "Fallback programming keeps a complete long-form set available when the model is temporarily unavailable."
       : "模型暂时不可用时，先用稳定候选曲保持一档完整节目可播放。",
+  };
+}
+
+function clampDjLine(text: string | undefined, fallback: string, maxLength = 92): string {
+  const normalized = (text?.trim() || fallback).replace(/\s+/g, " ");
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const head = normalized.slice(0, maxLength);
+  const breakpoints = ["。", "！", "？", ".", "!", "?", "；", ";"];
+  const boundary = Math.max(...breakpoints.map((mark) => head.lastIndexOf(mark)));
+  if (boundary >= 35) {
+    return head.slice(0, boundary + 1);
+  }
+
+  return `${head.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
+}
+
+function buildManualFallbackLineup(
+  mode: "morning_brief" | "mood_pick",
+  context: MusicContext,
+): Array<ProgramRequestedTrack & { artist: string }> {
+  const candidateLineup = context.recommendationCandidates.slice(0, 6).map((candidate) => ({
+    id: candidate.id,
+    title: candidate.title,
+    artist: candidate.artist,
+  }));
+  if (candidateLineup.length >= 4) {
+    return candidateLineup;
+  }
+
+  return MANUAL_PROGRAM_FALLBACK_TRACKS[mode];
+}
+
+function buildFallbackManualProgramResponse(
+  mode: "morning_brief" | "mood_pick",
+  context: MusicContext,
+): StationProgramResponse {
+  const language = djLanguage.resolveDjCopyLanguage(context.state.djProfile);
+  const useEnglish = language === "en";
+  const lineup = buildManualFallbackLineup(mode, context);
+
+  if (mode === "morning_brief") {
+    return {
+      title: useEnglish ? "Morning Continuity" : "Claudio 晨间续播",
+      mood: useEnglish ? "fresh, steady, bright" : "清醒、稳定、轻快",
+      plannedMinutes: 24,
+      speechPlan: radioSession.buildDefaultSpeechPlan(lineup.length),
+      say: useEnglish
+        ? "I'll refresh the morning set with a steady run of songs, keeping the first handoff clean and the music moving."
+        : "我把晨间节目重新接成一组完整队列，第一首先稳稳进入，后面按清爽一点的节奏自然往前走。",
+      ttsText: useEnglish
+        ? "I'll refresh the morning set with a steady run of songs, keeping the first handoff clean and the music moving."
+        : "我把晨间节目重新接成一组完整队列，第一首先稳稳进入，后面按清爽一点的节奏自然往前走。",
+      lineup,
+      reason: useEnglish
+        ? "Fallback programming keeps the morning trigger useful when the model is temporarily unavailable."
+        : "模型暂时不可用时，先用稳定候选曲保证晨间节目能连续播放。",
+    };
+  }
+
+  return {
+    title: useEnglish ? "Mood Continuity" : "Claudio 心情续播",
+    mood: useEnglish ? "warm, steady, listener-shaped" : "温和、稳定、贴近口味",
+    plannedMinutes: 24,
+    speechPlan: radioSession.buildDefaultSpeechPlan(lineup.length),
+    say: useEnglish
+      ? "I'll refresh the next stretch around a warmer mood and keep enough songs ready so the station can keep flowing."
+      : "我把后面的节目换成一组更贴近当下心情的队列，先保证音乐不断，再慢慢把气氛接顺。",
+    ttsText: useEnglish
+      ? "I'll refresh the next stretch around a warmer mood and keep enough songs ready so the station can keep flowing."
+      : "我把后面的节目换成一组更贴近当下心情的队列，先保证音乐不断，再慢慢把气氛接顺。",
+    lineup,
+    reason: useEnglish
+      ? "Fallback programming keeps a complete mood-based set ready when the model is temporarily unavailable."
+      : "模型暂时不可用时，先用稳定候选曲保持一段完整心情节目可播放。",
   };
 }
 
@@ -1092,12 +1260,15 @@ export async function runStartupRadioProgram(
       response = buildFallbackStartupProgramResponse(context);
     }
 
+    const say = clampDjLine(response.say, "我先把节目接稳，让前几首歌自然展开，中间只在需要承接的时候短短说一句。");
+    const ttsText = clampDjLine(response.ttsText, say, 140);
+
     if (!background) {
       await db.setStatus("speaking");
     }
     const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
-        response.ttsText?.trim() || response.say,
+        ttsText,
         context.state.djProfile,
         "program_intro",
         [context.weatherContext, response.reason].filter(Boolean).join("；"),
@@ -1112,12 +1283,18 @@ export async function runStartupRadioProgram(
     ]);
     const playableTracks = await addControlledDiscoveriesToProgram(stableTracks, context);
 
-    await applyProgramQueue("startup", response, playableTracks, context);
+    const programResponse: StationProgramResponse = {
+      ...response,
+      say,
+      ttsText,
+      speechPlan: radioSession.buildDefaultSpeechPlan(playableTracks.length),
+    };
+    await applyProgramQueue("startup", programResponse, playableTracks, context);
     await db.setStatus("playing");
 
     return {
       status: "success",
-      djMessage: response.say,
+      djMessage: say,
       tracks: playableTracks,
       reason: response.reason,
       ttsAudioPath,
@@ -1156,10 +1333,13 @@ export async function runChatSwitchProgram(
       usedFallbackProgram = true;
     }
 
+    const say = clampDjLine(response.say, "收到，我把后面的节目换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。");
+    const ttsText = clampDjLine(response.ttsText, say, 140);
+
     await db.setStatus("speaking");
     const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
-        response.ttsText?.trim() || response.say,
+        ttsText,
         context.state.djProfile,
         "music_recommendation",
         [userText, response.reason].filter(Boolean).join("；"),
@@ -1177,14 +1357,20 @@ export async function runChatSwitchProgram(
       : await addControlledDiscoveriesToProgram(stableTracks, context);
 
     const currentTrackPreserved = Boolean(options?.preserveCurrentTrack && context.state.currentTrack);
-    await applyProgramQueue("chat_switch", response, playableTracks, context, userText, {
+    const programResponse: StationProgramResponse = {
+      ...response,
+      say,
+      ttsText,
+      speechPlan: radioSession.buildDefaultSpeechPlan(playableTracks.length),
+    };
+    await applyProgramQueue("chat_switch", programResponse, playableTracks, context, userText, {
       preserveCurrentTrack: options?.preserveCurrentTrack,
     });
     await db.setStatus("playing");
 
     return {
       status: "success",
-      djMessage: response.say,
+      djMessage: say,
       tracks: playableTracks,
       reason: response.reason,
       ttsAudioPath,
@@ -1198,9 +1384,88 @@ export async function runChatSwitchProgram(
   }
 }
 
+async function runManualRadioProgram(
+  mode: "morning_brief" | "mood_pick",
+): Promise<PipelineResult> {
+  try {
+    await ensureDataDirs();
+    await db.setStatus("thinking");
+
+    const context = await gatherMusicContext({
+      weatherMode: mode,
+      candidateLimit: 24,
+    });
+    let response: StationProgramResponse;
+    try {
+      response = await claude.callJsonLLM<StationProgramResponse>(
+        buildManualProgramPrompt(mode, context),
+        claude.getLlmTaskTimeoutMs("startup"),
+      );
+    } catch (error) {
+      console.warn(`[radio] manual ${mode} LLM failed, using deterministic fallback program:`, error);
+      response = buildFallbackManualProgramResponse(mode, context);
+    }
+
+    const fallbackLineup = buildManualFallbackLineup(mode, context);
+    const say = clampDjLine(
+      response.say,
+      mode === "morning_brief"
+        ? "我把晨间节目重新接成一组完整队列，先保证音乐不断，后面按清爽一点的节奏自然往前走。"
+        : "我把后面的节目换成一组更贴近当下心情的队列，先保证音乐不断，再慢慢把气氛接顺。",
+    );
+    const ttsText = response.ttsText?.trim() || say;
+
+    await db.setStatus("speaking");
+    const [ttsAudioPath, stableTracks] = await Promise.all([
+      speakDjText(
+        ttsText,
+        context.state.djProfile,
+        "music_recommendation",
+        [context.weatherContext, response.reason].filter(Boolean).join("；"),
+      ),
+      resolvePlayableTracksFromRequests(
+        response.lineup ?? [],
+        fallbackLineup,
+        context.localCandidateMap,
+        buildAvoidTracks(context),
+        { minTracks: 6, maxTracks: 10 },
+      ),
+    ]);
+    const playableTracks = await addControlledDiscoveriesToProgram(stableTracks, context);
+    const programResponse: StationProgramResponse = {
+      ...response,
+      say,
+      ttsText,
+      plannedMinutes: response.plannedMinutes ?? 24,
+      speechPlan: radioSession.buildDefaultSpeechPlan(playableTracks.length),
+      lineup: response.lineup ?? fallbackLineup,
+      reason: response.reason || "Manual trigger refreshed a complete radio queue.",
+    };
+
+    await applyProgramQueue("manual", programResponse, playableTracks, context, mode);
+    await db.setStatus("playing");
+
+    return {
+      status: "success",
+      djMessage: say,
+      tracks: playableTracks,
+      reason: programResponse.reason,
+      ttsAudioPath,
+      programTitle: response.title,
+    };
+  } catch (error) {
+    await db.setStatus("error");
+    throw error;
+  }
+}
+
 export async function runPipeline(
   mode: "morning_brief" | "mood_pick" | "random_discover"
 ): Promise<PipelineResult> {
+  if (mode === "morning_brief" || mode === "mood_pick") {
+    return runManualRadioProgram(mode);
+  }
+
   try {
     await ensureDataDirs();
     await db.setStatus("thinking");
@@ -1214,10 +1479,13 @@ export async function runPipeline(
       const scoutResponse = await runDiscoveryScout(context, "random_discover");
       await db.setStatus("speaking");
 
-      const say = scoutResponse.say?.trim()
-        || "我先从你的稳定口味旁边试一个新方向，能播的我再接进来。";
+      const say = clampDjLine(
+        scoutResponse.say,
+        "我先从你的稳定口味旁边试一个新方向，同时保留几首稳的歌，让节目能继续播下去。",
+      );
       const reason = scoutResponse.reason?.trim()
         || "Discovery Scout selected nearby directions and the backend verified playable audio.";
+      const stableSeedCount = hasRecentPositiveFeedback(context) ? 4 : 3;
       const [ttsAudioPath, stableTracks, discoveries] = await Promise.all([
         speakDjText(
           scoutResponse.ttsText?.trim() || say,
@@ -1226,11 +1494,11 @@ export async function runPipeline(
           reason,
         ),
         resolvePlayableTracksFromRequests(
-          buildStableSeedRequests(context, 1),
-          FALLBACK_TRACKS.random_discover,
+          buildStableSeedRequests(context, stableSeedCount),
+          STARTUP_FALLBACK_TRACKS,
           context.localCandidateMap,
           buildAvoidTracks(context),
-          { minTracks: 1, maxTracks: 1 },
+          { minTracks: stableSeedCount, maxTracks: stableSeedCount },
         ),
         resolveDiscoveryDirections(
           scoutResponse,
@@ -1243,27 +1511,16 @@ export async function runPipeline(
         firstInsertAfter: 1,
       });
 
-      if (playableTracks.length > 0) {
-        const firstTrack = playableTracks[0];
-        const queue = playableTracks.map(toStoredTrack);
-        const generatedAt = Date.now();
-        await db.setRadioQueue(queue, {
-          currentIndex: 0,
-          program: radioSession.createRadioProgramMetadata({
-            source: "manual",
-            summary: reason,
-            generatedAt,
-            weatherContext: context.weatherContext,
-            tracks: queue,
-          }),
-        });
-        await db.recordPlay(firstTrack.name, firstTrack.artist);
-      }
-
-      await db.addChatMessage({
-        role: "dj",
-        text: say,
-      });
+      await applyProgramQueue("manual", {
+        title: "Claudio Discovery",
+        mood: "bounded discovery",
+        plannedMinutes: 20,
+        speechPlan: radioSession.buildDefaultSpeechPlan(playableTracks.length),
+        say,
+        ttsText: scoutResponse.ttsText?.trim() || say,
+        lineup: [],
+        reason,
+      }, playableTracks, context, "random_discover");
 
       await db.setStatus("playing");
 
@@ -1276,80 +1533,7 @@ export async function runPipeline(
       };
     }
 
-    let claudeResponse: claude.LLMResponse;
-    try {
-      const prompt = claude.buildContextPrompt({
-        mode,
-        timeOfDay: context.timeOfDay,
-        recentHistory: context.recentHistory,
-        userFeedbackContext: context.feedbackContext,
-        playlistContext: context.mergedPlaylistContext,
-        candidateContext: context.candidateContext,
-        weatherContext: context.weatherContext,
-        djVoice: context.state.djProfile.voice,
-      });
-      claudeResponse = await claude.callLLM(prompt);
-    } catch (error) {
-      await db.setStatus("idle");
-      throw error;
-    }
-
-    await db.setStatus("speaking");
-
-    const ttsTask = (async () => {
-      try {
-        const ttsResult = await tts.speak(claudeResponse.ttsText?.trim() || claudeResponse.say, {
-          profile: context.state.djProfile,
-          scene: "music_recommendation",
-          atmosphere: [context.weatherContext, claudeResponse.reason].filter(Boolean).join("；"),
-        });
-        return ttsResult.cachePath;
-      } catch (error) {
-        console.error("TTS failed:", error);
-        return undefined;
-      }
-    })();
-
-    const trackTask = resolvePlayableTracks(
-      mode,
-      claudeResponse.play,
-      context.localCandidateMap,
-      buildAvoidTracks(context),
-    );
-    const [ttsAudioPath, playableTracks] = await Promise.all([ttsTask, trackTask]);
-
-    if (playableTracks.length > 0) {
-      const firstTrack = playableTracks[0];
-      const queue = playableTracks.map(toStoredTrack);
-      const generatedAt = Date.now();
-      await db.setRadioQueue(queue, {
-        currentIndex: 0,
-        program: radioSession.createRadioProgramMetadata({
-          source: "manual",
-          summary: claudeResponse.reason,
-          generatedAt,
-          weatherContext: context.weatherContext,
-          tracks: queue,
-        }),
-      });
-      await db.recordPlay(firstTrack.name, firstTrack.artist);
-    }
-
-    await db.addChatMessage({
-      role: "dj",
-      text: claudeResponse.say,
-    });
-
-    await db.setStatus("playing");
-
-    return {
-      status: "success",
-      djMessage: claudeResponse.say,
-      tracks: playableTracks,
-      reason: claudeResponse.reason,
-      segue: claudeResponse.segue,
-      ttsAudioPath,
-    };
+    throw new Error(`Unsupported pipeline mode: ${mode}`);
   } catch (error) {
     await db.setStatus("error");
     throw error;

@@ -52,6 +52,55 @@ function mockNeteaseSearchTrack(track: {
   };
 }
 
+function mockProgramResponse(overrides: Partial<{
+  title: string;
+  mood: string;
+  plannedMinutes: number;
+  speechPlan: Array<{ beforeTrackIndex: number; type: string; note?: string }>;
+  say: string;
+  ttsText: string;
+  lineup: Array<{ id?: number; title: string; artist?: string }>;
+  reason: string;
+}> = {}) {
+  const lineup = overrides.lineup ?? [
+    { title: "Song 1", artist: "Artist 1" },
+    { title: "Song 2", artist: "Artist 2" },
+    { title: "Song 3", artist: "Artist 3" },
+    { title: "Song 4", artist: "Artist 4" },
+    { title: "Song 5", artist: "Artist 5" },
+    { title: "Song 6", artist: "Artist 6" },
+  ];
+
+  return {
+    title: overrides.title ?? "测试节目",
+    mood: overrides.mood ?? "稳定测试",
+    plannedMinutes: overrides.plannedMinutes ?? 24,
+    speechPlan: overrides.speechPlan ?? [
+      { beforeTrackIndex: 0, type: "intro", note: "开场" },
+      { beforeTrackIndex: 3, type: "short_say", note: "短讲" },
+    ],
+    say: overrides.say ?? "我把节目重新接成一组完整队列，先保证音乐不断，后面按自然顺序继续。",
+    ttsText: overrides.ttsText ?? "我把节目重新接成一组完整队列，先保证音乐不断，后面按自然顺序继续。",
+    lineup,
+    reason: overrides.reason ?? "测试节目编排。",
+  };
+}
+
+function mockSearchFromLineup(lineup: Array<{ id?: number; title: string; artist?: string }>) {
+  vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+    const raw = String(keyword);
+    const matched = lineup.find((track) => raw.includes(track.title));
+    const index = vi.mocked(netease.searchSongs).mock.calls.length;
+    return mockNeteaseSearchTrack({
+      id: matched?.id ?? 100 + index,
+      name: matched?.title ?? raw,
+      artist: matched?.artist ?? `Artist ${index}`,
+      duration: 240_000,
+    });
+  });
+  vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
+}
+
 describe("Pipeline Engine", () => {
   const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
   const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
@@ -68,7 +117,7 @@ describe("Pipeline Engine", () => {
   }
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.mocked(claude.getLlmTaskTimeoutMs).mockImplementation((task) => ({
       semantic_router: 20_000,
       startup: 120_000,
@@ -103,13 +152,12 @@ describe("Pipeline Engine", () => {
   });
 
   it("should complete morning_brief pipeline successfully", async () => {
-    const mockClaudeResponse: claude.LLMResponse = {
-      say: "早上好，这是你的晨间简报。",
-      ttsText: "（轻声）早上好，这是你的晨间简报。",
-      play: [{ title: "Song 1", artist: "Artist 1" }],
+    const mockClaudeResponse = mockProgramResponse({
+      title: "晨间节目",
+      say: "早上好，我把晨间节目接成一组完整队列，先从清爽的一首开始。",
+      ttsText: "早上好，我把晨间节目接成一组完整队列，先从清爽的一首开始。",
       reason: "适合早晨",
-      segue: "接下来请听",
-    };
+    });
 
     vi.mocked(db.getState).mockResolvedValue(baseState);
     vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
@@ -118,45 +166,49 @@ describe("Pipeline Engine", () => {
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
     vi.mocked(weather.getDefaultWeatherPromptContext).mockResolvedValue("Hong Kong当前天气晴，气温27°C，体感29°C，湿度76%");
-    vi.mocked(claude.buildContextPrompt).mockReturnValue("prompt with weather");
-    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(claude.callJsonLLM).mockResolvedValue(mockClaudeResponse);
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
       cached: false,
       cachePath: "data/audio/mock.wav",
     });
-    vi.mocked(netease.searchSongs).mockResolvedValue(mockNeteaseSearchTrack({
-      id: 123,
-      name: "Song 1",
-      artist: "Artist 1",
-      picUrl: "http://example.com/pic1.jpg",
-      duration: 180000,
-    }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("http://example.com/song1.mp3");
+    mockSearchFromLineup(mockClaudeResponse.lineup);
 
     const result = await pipeline.runPipeline("morning_brief");
 
     expect(result.status).toBe("success");
     expect(result.djMessage).toBe(mockClaudeResponse.say);
-    expect(result.tracks).toHaveLength(1);
-    expect(result.tracks[0].id).toBe(123);
+    expect(result.tracks).toHaveLength(6);
+    expect(result.tracks[0].name).toBe("Song 1");
     expect(result.ttsAudioPath).toBe("data/audio/mock.wav");
+    expect(result.programTitle).toBe("晨间节目");
 
     expect(db.setStatus).toHaveBeenNthCalledWith(1, "thinking");
     expect(db.setStatus).toHaveBeenNthCalledWith(2, "speaking");
     expect(db.setStatus).toHaveBeenNthCalledWith(3, "playing");
 
-    expect(db.setRadioQueue).toHaveBeenCalledWith([
+    expect(db.setRadioQueue).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "Song 1",
+          artist: "Artist 1",
+          url: expect.stringContaining("url-"),
+        }),
+        expect.objectContaining({ name: "Song 6" }),
+      ]),
       expect.objectContaining({
-        id: "123",
-        name: "Song 1",
-        artist: "Artist 1",
-        url: "http://example.com/song1.mp3",
+        currentIndex: 0,
+        program: expect.objectContaining({
+          source: "manual",
+          title: "晨间节目",
+          plannedMinutes: 24,
+          speechPlan: expect.arrayContaining([
+            expect.objectContaining({ beforeTrackIndex: 0, type: "intro" }),
+          ]),
+        }),
       }),
-    ], expect.objectContaining({
-      currentIndex: 0,
-    }));
+    );
 
     expect(db.addChatMessage).toHaveBeenCalledWith({
       role: "dj",
@@ -169,35 +221,66 @@ describe("Pipeline Engine", () => {
       atmosphere: "Hong Kong当前天气晴，气温27°C，体感29°C，湿度76%；适合早晨",
     });
     expect(weather.getDefaultWeatherPromptContext).toHaveBeenCalled();
-    expect(claude.buildContextPrompt).toHaveBeenCalledWith(expect.objectContaining({
-      djVoice: baseState.djProfile.voice,
-      weatherContext: "Hong Kong当前天气晴，气温27°C，体感29°C，湿度76%",
-    }));
-    expect(claude.callLLM).toHaveBeenCalledWith("prompt with weather");
+    expect(claude.callJsonLLM).toHaveBeenCalledWith(
+      expect.stringContaining("Hong Kong当前天气晴，气温27°C，体感29°C，湿度76%"),
+      120_000,
+    );
   });
 
-  it("should update status to error and throw when Claude fails", async () => {
+  it("should fall back to a complete manual program when the LLM fails", async () => {
     vi.mocked(db.getState).mockResolvedValue(baseState);
     vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
     vi.mocked(db.summarizePlaylists).mockReturnValue("");
     vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
-    vi.mocked(claude.callLLM).mockRejectedValue(new Error("Claude Error"));
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("Claude Error"));
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/manual-fallback.wav",
+    });
+    mockSearchFromLineup([
+      { title: "Best Day Of My Life", artist: "American Authors" },
+      { title: "Sunflower", artist: "Post Malone, Swae Lee" },
+      { title: "Yellow", artist: "Coldplay" },
+      { title: "晴天", artist: "周杰伦" },
+      { title: "Viva La Vida", artist: "Coldplay" },
+      { title: "夜空中最亮的星", artist: "逃跑计划" },
+    ]);
 
-    await expect(pipeline.runPipeline("morning_brief")).rejects.toThrow("Claude Error");
+    const result = await pipeline.runPipeline("morning_brief");
 
-    expect(db.setStatus).toHaveBeenCalledWith("thinking");
-    expect(db.setStatus).toHaveBeenCalledWith("idle");
-    expect(db.setStatus).toHaveBeenCalledWith("error");
+    expect(result.status).toBe("success");
+    expect(result.tracks).toHaveLength(6);
+    expect(result.programTitle).toBe("Claudio 晨间续播");
+    expect(db.setStatus).toHaveBeenNthCalledWith(1, "thinking");
+    expect(db.setStatus).toHaveBeenNthCalledWith(2, "speaking");
+    expect(db.setStatus).toHaveBeenNthCalledWith(3, "playing");
+    expect(db.setRadioQueue).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Best Day Of My Life" }),
+        expect.objectContaining({ name: "夜空中最亮的星" }),
+      ]),
+      expect.objectContaining({
+        program: expect.objectContaining({
+          source: "manual",
+          plannedMinutes: 24,
+          speechPlan: expect.arrayContaining([
+            expect.objectContaining({ beforeTrackIndex: 0, type: "intro" }),
+            expect.objectContaining({ type: "short_say" }),
+          ]),
+        }),
+      }),
+    );
   });
 
   it("should continue when TTS fails", async () => {
-    const mockClaudeResponse: claude.LLMResponse = {
+    const mockClaudeResponse = mockProgramResponse({
       say: "TTS fails test",
-      play: [],
       reason: "test",
-    };
+    });
 
     vi.mocked(db.getState).mockResolvedValue(baseState);
     vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
@@ -205,25 +288,31 @@ describe("Pipeline Engine", () => {
     vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
-    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(claude.callJsonLLM).mockResolvedValue(mockClaudeResponse);
     vi.mocked(tts.speak).mockRejectedValue(new Error("TTS Error"));
+    mockSearchFromLineup(mockClaudeResponse.lineup);
 
     const result = await pipeline.runPipeline("morning_brief");
 
     expect(result.status).toBe("success");
     expect(result.ttsAudioPath).toBeUndefined();
+    expect(result.tracks).toHaveLength(6);
     expect(db.setStatus).toHaveBeenCalledWith("playing");
   });
 
   it("should continue and skip track when netease.resolveTrack fails", async () => {
-    const mockClaudeResponse: claude.LLMResponse = {
+    const mockClaudeResponse = mockProgramResponse({
       say: "Netease fails test",
-      play: [
+      lineup: [
         { title: "Fail", artist: "Artist" },
         { title: "Success", artist: "Artist" },
+        { title: "Backup 1", artist: "Artist" },
+        { title: "Backup 2", artist: "Artist" },
+        { title: "Backup 3", artist: "Artist" },
+        { title: "Backup 4", artist: "Artist" },
       ],
       reason: "test",
-    };
+    });
 
     vi.mocked(db.getState).mockResolvedValue(baseState);
     vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
@@ -231,7 +320,7 @@ describe("Pipeline Engine", () => {
     vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
-    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(claude.callJsonLLM).mockResolvedValue(mockClaudeResponse);
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
@@ -239,43 +328,45 @@ describe("Pipeline Engine", () => {
       cachePath: "data/audio/cached.wav",
     });
 
-    vi.mocked(netease.searchSongs)
-      .mockResolvedValueOnce(mockNeteaseSearchTrack({
-        id: 111,
-        name: "Fail",
-        artist: "Artist",
-      }))
-      .mockResolvedValueOnce(mockNeteaseSearchTrack({
-        id: 456,
-        name: "Success",
-        artist: "Artist",
-        picUrl: "pic",
-        duration: 100,
-      }));
-    vi.mocked(netease.getPlayableUrl)
-      .mockRejectedValueOnce(new Error("Netease Error"))
-      .mockResolvedValueOnce("url");
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      const raw = String(keyword);
+      const matched = mockClaudeResponse.lineup.find((track) => raw.includes(track.title));
+      return mockNeteaseSearchTrack({
+        id: matched?.title === "Fail" ? 111 : 200 + vi.mocked(netease.searchSongs).mock.calls.length,
+        name: matched?.title ?? raw,
+        artist: matched?.artist ?? "Artist",
+        duration: 240_000,
+      });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => {
+      if (id === 111) throw new Error("Netease Error");
+      return `url-${id}`;
+    });
 
     const result = await pipeline.runPipeline("morning_brief");
 
     expect(result.status).toBe("success");
-    expect(result.tracks).toHaveLength(1);
-    expect(result.tracks[0].id).toBe(456);
+    expect(result.tracks.some((track) => track.name === "Fail")).toBe(false);
+    expect(result.tracks.some((track) => track.name === "Success")).toBe(true);
     expect(db.setRadioQueue).toHaveBeenCalledWith(
-      [expect.objectContaining({ id: "456" })],
+      expect.arrayContaining([expect.objectContaining({ name: "Success" })]),
       expect.objectContaining({ currentIndex: 0 }),
     );
   });
 
   it("should avoid recently played tracks when building a program queue", async () => {
-    const mockClaudeResponse: claude.LLMResponse = {
+    const mockClaudeResponse = mockProgramResponse({
       say: "换一组不重复的歌。",
-      play: [
+      lineup: [
         { title: "Recent Song", artist: "Artist A" },
         { title: "Fresh Song", artist: "Artist B" },
+        { title: "Fresh Song 2", artist: "Artist C" },
+        { title: "Fresh Song 3", artist: "Artist D" },
+        { title: "Fresh Song 4", artist: "Artist E" },
+        { title: "Fresh Song 5", artist: "Artist F" },
       ],
       reason: "test",
-    };
+    });
 
     vi.mocked(db.getState).mockResolvedValue({
       ...baseState,
@@ -286,49 +377,41 @@ describe("Pipeline Engine", () => {
     vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
-    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(claude.callJsonLLM).mockResolvedValue(mockClaudeResponse);
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
       cached: true,
       cachePath: "data/audio/no-repeat.wav",
     });
-
-    vi.mocked(netease.searchSongs)
-      .mockResolvedValueOnce(mockNeteaseSearchTrack({
-        id: 111,
-        name: "Recent Song",
-        artist: "Artist A",
-      }))
-      .mockResolvedValueOnce(mockNeteaseSearchTrack({
-        id: 222,
-        name: "Fresh Song",
-        artist: "Artist B",
-      }));
-    vi.mocked(netease.getPlayableUrl)
-      .mockResolvedValueOnce("recent-url")
-      .mockResolvedValueOnce("fresh-url");
+    mockSearchFromLineup(mockClaudeResponse.lineup);
 
     const result = await pipeline.runPipeline("mood_pick");
 
-    expect(result.tracks).toHaveLength(1);
+    expect(result.tracks.some((track) => track.name === "Recent Song")).toBe(false);
     expect(result.tracks[0]).toMatchObject({
-      id: 222,
       name: "Fresh Song",
       artist: "Artist B",
     });
     expect(db.setRadioQueue).toHaveBeenCalledWith(
-      [expect.objectContaining({ id: "222", name: "Fresh Song" })],
+      expect.arrayContaining([expect.objectContaining({ name: "Fresh Song" })]),
       expect.objectContaining({ currentIndex: 0 }),
     );
   });
 
   it("should prefer local candidate id resolution when provided", async () => {
-    const mockClaudeResponse: claude.LLMResponse = {
+    const mockClaudeResponse = mockProgramResponse({
       say: "从你的本地曲库里挑了一首。",
-      play: [{ id: 999, title: "Local Song", artist: "Local Artist" }],
+      lineup: [
+        { id: 999, title: "Local Song", artist: "Local Artist" },
+        { title: "Online 1", artist: "Artist 1" },
+        { title: "Online 2", artist: "Artist 2" },
+        { title: "Online 3", artist: "Artist 3" },
+        { title: "Online 4", artist: "Artist 4" },
+        { title: "Online 5", artist: "Artist 5" },
+      ],
       reason: "test",
-    };
+    });
 
     vi.mocked(db.getState).mockResolvedValue(baseState);
     vi.mocked(db.getNeteaseSnapshot).mockResolvedValue({
@@ -379,19 +462,30 @@ describe("Pipeline Engine", () => {
       },
     ]);
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("candidate context");
-    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(claude.callJsonLLM).mockResolvedValue(mockClaudeResponse);
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
       cached: false,
       cachePath: "data/audio/mock.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("http://example.com/local.mp3");
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      const raw = String(keyword);
+      const matched = mockClaudeResponse.lineup.find((track) => raw.includes(track.title));
+      return mockNeteaseSearchTrack({
+        id: 200 + vi.mocked(netease.searchSongs).mock.calls.length,
+        name: matched?.title ?? raw,
+        artist: matched?.artist ?? "Artist",
+        duration: 240_000,
+      });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) =>
+      id === 999 ? "http://example.com/local.mp3" : `url-${id}`,
+    );
 
     const result = await pipeline.runPipeline("mood_pick");
 
     expect(netease.getPlayableUrl).toHaveBeenCalledWith(999, undefined);
-    expect(netease.searchSongs).not.toHaveBeenCalled();
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
     expect(result.tracks[0]).toMatchObject({
       id: 999,
@@ -399,6 +493,7 @@ describe("Pipeline Engine", () => {
       artist: "Local Artist",
       url: "http://example.com/local.mp3",
     });
+    expect(result.tracks.length).toBeGreaterThanOrEqual(6);
   });
 
   it("should resolve random_discover through Discovery Scout directions", async () => {
@@ -428,19 +523,26 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/discovery.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => (
-      keyword.includes("Discovery Lane")
-        ? mockNeteaseSearchTrack({
-            id: 222,
-            name: "Discovery Song",
-            artist: "Discovery Artist",
-          })
-        : mockNeteaseSearchTrack({
-            id: 111,
-            name: "Stable Anchor",
-            artist: "Stable Artist",
-          })
-    ));
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      if (keyword.includes("Discovery Lane")) {
+        return mockNeteaseSearchTrack({
+          id: 222,
+          name: "Discovery Song",
+          artist: "Discovery Artist",
+        });
+      }
+      if (keyword.includes("Sunflower")) {
+        return mockNeteaseSearchTrack({ id: 112, name: "Stable 2", artist: "Stable Artist" });
+      }
+      if (keyword.includes("Yellow")) {
+        return mockNeteaseSearchTrack({ id: 113, name: "Stable 3", artist: "Stable Artist" });
+      }
+      return mockNeteaseSearchTrack({
+        id: 111,
+        name: "Stable 1",
+        artist: "Stable Artist",
+      });
+    });
     vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
 
     const result = await pipeline.runPipeline("random_discover");
@@ -448,7 +550,12 @@ describe("Pipeline Engine", () => {
     expect(claude.callLLM).not.toHaveBeenCalled();
     expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 45_000);
     expect(netease.searchSongs).toHaveBeenCalledWith("Discovery Lane", 5);
-    expect(result.tracks.map((track) => track.name)).toEqual(["Stable Anchor", "Discovery Song"]);
+    expect(result.tracks.map((track) => track.name)).toEqual([
+      "Stable 1",
+      "Discovery Song",
+      "Stable 2",
+      "Stable 3",
+    ]);
     expect(db.addDiscoveryCandidates).toHaveBeenCalledWith([
       expect.objectContaining({
         title: "Discovery Song",
@@ -458,10 +565,21 @@ describe("Pipeline Engine", () => {
     ]);
     expect(db.setRadioQueue).toHaveBeenCalledWith(
       [
-        expect.objectContaining({ id: "111", name: "Stable Anchor" }),
+        expect.objectContaining({ id: "111", name: "Stable 1" }),
         expect.objectContaining({ id: "222", name: "Discovery Song" }),
+        expect.objectContaining({ id: "112", name: "Stable 2" }),
+        expect.objectContaining({ id: "113", name: "Stable 3" }),
       ],
-      expect.objectContaining({ currentIndex: 0 }),
+      expect.objectContaining({
+        currentIndex: 0,
+        program: expect.objectContaining({
+          source: "manual",
+          plannedMinutes: 20,
+          speechPlan: expect.arrayContaining([
+            expect.objectContaining({ beforeTrackIndex: 0, type: "intro" }),
+          ]),
+        }),
+      }),
     );
   });
 
@@ -538,11 +656,11 @@ describe("Pipeline Engine", () => {
     process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
     musicSources.clearLocalLibraryCacheForTests();
 
-    const mockClaudeResponse: claude.LLMResponse = {
+    const mockClaudeResponse = mockProgramResponse({
       say: "从本地文件库里挑一首。",
-      play: [{ title: "Library Song", artist: "Library Artist" }],
+      lineup: [{ title: "Library Song", artist: "Library Artist" }],
       reason: "test",
-    };
+    });
 
     vi.mocked(db.getState).mockResolvedValue(baseState);
     vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
@@ -550,21 +668,28 @@ describe("Pipeline Engine", () => {
     vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
-    vi.mocked(claude.buildContextPrompt).mockReturnValue("prompt with local library");
-    vi.mocked(claude.callLLM).mockResolvedValue(mockClaudeResponse);
+    vi.mocked(claude.callJsonLLM).mockResolvedValue(mockClaudeResponse);
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
       cached: false,
       cachePath: "data/audio/local-library.wav",
     });
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      const raw = String(keyword);
+      const index = vi.mocked(netease.searchSongs).mock.calls.length;
+      return mockNeteaseSearchTrack({
+        id: 700 + index,
+        name: raw.split(" ").slice(0, -1).join(" ") || raw,
+        artist: `Fallback Artist ${index}`,
+        duration: 240_000,
+      });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
 
     const result = await pipeline.runPipeline("mood_pick");
 
-    expect(claude.buildContextPrompt).toHaveBeenCalledWith(expect.objectContaining({
-      candidateContext: expect.stringContaining("Library Song - Library Artist"),
-    }));
-    expect(netease.searchSongs).not.toHaveBeenCalled();
+    expect(String(vi.mocked(claude.callJsonLLM).mock.calls[0]?.[0] ?? "")).toContain("Library Song - Library Artist");
     expect(result.tracks[0]).toMatchObject({
       name: "Library Song",
       artist: "Library Artist",
