@@ -12,6 +12,8 @@ test-artifacts/
 favourite_music.csv
 server-out.txt
 server-err.txt
+backend-manual-out.txt
+backend-manual-err.txt
 session-ses_*.md
 *.tsbuildinfo
 frontend/vite.config.js
