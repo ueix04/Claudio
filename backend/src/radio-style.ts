@@ -1,3 +1,5 @@
+import { getStationHour } from "./time.js";
+
 export type DayPart = "late_night" | "morning" | "afternoon" | "evening";
 export type WeatherTone = "sunny" | "rainy" | "cloudy" | "humid" | "cold" | "unknown";
 export type SegueKind = "smooth_handoff" | "lift" | "settle" | "night_companion" | "landing";
@@ -6,11 +8,11 @@ export type PromptLanguage = "zh" | "en";
 function parseHour(timeOfDay: string): number {
   const match = timeOfDay.match(/^(\d{1,2})/);
   if (!match) {
-    return new Date().getHours();
+    return getStationHour();
   }
 
   const hour = Number(match[1]);
-  return Number.isFinite(hour) ? hour : new Date().getHours();
+  return Number.isFinite(hour) ? hour : getStationHour();
 }
 
 export function getDayPart(timeOfDay: string): DayPart {

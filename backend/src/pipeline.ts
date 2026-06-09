@@ -11,6 +11,7 @@ import * as tts from "./tts.js";
 import * as weather from "./weather.js";
 import type { PlayableTrack } from "./music-sources/index.js";
 import { audioDir, dataDir } from "./runtime.js";
+import { formatStationTimeOfDay } from "./time.js";
 
 const FALLBACK_TRACKS: Record<"morning_brief" | "mood_pick" | "random_discover", Array<{ title: string; artist: string }>> = {
   morning_brief: [
@@ -243,10 +244,7 @@ async function gatherMusicContext(
   );
   const feedbackContext = [feedbackSummary, runtimeTasteContext].filter(Boolean).join("\n\n");
 
-  const timeOfDay = new Date().toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const timeOfDay = formatStationTimeOfDay();
 
   const playlistContext = db.summarizePlaylists();
   const [ncmPlaylistContext, snapshot, profile, localLibraryContext, weatherContext] = await Promise.all([

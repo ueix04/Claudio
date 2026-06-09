@@ -20,6 +20,7 @@ import * as tts from "./tts.js";
 import * as weather from "./weather.js";
 import { routeChatIntentWithSemanticFallback, type ChatRoute, type ChatRouteContext } from "./agent-router.js";
 import { audioDir, frontendDistDir } from "./runtime.js";
+import { formatStationTimeOfDay } from "./time.js";
 
 interface ChatReplyPayload {
   action?: "reply_only" | "answer_weather";
@@ -1967,10 +1968,7 @@ async function buildTransitionReply(
   const useEnglish = language === "en";
   const weatherContext: string | undefined = undefined;
   const currentProgram = state.currentProgram;
-  const timeOfDay = new Date().toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const timeOfDay = formatStationTimeOfDay();
   const hostStyleGuide = radioStyle.buildHostStyleGuide(timeOfDay, weatherContext, language);
   const segueKind = radioStyle.inferSegueKind({
     timeOfDay,
