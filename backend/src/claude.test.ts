@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { extractJson, callClaude, callTextLLM, buildContextPrompt } from "./claude";
+import { extractJson, callClaude, callJsonLLM, callTextLLM, buildContextPrompt } from "./claude";
 
 describe("extractJson", () => {
   const validPayload = {
@@ -154,17 +154,44 @@ describe("callClaude", () => {
     segue: "接下来还有惊喜",
   };
 
+  const clearLlmEnv = () => {
+    delete process.env.LLM_API_KEY;
+    delete process.env.BASE_URL;
+    delete process.env.MODEL;
+    delete process.env.LLM_PROVIDER_ORDER;
+    delete process.env.LLM_PRIMARY_API_KEY;
+    delete process.env.LLM_PRIMARY_BASE_URL;
+    delete process.env.LLM_PRIMARY_MODEL;
+    delete process.env.LLM_PRIMARY_TIMEOUT_MS;
+    delete process.env.LLM_BACKUP_API_KEY;
+    delete process.env.LLM_BACKUP_BASE_URL;
+    delete process.env.LLM_BACKUP_MODEL;
+    delete process.env.LLM_BACKUP_TIMEOUT_MS;
+  };
+
+  const configureMultiProviderEnv = () => {
+    clearLlmEnv();
+    process.env.LLM_PROVIDER_ORDER = "primary,backup";
+    process.env.LLM_PRIMARY_API_KEY = "primary-key";
+    process.env.LLM_PRIMARY_BASE_URL = "https://primary.example.com/v1";
+    process.env.LLM_PRIMARY_MODEL = "primary-model";
+    process.env.LLM_PRIMARY_TIMEOUT_MS = "12000";
+    process.env.LLM_BACKUP_API_KEY = "backup-key";
+    process.env.LLM_BACKUP_BASE_URL = "https://backup.example.com/v1";
+    process.env.LLM_BACKUP_MODEL = "backup-model";
+    process.env.LLM_BACKUP_TIMEOUT_MS = "12000";
+  };
+
   beforeEach(() => {
     vi.restoreAllMocks();
+    clearLlmEnv();
     process.env.LLM_API_KEY = "test-key";
     process.env.BASE_URL = "https://example.com/v1";
     process.env.MODEL = "test-model";
   });
 
   afterEach(() => {
-    delete process.env.LLM_API_KEY;
-    delete process.env.BASE_URL;
-    delete process.env.MODEL;
+    clearLlmEnv();
     vi.unstubAllGlobals();
   });
 
@@ -230,5 +257,90 @@ describe("callClaude", () => {
     }), { status: 200 })));
 
     await expect(callTextLLM("say hi")).resolves.toBe("hello");
+  });
+
+  it("多 provider 会在 primary 网络错误后切到 backup", async () => {
+    configureMultiProviderEnv();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("ETIMEDOUT"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(validResponse) } }],
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callClaude("推荐一首歌", 30_000);
+
+    expect(result).toEqual(validResponse);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://primary.example.com/v1/chat/completions");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://backup.example.com/v1/chat/completions");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).model).toBe("primary-model");
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).model).toBe("backup-model");
+  });
+
+  it("多 provider 会在 primary 返回 429 后切到 backup", async () => {
+    configureMultiProviderEnv();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: "rate limited" },
+      }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(validResponse) } }],
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callClaude("推荐一首歌", 30_000)).resolves.toEqual(validResponse);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("JSON 调用会在 primary 返回非 JSON 内容后切到 backup", async () => {
+    configureMultiProviderEnv();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "not json" } }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(validResponse) } }],
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callJsonLLM("推荐一首歌", 30_000)).resolves.toEqual(validResponse);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("文本调用也会在 primary 空响应后切到 backup", async () => {
+    configureMultiProviderEnv();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "" } }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: "```text\nhello\n```" } }],
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callTextLLM("say hi", 30_000)).resolves.toBe("hello");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("所有 provider 失败时返回汇总错误且不泄露 key", async () => {
+    configureMultiProviderEnv();
+    process.env.LLM_PRIMARY_API_KEY = "primary-secret";
+    process.env.LLM_BACKUP_API_KEY = "backup-secret";
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("Bearer primary-secret ETIMEDOUT"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: "invalid key backup-secret" },
+      }), { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callClaude("test", 30_000)).rejects.toThrow(
+      "LLM request failed across providers: primary: Bearer [redacted] ETIMEDOUT; backup: invalid key [redacted]",
+    );
   });
 });

@@ -3,6 +3,15 @@ import { normalizeTtsPresetName } from "./tts.js";
 const DEFAULT_TIMEOUT = 120_000;
 const DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_LLM_MODEL = "gpt-4o-mini";
+const LLM_PROVIDER_ENV_PREFIX = "LLM_";
+
+type LlmProvider = {
+  name: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  timeoutMs?: number;
+};
 
 function isTestEnv(): boolean {
   return process.env.NODE_ENV === "test" || process.env.VITEST === "true";
@@ -22,6 +31,91 @@ function getLlmBaseUrl(): string {
 
 function getLlmModel(): string {
   return (process.env.MODEL || DEFAULT_LLM_MODEL).trim();
+}
+
+function parsePositiveInt(value: string | undefined, name: string): number | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
+function normalizeProviderEnvName(name: string): string {
+  return name.trim().toUpperCase().replace(/[^A-Z0-9]/g, "_");
+}
+
+function getLlmProviderOrder(): string[] {
+  return (process.env.LLM_PROVIDER_ORDER || "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+function getLegacyLlmProvider(): LlmProvider {
+  return {
+    name: "default",
+    apiKey: getLlmApiKey(),
+    baseUrl: getLlmBaseUrl(),
+    model: getLlmModel(),
+  };
+}
+
+function getConfiguredLlmProviders(): LlmProvider[] {
+  const providerOrder = getLlmProviderOrder();
+  if (providerOrder.length === 0) {
+    return [getLegacyLlmProvider()];
+  }
+
+  return providerOrder.map((name) => {
+    const envName = normalizeProviderEnvName(name);
+    const apiKey = (process.env[`${LLM_PROVIDER_ENV_PREFIX}${envName}_API_KEY`] || "").trim();
+    if (!apiKey) {
+      throw new Error(`LLM provider ${name} is missing ${LLM_PROVIDER_ENV_PREFIX}${envName}_API_KEY`);
+    }
+
+    return {
+      name,
+      apiKey,
+      baseUrl: (process.env[`${LLM_PROVIDER_ENV_PREFIX}${envName}_BASE_URL`] || DEFAULT_LLM_BASE_URL).trim().replace(/\/+$/, ""),
+      model: (process.env[`${LLM_PROVIDER_ENV_PREFIX}${envName}_MODEL`] || DEFAULT_LLM_MODEL).trim(),
+      timeoutMs: parsePositiveInt(
+        process.env[`${LLM_PROVIDER_ENV_PREFIX}${envName}_TIMEOUT_MS`],
+        `${LLM_PROVIDER_ENV_PREFIX}${envName}_TIMEOUT_MS`,
+      ),
+    };
+  });
+}
+
+function getSafeErrorMessage(error: unknown, secrets: string[] = []): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return secrets
+    .filter((secret) => secret.length >= 4)
+    .reduce(
+      (result, secret) => result.split(secret).join("[redacted]"),
+      message.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]"),
+    );
+}
+
+function getElapsedMs(startedAt: number): number {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function getAttemptTimeoutMs(provider: LlmProvider, totalTimeout: number, startedAt: number, hasFallback: boolean): number {
+  if (!hasFallback) {
+    return totalTimeout;
+  }
+
+  const remaining = totalTimeout - getElapsedMs(startedAt);
+  if (remaining <= 0) {
+    throw new Error("LLM request timed out before trying the next provider");
+  }
+
+  return Math.max(1, Math.min(provider.timeoutMs ?? remaining, remaining));
 }
 
 function stripMarkdownFence(text: string): string {
@@ -63,19 +157,36 @@ function extractTextContent(content: string | ContentPart[] | undefined): string
   return "";
 }
 
-async function callOpenAICompatible(
+function parseOpenAICompatiblePayload(text: string, responseOk: boolean): OpenAICompatibleResponse {
+  if (!text.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text) as OpenAICompatibleResponse;
+  } catch {
+    if (!responseOk) {
+      return {};
+    }
+
+    throw new Error("LLM returned invalid JSON response");
+  }
+}
+
+async function callOpenAICompatibleProvider(
+  provider: LlmProvider,
   prompt: string,
   timeout: number,
   wantsJson: boolean,
 ): Promise<string> {
-  const response = await fetch(`${getLlmBaseUrl()}/chat/completions`, {
+  const response = await fetch(`${provider.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${getLlmApiKey()}`,
+      Authorization: `Bearer ${provider.apiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: getLlmModel(),
+      model: provider.model,
       messages: [
         {
           role: "system",
@@ -95,7 +206,7 @@ async function callOpenAICompatible(
   });
 
   const text = await response.text();
-  const payload = text ? JSON.parse(text) as OpenAICompatibleResponse : {};
+  const payload = parseOpenAICompatiblePayload(text, response.ok);
 
   if (!response.ok) {
     const message = payload.error?.message || `LLM request failed: ${response.status}`;
@@ -108,6 +219,35 @@ async function callOpenAICompatible(
   }
 
   return stripMarkdownFence(content);
+}
+
+async function callWithLlmFallback<T>(
+  timeout: number,
+  operation: (provider: LlmProvider, timeoutMs: number) => Promise<T>,
+): Promise<T> {
+  const providers = getConfiguredLlmProviders();
+  const hasFallback = providers.length > 1;
+
+  if (!hasFallback) {
+    return operation(providers[0], timeout);
+  }
+
+  const startedAt = Date.now();
+  const failures: string[] = [];
+  const secrets = providers.map((provider) => provider.apiKey);
+
+  for (const provider of providers) {
+    try {
+      const attemptTimeout = getAttemptTimeoutMs(provider, timeout, startedAt, hasFallback);
+      return await operation(provider, attemptTimeout);
+    } catch (error) {
+      const message = getSafeErrorMessage(error, secrets);
+      failures.push(`${provider.name}: ${message}`);
+      console.warn(`[llm] provider ${provider.name} failed, trying next provider: ${message}`);
+    }
+  }
+
+  throw new Error(`LLM request failed across providers: ${failures.join("; ")}`);
 }
 
 export interface LLMResponse {
@@ -173,15 +313,19 @@ export async function callJsonLLM<T extends object>(
   prompt: string,
   timeout: number = DEFAULT_TIMEOUT,
 ): Promise<T> {
-  const text = await callOpenAICompatible(prompt, timeout, true);
-  return extractObjectJson<T>(text);
+  return callWithLlmFallback(timeout, async (provider, attemptTimeout) => {
+    const text = await callOpenAICompatibleProvider(provider, prompt, attemptTimeout, true);
+    return extractObjectJson<T>(text);
+  });
 }
 
 export async function callTextLLM(
   prompt: string,
   timeout: number = DEFAULT_TIMEOUT,
 ): Promise<string> {
-  return callOpenAICompatible(prompt, timeout, false);
+  return callWithLlmFallback(timeout, (provider, attemptTimeout) =>
+    callOpenAICompatibleProvider(provider, prompt, attemptTimeout, false),
+  );
 }
 
 export function buildContextPrompt(params: ContextPromptParams): string {
