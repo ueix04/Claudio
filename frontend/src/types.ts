@@ -89,6 +89,7 @@ export type PlayerState = {
   currentTime: number;
   duration: number;
   volume: number;
+  audioSignalLevel: number | null;
   playlist: PlaylistTrack[];
   queueCount: number;
   status: AppStatus;
@@ -119,6 +120,49 @@ export type PlayHistoryEntry = {
   title: string;
   artist: string;
   playedAt: number;
+};
+
+export type TrackFeedbackType =
+  | "more_like_this"
+  | "less_like_this"
+  | "dislike_track"
+  | "favorite_track"
+  | "complete_track"
+  | "skip_track"
+  | "replay_dj"
+  | "ask_about_track";
+
+export type UserFeedbackRecord = {
+  id: string;
+  type: TrackFeedbackType;
+  trackId?: string;
+  title: string;
+  artist: string;
+  source?: string;
+  sourceTrackId?: string;
+  urlSource?: string;
+  programSessionId?: string;
+  queueIndex?: number;
+  note?: string;
+  createdAt: number;
+};
+
+export type DiscoveryRisk = "adjacent" | "small_adventure";
+export type DiscoveryCandidateHealth = "ready" | "failed";
+
+export type DiscoveryCandidateRecord = {
+  id: string;
+  query: string;
+  direction: string;
+  title: string;
+  artist: string;
+  reason: string;
+  risk: DiscoveryRisk;
+  source?: MusicSourceId | string;
+  sourceTrackId?: string;
+  urlSource?: MusicSourceId | string;
+  health: DiscoveryCandidateHealth;
+  createdAt: number;
 };
 
 export type TasteProfileArtist = {
@@ -157,6 +201,29 @@ export type TasteProfilePlaylistFingerprint = {
   sampleTracks: string[];
 };
 
+export type RuntimeTasteSignal = {
+  key: string;
+  label: string;
+  score: number;
+  positiveCount: number;
+  negativeCount: number;
+  sampleTracks: string[];
+};
+
+export type RuntimeTasteProfile = {
+  generatedAt: number;
+  feedbackCount: number;
+  effectiveFeedbackCount: number;
+  likedArtists: RuntimeTasteSignal[];
+  avoidedArtists: RuntimeTasteSignal[];
+  languageSignals: RuntimeTasteSignal[];
+  likedEnergy: RuntimeTasteSignal[];
+  avoidedEnergy: RuntimeTasteSignal[];
+  likedMoods: RuntimeTasteSignal[];
+  avoidedMoods: RuntimeTasteSignal[];
+  summary: string;
+};
+
 export type TasteProfile = {
   generatedAt: number;
   sourceSyncedAt: number;
@@ -177,6 +244,7 @@ export type TasteProfile = {
   titleKeywords: TasteProfileKeyword[];
   artistKeywords: TasteProfileKeyword[];
   playlistFingerprints: TasteProfilePlaylistFingerprint[];
+  runtimeTaste?: RuntimeTasteProfile;
   summary: string;
 };
 
@@ -268,6 +336,51 @@ export type MusicSourceRuntimeStatus = {
   }>;
 };
 
+export type PlaybackLeaseStatus = "ready" | "expiring" | "expired" | "unknown" | "missing" | "failed";
+
+export type PlaybackHealth = "ready" | "refreshing" | "fallback" | "failed" | "expired";
+
+export type PlaybackDiagnosticTrack = {
+  queueIndex: number;
+  id: string;
+  name: string;
+  artist: string;
+  source?: MusicSourceId | string;
+  sourceTrackId?: string;
+  urlSource?: MusicSourceId | string;
+  urlExpiresAt?: number;
+  urlRefreshedAt?: number;
+  urlTtlMs: number | null;
+  leaseStatus: PlaybackLeaseStatus;
+  health: PlaybackHealth;
+  shouldRefresh: boolean;
+  lastResolveError?: {
+    code: string;
+    message: string;
+    at: number;
+  };
+  lastPlaybackIssue?: {
+    code: string;
+    message: string;
+    at: number;
+  };
+};
+
+export type PlaybackDiagnostics = {
+  generatedAt: number;
+  queueLength: number;
+  currentQueueIndex: number;
+  thresholds: {
+    currentRefreshMs: number;
+    upcomingRefreshMs: number;
+  };
+  current: PlaybackDiagnosticTrack | null;
+  upcoming: PlaybackDiagnosticTrack[];
+  fallbacks: MusicSourceRuntimeStatus["playableUrlFallbacks"];
+  sources: MusicSourceRuntimeStatus["sources"];
+  recentIssue?: PlaybackDiagnosticTrack["lastResolveError"] | PlaybackDiagnosticTrack["lastPlaybackIssue"];
+};
+
 export type ProgramAuditStatus = "pass" | "warning" | "fail";
 
 export type ProgramAuditCheck = {
@@ -293,6 +406,30 @@ export type ProgramExperienceAudit = {
   djLineCount: number;
   checks: ProgramAuditCheck[];
   issues: ProgramAuditCheck[];
+};
+
+export type ListenCheckEvidence = {
+  playbackIssueCount: number;
+  fallbackCount: number;
+  discoveryCount: number;
+  feedbackCount: number;
+  djLineCount: number;
+  playedTrackCount: number;
+  clientSignalSampleCount?: number;
+  clientLowSignalSampleCount?: number;
+  clientSilentMs?: number;
+  clientMaxSilentRunMs?: number;
+  discoveryTracks?: Array<{
+    title: string;
+    artist: string;
+    risk?: DiscoveryRisk;
+  }>;
+  recentIssues?: Array<{
+    code: string;
+    message: string;
+    trackTitle?: string;
+    at?: number;
+  }>;
 };
 
 export type ListenCheckRecord = {
@@ -328,6 +465,7 @@ export type ListenCheckRecord = {
     startedGeneratedAt?: number;
     completedGeneratedAt?: number;
   };
+  listenEvidence?: ListenCheckEvidence;
   programSnapshot?: {
     sessionId?: string;
     title?: string;
@@ -348,7 +486,7 @@ export type ListenCheckRecord = {
 };
 
 export type ListenAcceptanceCriterion = {
-  id: "program" | "dj" | "context";
+  id: "program" | "dj" | "context" | "reliability" | "exploration" | "feedback";
   label: string;
   planText: string;
   passed: boolean;
@@ -380,6 +518,13 @@ export type ListenAcceptanceSummary = {
     programAuditOk: boolean | null;
     issueCount: number | null;
     programContinuityOk: boolean | null;
+    playbackIssueCount: number | null;
+    fallbackCount: number | null;
+    discoveryCount: number | null;
+    feedbackCount: number | null;
+    clientSignalSampleCount: number | null;
+    clientSilentMs: number | null;
+    clientMaxSilentRunMs: number | null;
   };
   criteria: ListenAcceptanceCriterion[];
   generatedAt: number;

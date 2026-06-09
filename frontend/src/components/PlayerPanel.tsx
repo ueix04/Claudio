@@ -2,18 +2,23 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AUDIO_EFFECT_OPTIONS } from "../audio-effects";
 import {
   AppStatus,
+  DiscoveryCandidateRecord,
   FavoriteTrackItem,
   ListenAcceptanceSummary,
   ListenCheckRecord,
   LocalLibraryStatus,
   LocalLibraryTasteMatchSummary,
   MusicSourceRuntimeStatus,
+  PlaybackDiagnosticTrack,
+  PlaybackDiagnostics,
   PlayHistoryEntry,
   PlayerState,
   ProgramExperienceAudit,
   SyncSummary,
   TasteProfile,
+  TrackFeedbackType,
   TriggerMode,
+  UserFeedbackRecord,
 } from "../types";
 import { useLayout } from "./LayoutManager";
 import { PixelClock } from "./PixelClock";
@@ -22,10 +27,13 @@ interface PlayerPanelProps {
   playerState: PlayerState;
   favoriteTracks: FavoriteTrackItem[];
   playHistory: PlayHistoryEntry[];
+  userFeedback: UserFeedbackRecord[];
+  discoveryCandidates: DiscoveryCandidateRecord[];
   tasteProfile: TasteProfile | null;
   isSyncingLibrary: boolean;
   lastSyncSummary: SyncSummary | null;
   musicSourceStatus: MusicSourceRuntimeStatus | null;
+  playbackDiagnostics: PlaybackDiagnostics | null;
   localLibraryStatus: LocalLibraryStatus | null;
   localLibraryMatchStatus: LocalLibraryTasteMatchSummary | null;
   programAudit: ProgramExperienceAudit | null;
@@ -40,6 +48,7 @@ interface PlayerPanelProps {
   onSeek: (time: number) => void;
   onVolumeChange: (volume: number) => void;
   onToggleFavorite: (trackId: string) => void;
+  onTrackFeedback: (type: TrackFeedbackType) => void;
   onSelectTrack: (trackId: string) => void;
   onPlaySavedTrack: (trackId: string) => void;
   onUserAvatarUpload: (file: File) => Promise<void>;
@@ -71,6 +80,11 @@ type ListenCheckState = {
   completedAt: number | null;
   playbackMs: number;
   playbackSegments: ListenPlaybackSegment[];
+  audioSignalSampleCount: number;
+  lowSignalSampleCount: number;
+  silentMs: number;
+  maxSilentRunMs: number;
+  currentSilentRunMs: number;
   lastPlaybackTickAt: number | null;
   lastPlaybackTrackKey: string | null;
   lastPlaybackPositionSec: number | null;
@@ -85,6 +99,8 @@ type ListenCheckState = {
 
 const LISTEN_CHECK_STORAGE_KEY = "claudio-listen-check";
 const LISTEN_CHECK_TARGET_MS = 20 * 60 * 1000;
+const LISTEN_SIGNAL_SILENCE_LEVEL = 0.012;
+const LISTEN_SIGNAL_MIN_VOLUME = 0.05;
 const LISTEN_CHECK_ITEMS: Array<{ id: ListenCheckId; label: string }> = [
   { id: "program", label: "PROGRAM FEEL" },
   { id: "dj", label: "DJ RESTRAINT" },
@@ -96,6 +112,11 @@ const createEmptyListenCheck = (): ListenCheckState => ({
   completedAt: null,
   playbackMs: 0,
   playbackSegments: [],
+  audioSignalSampleCount: 0,
+  lowSignalSampleCount: 0,
+  silentMs: 0,
+  maxSilentRunMs: 0,
+  currentSilentRunMs: 0,
   lastPlaybackTickAt: null,
   lastPlaybackTrackKey: null,
   lastPlaybackPositionSec: null,
@@ -137,6 +158,19 @@ const loadListenCheckState = (): ListenCheckState => {
             }];
           }).slice(0, 20)
         : [],
+      audioSignalSampleCount: typeof parsed.audioSignalSampleCount === "number" && parsed.audioSignalSampleCount > 0
+        ? Math.round(parsed.audioSignalSampleCount)
+        : 0,
+      lowSignalSampleCount: typeof parsed.lowSignalSampleCount === "number" && parsed.lowSignalSampleCount > 0
+        ? Math.round(parsed.lowSignalSampleCount)
+        : 0,
+      silentMs: typeof parsed.silentMs === "number" && parsed.silentMs > 0
+        ? Math.round(parsed.silentMs)
+        : 0,
+      maxSilentRunMs: typeof parsed.maxSilentRunMs === "number" && parsed.maxSilentRunMs > 0
+        ? Math.round(parsed.maxSilentRunMs)
+        : 0,
+      currentSilentRunMs: 0,
       lastPlaybackTickAt: null,
       lastPlaybackTrackKey: null,
       lastPlaybackPositionSec: null,
@@ -176,6 +210,12 @@ const formatHistoryTime = (timestamp: number) =>
 const formatScanTime = (timestamp?: number) =>
   timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "--";
 
+const formatLeaseTime = (ttlMs: number | null | undefined) => {
+  if (ttlMs === null || ttlMs === undefined || !Number.isFinite(ttlMs)) return "--";
+  if (ttlMs <= 0) return "expired";
+  return formatPlaybackTime(Math.floor(ttlMs / 1000));
+};
+
 const formatDateLabel = (date: Date) =>
   date.toLocaleDateString("en-US", { weekday: "long" }).toUpperCase();
 
@@ -184,6 +224,9 @@ const formatMonthDayLabel = (date: Date) =>
 
 const toPercent = (value: number, total: number) =>
   total <= 0 ? 0 : Math.round((value / total) * 100);
+
+const formatRuntimeScore = (score: number) =>
+  `${score > 0 ? "+" : ""}${score.toFixed(1)}`;
 
 const addListenPlaybackSegment = (
   segments: ListenPlaybackSegment[],
@@ -206,10 +249,13 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   playerState,
   favoriteTracks,
   playHistory,
+  userFeedback,
+  discoveryCandidates,
   tasteProfile,
   isSyncingLibrary,
   lastSyncSummary,
   musicSourceStatus,
+  playbackDiagnostics,
   localLibraryStatus,
   localLibraryMatchStatus,
   programAudit,
@@ -224,6 +270,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   onSeek,
   onVolumeChange,
   onToggleFavorite,
+  onTrackFeedback,
   onSelectTrack,
   onPlaySavedTrack,
   onUserAvatarUpload,
@@ -288,6 +335,27 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       const playedDeltaMs = isPlaybackActive
         ? Math.min(positionDeltaMs, wallDeltaMs)
         : 0;
+      const canSampleSignal = Boolean(
+        isPlaybackActive
+          && playedDeltaMs > 0
+          && status !== "speaking"
+          && playerState.volume >= LISTEN_SIGNAL_MIN_VOLUME
+          && typeof playerState.audioSignalLevel === "number",
+      );
+      const hasLowSignal = canSampleSignal && (playerState.audioSignalLevel ?? 0) <= LISTEN_SIGNAL_SILENCE_LEVEL;
+      const nextAudioSignalSampleCount = canSampleSignal
+        ? current.audioSignalSampleCount + 1
+        : current.audioSignalSampleCount;
+      const nextLowSignalSampleCount = hasLowSignal
+        ? current.lowSignalSampleCount + 1
+        : current.lowSignalSampleCount;
+      const nextSilentMs = hasLowSignal
+        ? current.silentMs + playedDeltaMs
+        : current.silentMs;
+      const nextCurrentSilentRunMs = hasLowSignal
+        ? current.currentSilentRunMs + playedDeltaMs
+        : 0;
+      const nextMaxSilentRunMs = Math.max(current.maxSilentRunMs, nextCurrentSilentRunMs);
       const nextPlaybackMs = isPlaybackActive
         ? Math.min(
             LISTEN_CHECK_TARGET_MS,
@@ -311,6 +379,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         if (
           nextPlaybackMs === current.playbackMs
           && nextPlaybackSegments === current.playbackSegments
+          && nextAudioSignalSampleCount === current.audioSignalSampleCount
+          && nextLowSignalSampleCount === current.lowSignalSampleCount
+          && nextSilentMs === current.silentMs
+          && nextMaxSilentRunMs === current.maxSilentRunMs
+          && nextCurrentSilentRunMs === current.currentSilentRunMs
           && current.lastPlaybackTickAt === (isPlaybackActive ? nowMs : null)
           && current.lastPlaybackTrackKey === nextTrackKey
           && current.lastPlaybackPositionSec === nextPositionSec
@@ -321,6 +394,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
           ...current,
           playbackMs: nextPlaybackMs,
           playbackSegments: nextPlaybackSegments,
+          audioSignalSampleCount: nextAudioSignalSampleCount,
+          lowSignalSampleCount: nextLowSignalSampleCount,
+          silentMs: Math.round(nextSilentMs),
+          maxSilentRunMs: Math.round(nextMaxSilentRunMs),
+          currentSilentRunMs: Math.round(nextCurrentSilentRunMs),
           lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
           lastPlaybackTrackKey: nextTrackKey,
           lastPlaybackPositionSec: nextPositionSec,
@@ -330,6 +408,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         ...current,
         playbackMs: nextPlaybackMs,
         playbackSegments: nextPlaybackSegments,
+        audioSignalSampleCount: nextAudioSignalSampleCount,
+        lowSignalSampleCount: nextLowSignalSampleCount,
+        silentMs: Math.round(nextSilentMs),
+        maxSilentRunMs: Math.round(nextMaxSilentRunMs),
+        currentSilentRunMs: Math.round(nextCurrentSilentRunMs),
         lastPlaybackTickAt: isPlaybackActive ? nowMs : null,
         lastPlaybackTrackKey: nextTrackKey,
         lastPlaybackPositionSec: nextPositionSec,
@@ -341,6 +424,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     playerState.currentTrack?.url,
     playerState.currentTime,
     playerState.isPlaying,
+    playerState.audioSignalLevel,
+    playerState.volume,
+    status,
   ]);
 
   useEffect(() => {
@@ -360,6 +446,12 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             completedAt: listenCheck.completedAt,
             playbackMs: listenCheck.playbackMs,
             playbackSegments: listenCheck.playbackSegments,
+            clientAudioEvidence: {
+              signalSampleCount: listenCheck.audioSignalSampleCount,
+              lowSignalSampleCount: listenCheck.lowSignalSampleCount,
+              silentMs: listenCheck.silentMs,
+              maxSilentRunMs: listenCheck.maxSilentRunMs,
+            },
             checks: listenCheck.checks,
             note: listenCheck.note,
             needsFollowUp: listenCheck.needsFollowUp,
@@ -475,11 +567,16 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         ...playerState.playlist.slice(0, currentPlaylistIndex),
       ]
     : playerState.playlist;
-  const librarySignalText = localLibraryStatus?.enabled
-    ? localLibraryStatus.trackCount > 0
-      ? `${localLibraryStatus.trackCount} local tracks`
-      : "Local library empty"
-    : "Library standby";
+  const onlineSourceCount = musicSourceStatus?.sources.filter((source) =>
+    source.source !== "local_library" && source.enabled && source.ok
+  ).length ?? 0;
+  const librarySignalText = onlineSourceCount > 0
+    ? `${onlineSourceCount} online source${onlineSourceCount === 1 ? "" : "s"} ready`
+    : "Online sources standby";
+  const formatSourceName = (source: string) =>
+    source === "local_library" ? "LOCAL"
+      : source === "netease_legacy" ? "NETEASE"
+        : source === "unblock_netease" ? "UNBLOCK" : source.toUpperCase();
 
   const updateVolumeFromClientX = useCallback((clientX: number) => {
     const track = volumeTrackRef.current;
@@ -899,8 +996,121 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     </div>
   );
 
+  const renderFeedbackControls = () => {
+    const currentTrack = playerState.currentTrack;
+    const feedbackItems: Array<{ type: TrackFeedbackType; label: string }> = [
+      { type: "more_like_this", label: "多来点这种" },
+      { type: "less_like_this", label: "少放这种" },
+      { type: "dislike_track", label: "不喜欢这首" },
+    ];
+    const feedbackLabel = (type: TrackFeedbackType) =>
+      type === "more_like_this" ? "MORE"
+        : type === "less_like_this" ? "LESS"
+          : type === "dislike_track" ? "NOPE"
+            : type === "favorite_track" ? "FAV"
+              : type === "complete_track" ? "DONE"
+                : type === "skip_track" ? "SKIP"
+                  : type === "replay_dj" ? "REPLAY" : "ASK";
+
+    return (
+      <section className="panel-card">
+        <div className="panel-card-head">
+          <span>FEEDBACK</span>
+          <span>{userFeedback.length}</span>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          {feedbackItems.map((item) => (
+            <button
+              key={item.type}
+              type="button"
+              className="sync-pill"
+              disabled={!currentTrack}
+              onClick={() => onTrackFeedback(item.type)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        {!currentTrack ? (
+          <div className="panel-empty mt-4">No active track to tag yet</div>
+        ) : userFeedback.length === 0 ? (
+          <div className="panel-empty mt-4">No feedback recorded yet</div>
+        ) : (
+          <div className="mt-4 grid md:grid-cols-2 gap-3">
+            {userFeedback.slice(0, 4).map((item) => (
+              <div key={item.id} className="insight-row">
+                <div className="flex flex-col min-w-0">
+                  <span className="truncate text-sm claudio-theme-text-strong">{item.title}</span>
+                  <span className="truncate text-xs text-[#71717a]">{item.artist}</span>
+                </div>
+                <span className="text-[10px] uppercase claudio-theme-accent">{feedbackLabel(item.type)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    );
+  };
+
+  const renderDiscoveryCandidates = () => {
+    const readyCount = discoveryCandidates.filter((item) => item.health === "ready").length;
+    const discoveryStatus = discoveryCandidates.length === 0
+      ? "EMPTY"
+      : `${readyCount}/${discoveryCandidates.length} READY`;
+    const riskLabel = (risk: DiscoveryCandidateRecord["risk"]) =>
+      risk === "small_adventure" ? "ADVENTURE" : "ADJACENT";
+    const riskClass = (risk: DiscoveryCandidateRecord["risk"]) =>
+      risk === "small_adventure" ? "text-[#facc15]" : "claudio-theme-accent";
+    const healthClass = (health: DiscoveryCandidateRecord["health"]) =>
+      health === "ready" ? "claudio-theme-accent" : "text-[color:var(--claudio-danger)]";
+
+    return (
+      <section className="panel-card">
+        <div className="panel-card-head">
+          <span>DISCOVERY CANDIDATES</span>
+          <span>{discoveryStatus}</span>
+        </div>
+        {discoveryCandidates.length === 0 ? (
+          <div className="panel-empty">No verified discoveries yet</div>
+        ) : (
+          <div className="grid md:grid-cols-2 gap-3">
+            {discoveryCandidates.slice(0, 4).map((item) => (
+              <div key={item.id} className="insight-row items-start">
+                <div className="flex flex-col min-w-0 gap-1">
+                  <span className="truncate text-sm claudio-theme-text-strong">
+                    {item.title} - {item.artist}
+                  </span>
+                  <span className="text-xs text-[#71717a] leading-relaxed break-words">
+                    {item.direction || item.query}
+                    {" · "}
+                    {item.reason}
+                  </span>
+                  <span className="truncate text-[10px] uppercase claudio-theme-text-muted">
+                    {formatHistoryTime(item.createdAt)}
+                    {item.urlSource ? ` · ${formatSourceName(item.urlSource)}` : ""}
+                  </span>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  <span className={`text-[10px] uppercase ${riskClass(item.risk)}`}>
+                    {riskLabel(item.risk)}
+                  </span>
+                  <span className={`text-[10px] uppercase ${healthClass(item.health)}`}>
+                    {item.health}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    );
+  };
+
   const renderListView = () => (
     <div className="flex flex-col gap-6">
+      {renderFeedbackControls()}
+      {renderDiscoveryCandidates()}
+
       <section className="panel-card">
         <div className="panel-card-head">
           <span>QUEUE</span>
@@ -1119,15 +1329,12 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const failedCount = lastSyncSummary?.failedPlaylists.length ?? 0;
     const languageMix = tasteProfile?.languageMix ?? { chinese: 0, latin: 0, mixed: 0, other: 0 };
     const totalTracks = tasteProfile?.totalTrackCount ?? 0;
-    const formatSourceName = (source: string) =>
-      source === "local_library" ? "LOCAL"
-        : source === "netease_legacy" ? "NETEASE"
-          : source === "unblock_netease" ? "UNBLOCK" : source.toUpperCase();
+    const runtimeTaste = tasteProfile?.runtimeTaste;
     const sourceStatusLabel = musicSourceStatus
       ? musicSourceStatus.sources.some((source) => source.enabled && !source.ok) ? "CHECK" : "READY"
       : "STANDBY";
     const sourceStatusClass = musicSourceStatus
-      ? musicSourceStatus.sources.some((source) => source.enabled && !source.ok) ? "text-[#facc15]" : "text-[#4ade80]"
+      ? musicSourceStatus.sources.some((source) => source.enabled && !source.ok) ? "text-[#facc15]" : "claudio-theme-accent"
       : "claudio-theme-text-muted";
     const searchOrderLabel = musicSourceStatus?.searchOrder.length
       ? musicSourceStatus.searchOrder.map(formatSourceName).join(" > ")
@@ -1135,6 +1342,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const fallbackLabel = musicSourceStatus?.playableUrlFallbacks
       .flatMap((item) => item.fallbacks.map((fallback) => `${formatSourceName(item.source)} > ${formatSourceName(fallback)}`))
       .join(" / ") || "--";
+    const activeLocalLibraryStatus = localLibraryStatus?.enabled ? localLibraryStatus : null;
     const localStatusLabel = localLibraryStatus?.enabled
       ? localLibraryStatus.trackCount > 0 ? "READY" : "EMPTY"
       : "STANDBY";
@@ -1144,14 +1352,14 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         : "NO PROFILE"
       : "--";
     const localMatchStatusClass = localLibraryMatchStatus?.profileAvailable
-      ? localLibraryMatchStatus.matchedCount > 0 ? "text-[#4ade80]" : "text-[#facc15]"
+      ? localLibraryMatchStatus.matchedCount > 0 ? "claudio-theme-accent" : "text-[#facc15]"
       : "claudio-theme-text-muted";
     const programAuditLabel = programAudit
       ? programAudit.ok ? "READY" : "CHECK"
       : "STANDBY";
     const programAuditIssueCount = programAudit?.issues.length ?? 0;
     const programAuditStatusClass = programAudit?.ok
-      ? "text-[#4ade80]"
+      ? "claudio-theme-accent"
       : programAuditIssueCount > 0 ? "text-[#f87171]" : "claudio-theme-text-muted";
     const programAuditChecks = programAudit?.issues.length
       ? programAudit.issues
@@ -1163,6 +1371,12 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const listenProgressPercent = Math.round((listenElapsedMs / LISTEN_CHECK_TARGET_MS) * 100);
     const listenCheckedCount = LISTEN_CHECK_ITEMS.filter((item) => listenCheck.checks[item.id]).length;
     const listenReady = Boolean(listenCheck.startedAt && rawListenElapsedMs >= LISTEN_CHECK_TARGET_MS);
+    const currentAudioSignalLabel = typeof playerState.audioSignalLevel === "number"
+      ? `${Math.round(playerState.audioSignalLevel * 100)}%`
+      : "--";
+    const currentAudioSignalClass = typeof playerState.audioSignalLevel === "number"
+      ? playerState.audioSignalLevel <= LISTEN_SIGNAL_SILENCE_LEVEL ? "text-[#facc15]" : "claudio-theme-accent"
+      : "claudio-theme-text-muted";
     const listenComplete = Boolean(listenCheck.completedAt)
       || (listenReady && listenCheckedCount === LISTEN_CHECK_ITEMS.length);
     const listenAuditReady = programAudit?.ok === true;
@@ -1170,13 +1384,13 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       ? "DONE"
       : listenCheck.startedAt ? listenReady ? "READY" : "RUNNING" : "STANDBY";
     const listenCheckStatusClass = listenComplete
-      ? "text-[#4ade80]"
+      ? "claudio-theme-accent"
       : listenCheck.startedAt ? "claudio-theme-accent" : "claudio-theme-text-muted";
     const listenAcceptanceLabel = listenAcceptance
       ? listenAcceptance.ready ? "READY" : listenAcceptance.status === "needs_review" ? "REVIEW" : "WAITING"
       : "WAITING";
     const listenAcceptanceStatusClass = listenAcceptance?.ready
-      ? "text-[#4ade80]"
+      ? "claudio-theme-accent"
       : listenAcceptance?.status === "needs_review" ? "text-[#facc15]" : "claudio-theme-text-muted";
     const listenCheckLocked = Boolean(listenCheck.completedAt || listenCheck.savedRecordId);
     const listenConfirmEnabled = Boolean(listenCheck.startedAt && listenReady && !listenCheckLocked);
@@ -1278,7 +1492,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       : "--";
     const latestAcceptanceAuditClass = latestAcceptanceRecord
       ? latestAcceptanceRecord.programAuditOk === true && latestAcceptanceRecord.issueCount === 0
-        ? "text-[#4ade80]"
+        ? "claudio-theme-accent"
         : "text-[#facc15]"
       : "claudio-theme-text-muted";
     const latestAcceptanceSessionLabel = latestAcceptanceRecord
@@ -1287,11 +1501,73 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         : latestAcceptanceRecord.programContinuityOk === false ? "CHANGE" : "--"
       : "--";
     const latestAcceptanceSessionClass = latestAcceptanceRecord
-      ? latestAcceptanceRecord.programContinuityOk === true ? "text-[#4ade80]" : "text-[#facc15]"
+      ? latestAcceptanceRecord.programContinuityOk === true ? "claudio-theme-accent" : "text-[#facc15]"
       : "claudio-theme-text-muted";
     const latestAcceptanceFollowUpClass = latestAcceptanceRecord?.needsFollowUp
       ? "text-[#facc15]"
-      : latestAcceptanceRecord ? "text-[#4ade80]" : "claudio-theme-text-muted";
+      : latestAcceptanceRecord ? "claudio-theme-accent" : "claudio-theme-text-muted";
+    const latestAcceptanceIssueClass = latestAcceptanceRecord
+      ? latestAcceptanceRecord.playbackIssueCount === 0 ? "claudio-theme-accent" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const latestAcceptanceDiscoveryClass = latestAcceptanceRecord
+      ? (latestAcceptanceRecord.discoveryCount ?? 0) > 0 ? "claudio-theme-accent" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const latestAcceptanceFeedbackClass = latestAcceptanceRecord
+      ? (latestAcceptanceRecord.feedbackCount ?? 0) > 0 ? "claudio-theme-accent" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const latestAcceptanceSignalClass = latestAcceptanceRecord
+      ? (latestAcceptanceRecord.clientSignalSampleCount ?? 0) > 0 ? "claudio-theme-accent" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const latestAcceptanceSilenceClass = latestAcceptanceRecord
+      ? (latestAcceptanceRecord.clientMaxSilentRunMs ?? 0) <= 10_000 ? "claudio-theme-accent" : "text-[#facc15]"
+      : "claudio-theme-text-muted";
+    const currentPlaybackDiagnostic = playbackDiagnostics?.current ?? null;
+    const playbackProblem = playbackDiagnostics
+      ? [playbackDiagnostics.current, ...playbackDiagnostics.upcoming].some((track) =>
+          track && (track.health === "failed" || track.health === "expired" || track.shouldRefresh),
+        )
+      : false;
+    const playbackDiagnosticsLabel = playbackDiagnostics
+      ? playbackProblem ? "CHECK" : "READY"
+      : "STANDBY";
+    const playbackDiagnosticsClass = playbackDiagnostics
+      ? playbackProblem ? "text-[#facc15]" : "claudio-theme-accent"
+      : "claudio-theme-text-muted";
+    const playbackSourceLabel = (track?: PlaybackDiagnosticTrack | null) => {
+      if (!track) return "--";
+      const primary = track.source ? formatSourceName(track.source) : "--";
+      const resolved = track.urlSource ? formatSourceName(track.urlSource) : primary;
+      return primary === resolved ? resolved : `${primary} > ${resolved}`;
+    };
+    const playbackHealthClass = (health?: PlaybackDiagnosticTrack["health"]) =>
+      health === "ready" || health === "fallback"
+        ? "claudio-theme-accent"
+        : health === "refreshing" ? "text-[#facc15]" : "text-[#f87171]";
+    const recentPlaybackIssue = playbackDiagnostics?.recentIssue
+      ?? currentPlaybackDiagnostic?.lastPlaybackIssue
+      ?? currentPlaybackDiagnostic?.lastResolveError;
+    const renderRuntimeSignals = (
+      signals: NonNullable<TasteProfile["runtimeTaste"]>["likedArtists"],
+      emptyLabel: string,
+    ) => (
+      signals.length === 0 ? (
+        <div className="panel-empty">{emptyLabel}</div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {signals.slice(0, 5).map((signal) => (
+            <div key={signal.key} className="insight-row">
+              <div className="flex flex-col min-w-0">
+                <span className="truncate text-sm claudio-theme-text-strong">{signal.label}</span>
+                <span className="truncate text-xs text-[#71717a]">{signal.sampleTracks.slice(0, 2).join(" · ") || "No samples"}</span>
+              </div>
+              <span className={signal.score >= 0 ? "text-[10px] claudio-theme-accent" : "text-[10px] text-[#f87171]"}>
+                {formatRuntimeScore(signal.score)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )
+    );
 
     return (
       <div className="flex flex-col gap-6">
@@ -1332,7 +1608,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                   </div>
                   <span className={`text-[10px] uppercase ${
                     check.status === "pass"
-                      ? "text-[#4ade80]"
+                      ? "claudio-theme-accent"
                       : check.status === "warning" ? "text-[#facc15]" : "text-[#f87171]"
                   }`}>
                     {check.status}
@@ -1362,14 +1638,24 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               </div>
               <div className="stat-card">
                 <span className="stat-label">READY</span>
-                <span className={`stat-value ${listenReady ? "text-[#4ade80]" : "claudio-theme-text-muted"}`}>
+                <span className={`stat-value ${listenReady ? "claudio-theme-accent" : "claudio-theme-text-muted"}`}>
                   {listenReady ? "YES" : "NO"}
                 </span>
               </div>
               <div className="stat-card">
                 <span className="stat-label">SESSION</span>
-                <span className={`stat-value ${listenProgramLocked ? "text-[#4ade80]" : "claudio-theme-text-muted"}`}>
+                <span className={`stat-value ${listenProgramLocked ? "claudio-theme-accent" : "claudio-theme-text-muted"}`}>
                   {listenProgramLocked ? "LOCKED" : "--"}
+                </span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">SIGNAL</span>
+                <span className={`stat-value ${currentAudioSignalClass}`}>{currentAudioSignalLabel}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">SILENCE</span>
+                <span className={`stat-value ${listenCheck.maxSilentRunMs > 10_000 ? "text-[#facc15]" : "claudio-theme-text-muted"}`}>
+                  {formatPlaybackTime(Math.floor(listenCheck.maxSilentRunMs / 1000))}
                 </span>
               </div>
             </div>
@@ -1418,7 +1704,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                     }`}
                   >
                     <span className="truncate text-sm claudio-theme-text-strong">{item.label}</span>
-                    <span className={`text-[10px] uppercase ${checked ? "text-[#4ade80]" : "claudio-theme-text-muted"}`}>
+                    <span className={`text-[10px] uppercase ${checked ? "claudio-theme-accent" : "claudio-theme-text-muted"}`}>
                       {checked ? "PASS" : "OPEN"}
                     </span>
                   </button>
@@ -1459,7 +1745,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               {listenAcceptance && (
                 <div className="mt-3">
                   {latestAcceptanceRecord ? (
-                    <div className="grid grid-cols-2 xl:grid-cols-6 gap-3">
+                    <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
                       <div className="stat-card">
                         <span className="stat-label">LATEST</span>
                         <span className="stat-value">
@@ -1468,14 +1754,14 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                       </div>
                       <div className="stat-card">
                         <span className="stat-label">MISSING</span>
-                        <span className={`stat-value ${latestAcceptanceMissingMs === 0 ? "text-[#4ade80]" : "text-[#facc15]"}`}>
+                        <span className={`stat-value ${latestAcceptanceMissingMs === 0 ? "claudio-theme-accent" : "text-[#facc15]"}`}>
                           {formatPlaybackTime(Math.floor(latestAcceptanceMissingMs / 1000))}
                         </span>
                       </div>
                       <div className="stat-card">
                         <span className="stat-label">CHECKS</span>
                         <span className={`stat-value ${
-                          latestAcceptanceCheckCount === LISTEN_CHECK_ITEMS.length ? "text-[#4ade80]" : "text-[#facc15]"
+                          latestAcceptanceCheckCount === LISTEN_CHECK_ITEMS.length ? "claudio-theme-accent" : "text-[#facc15]"
                         }`}>
                           {latestAcceptanceCheckCount}/{LISTEN_CHECK_ITEMS.length}
                         </span>
@@ -1492,6 +1778,40 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         <span className="stat-label">FOLLOW</span>
                         <span className={`stat-value ${latestAcceptanceFollowUpClass}`}>
                           {latestAcceptanceRecord.needsFollowUp ? "YES" : "NO"}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">ISSUES</span>
+                        <span className={`stat-value ${latestAcceptanceIssueClass}`}>
+                          {latestAcceptanceRecord.playbackIssueCount ?? "--"}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">DISC</span>
+                        <span className={`stat-value ${latestAcceptanceDiscoveryClass}`}>
+                          {latestAcceptanceRecord.discoveryCount ?? "--"}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">FB</span>
+                        <span className={`stat-value ${latestAcceptanceFeedbackClass}`}>
+                          {latestAcceptanceRecord.feedbackCount ?? "--"}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">FALLBACK</span>
+                        <span className="stat-value">{latestAcceptanceRecord.fallbackCount ?? "--"}</span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">SIGNAL</span>
+                        <span className={`stat-value ${latestAcceptanceSignalClass}`}>
+                          {latestAcceptanceRecord.clientSignalSampleCount ?? "--"}
+                        </span>
+                      </div>
+                      <div className="stat-card">
+                        <span className="stat-label">SILENCE</span>
+                        <span className={`stat-value ${latestAcceptanceSilenceClass}`}>
+                          {formatPlaybackTime(Math.floor((latestAcceptanceRecord.clientMaxSilentRunMs ?? 0) / 1000))}
                         </span>
                       </div>
                     </div>
@@ -1520,7 +1840,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                       )}
                     </div>
                     <span className={`text-[10px] uppercase ${
-                      criterion.passed ? "text-[#4ade80]" : "claudio-theme-text-muted"
+                      criterion.passed ? "claudio-theme-accent" : "claudio-theme-text-muted"
                     }`}>
                       {criterion.passed ? "PASS" : "OPEN"}
                     </span>
@@ -1552,6 +1872,21 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                         {" · "}
                         {record.programAudit?.plannedMinutes ?? 0} min
                       </span>
+                      {record.listenEvidence && (
+                        <span className="truncate text-xs text-[#71717a]">
+                          evidence: {record.listenEvidence.playbackIssueCount} issues
+                          {" / "}
+                          {record.listenEvidence.discoveryCount} discovery
+                          {" / "}
+                          {record.listenEvidence.feedbackCount} feedback
+                          {" / "}
+                          {record.listenEvidence.fallbackCount} fallback
+                          {" / "}
+                          signal {record.listenEvidence.clientSignalSampleCount ?? "--"}
+                          {" / "}
+                          silence {formatPlaybackTime(Math.floor((record.listenEvidence.clientMaxSilentRunMs ?? 0) / 1000))}
+                        </span>
+                      )}
                       {record.playbackSegments?.length ? (
                         <span className="truncate text-xs text-[#71717a]">
                           {record.playbackSegments.slice(0, 3).map((segment) =>
@@ -1569,7 +1904,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                     </div>
                     <span className={`text-[10px] uppercase ${
                       hasCleanListenRecord(record)
-                        ? "text-[#4ade80]"
+                        ? "claudio-theme-accent"
                         : "text-[#facc15]"
                     }`}>
                       {getRecordStatusLabel(record)}
@@ -1619,7 +1954,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                   <span className={`text-[10px] uppercase ${
                     !source.enabled
                       ? "claudio-theme-text-muted"
-                      : source.ok ? "text-[#4ade80]" : "text-[#facc15]"
+                      : source.ok ? "claudio-theme-accent" : "text-[#facc15]"
                   }`}>
                     {!source.enabled ? "off" : source.ok ? source.role : "check"}
                   </span>
@@ -1631,90 +1966,164 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
 
         <section className="panel-card">
           <div className="panel-card-head">
-            <span>LOCAL LIBRARY</span>
-            <span>{localStatusLabel}</span>
+            <span>PLAYBACK DIAGNOSTICS</span>
+            <span className={playbackDiagnosticsClass}>{playbackDiagnosticsLabel}</span>
           </div>
-          <div className="flex flex-wrap gap-3">
-            <button
-              onClick={onRescanLocalLibrary}
-              disabled={isRescanningLocalLibrary || !localLibraryStatus?.enabled}
-              className="sync-pill"
-            >
-              {isRescanningLocalLibrary ? "SCANNING..." : "RESCAN"}
-            </button>
-          </div>
-          <div className="mt-4 grid grid-cols-2 xl:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
             <div className="stat-card">
-              <span className="stat-label">TRACKS</span>
-              <span className="stat-value">{localLibraryStatus?.trackCount ?? 0}</span>
-            </div>
-            <div className="stat-card">
-              <span className="stat-label">DIRS</span>
-              <span className="stat-value">
-                {localLibraryStatus ? `${localLibraryStatus.availableDirectoryCount}/${localLibraryStatus.configuredDirectoryCount}` : "0/0"}
+              <span className="stat-label">CURRENT</span>
+              <span className="stat-value text-base leading-tight break-words">
+                {currentPlaybackDiagnostic ? playbackSourceLabel(currentPlaybackDiagnostic) : "--"}
               </span>
             </div>
             <div className="stat-card">
-              <span className="stat-label">LIMIT</span>
-              <span className="stat-value">{localLibraryStatus?.maxFiles ?? 0}</span>
+              <span className="stat-label">LEASE</span>
+              <span className="stat-value">{formatLeaseTime(currentPlaybackDiagnostic?.urlTtlMs)}</span>
             </div>
             <div className="stat-card">
-              <span className="stat-label">SCANNED</span>
-              <span className="stat-value">{formatScanTime(localLibraryStatus?.scannedAt)}</span>
+              <span className="stat-label">HEALTH</span>
+              <span className={`stat-value ${playbackHealthClass(currentPlaybackDiagnostic?.health)}`}>
+                {currentPlaybackDiagnostic?.health.toUpperCase() ?? "--"}
+              </span>
             </div>
             <div className="stat-card">
-              <span className="stat-label">MATCH</span>
-              <span className={`stat-value ${localMatchStatusClass}`}>{localMatchLabel}</span>
+              <span className="stat-label">CHECKED</span>
+              <span className="stat-value">{formatScanTime(playbackDiagnostics?.generatedAt)}</span>
             </div>
           </div>
-          {localLibraryMatchStatus && (
-            <div className="mt-4">
-              <div className="text-xs text-[#71717a] leading-relaxed">
-                {localLibraryMatchStatus.profileAvailable
-                  ? `${localLibraryMatchStatus.matchedCount}/${localLibraryMatchStatus.targetCount} taste tracks matched locally`
-                  : localLibraryMatchStatus.message}
-              </div>
-              {localLibraryMatchStatus.samples.length > 0 && (
-                <div className="mt-3 grid md:grid-cols-2 gap-3">
-                  {localLibraryMatchStatus.samples.slice(0, 4).map((sample) => (
-                    <div key={`${sample.title}-${sample.artist}`} className="insight-row">
-                      <div className="flex flex-col min-w-0">
-                        <span className="truncate text-sm claudio-theme-text-strong">{sample.title}</span>
-                        <span className="truncate text-xs text-[#71717a]">
-                          {sample.localTrack
-                            ? `${sample.localTrack.title} · ${sample.localTrack.artist}`
-                            : sample.artist}
-                        </span>
-                      </div>
-                      <span className={`text-[10px] uppercase ${sample.matched ? "text-[#4ade80]" : "text-[#facc15]"}`}>
-                        {sample.matched ? "match" : "miss"}
+          {!playbackDiagnostics ? (
+            <div className="panel-empty mt-4">No playback diagnostics yet</div>
+          ) : (
+            <div className="mt-4 flex flex-col gap-3">
+              {currentPlaybackDiagnostic && (
+                <div className="insight-row items-start">
+                  <div className="flex flex-col min-w-0 gap-1">
+                    <span className="truncate text-sm claudio-theme-text-strong">
+                      Now: {currentPlaybackDiagnostic.name}
+                    </span>
+                    <span className="text-xs text-[#71717a] leading-relaxed break-words">
+                      {currentPlaybackDiagnostic.artist} · {playbackSourceLabel(currentPlaybackDiagnostic)} · {currentPlaybackDiagnostic.leaseStatus}
+                    </span>
+                  </div>
+                  <span className={`text-[10px] uppercase ${playbackHealthClass(currentPlaybackDiagnostic.health)}`}>
+                    {currentPlaybackDiagnostic.health}
+                  </span>
+                </div>
+              )}
+              {playbackDiagnostics.upcoming.length === 0 ? (
+                <div className="panel-empty">No upcoming queue diagnostics</div>
+              ) : (
+                playbackDiagnostics.upcoming.slice(0, 3).map((track) => (
+                  <div key={`${track.queueIndex}-${track.id}`} className="insight-row items-start">
+                    <div className="flex flex-col min-w-0 gap-1">
+                      <span className="truncate text-sm claudio-theme-text-strong">
+                        #{track.queueIndex + 1} {track.name}
+                      </span>
+                      <span className="text-xs text-[#71717a] leading-relaxed break-words">
+                        {playbackSourceLabel(track)} · lease {formatLeaseTime(track.urlTtlMs)} · {track.leaseStatus}
                       </span>
                     </div>
-                  ))}
+                    <span className={`text-[10px] uppercase ${playbackHealthClass(track.health)}`}>
+                      {track.health}
+                    </span>
+                  </div>
+                ))
+              )}
+              {recentPlaybackIssue && (
+                <div className="panel-empty">
+                  Last issue: {recentPlaybackIssue.code} · {recentPlaybackIssue.message}
                 </div>
               )}
             </div>
           )}
-          {!localLibraryStatus?.enabled ? (
-            <div className="panel-empty mt-4">No local library detected</div>
-          ) : localLibraryStatus.sampleTracks.length === 0 ? (
-            <div className="panel-empty mt-4">No local tracks found</div>
-          ) : (
-            <div className="mt-4 grid md:grid-cols-2 gap-3">
-              {localLibraryStatus.sampleTracks.slice(0, 6).map((track) => (
-                <div key={track.sourceTrackId} className="insight-row">
-                  <div className="flex flex-col min-w-0">
-                    <span className="truncate text-sm claudio-theme-text-strong">{track.title}</span>
-                    <span className="truncate text-xs text-[#71717a]">
-                      {[track.artist, track.album].filter(Boolean).join(" · ")}
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-[#4ade80]">LOCAL</span>
-                </div>
-              ))}
-            </div>
-          )}
         </section>
+
+        {activeLocalLibraryStatus && (
+          <section className="panel-card">
+            <div className="panel-card-head">
+              <span>LOCAL LIBRARY</span>
+              <span>{localStatusLabel}</span>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={onRescanLocalLibrary}
+                disabled={isRescanningLocalLibrary}
+                className="sync-pill"
+              >
+                {isRescanningLocalLibrary ? "SCANNING..." : "RESCAN"}
+              </button>
+            </div>
+            <div className="mt-4 grid grid-cols-2 xl:grid-cols-5 gap-3">
+              <div className="stat-card">
+                <span className="stat-label">TRACKS</span>
+                <span className="stat-value">{activeLocalLibraryStatus.trackCount}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">DIRS</span>
+                <span className="stat-value">
+                  {`${activeLocalLibraryStatus.availableDirectoryCount}/${activeLocalLibraryStatus.configuredDirectoryCount}`}
+                </span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">LIMIT</span>
+                <span className="stat-value">{activeLocalLibraryStatus.maxFiles}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">SCANNED</span>
+                <span className="stat-value">{formatScanTime(activeLocalLibraryStatus.scannedAt)}</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-label">MATCH</span>
+                <span className={`stat-value ${localMatchStatusClass}`}>{localMatchLabel}</span>
+              </div>
+            </div>
+            {localLibraryMatchStatus && (
+              <div className="mt-4">
+                <div className="text-xs text-[#71717a] leading-relaxed">
+                  {localLibraryMatchStatus.profileAvailable
+                    ? `${localLibraryMatchStatus.matchedCount}/${localLibraryMatchStatus.targetCount} taste tracks matched locally`
+                    : localLibraryMatchStatus.message}
+                </div>
+                {localLibraryMatchStatus.samples.length > 0 && (
+                  <div className="mt-3 grid md:grid-cols-2 gap-3">
+                    {localLibraryMatchStatus.samples.slice(0, 4).map((sample) => (
+                      <div key={`${sample.title}-${sample.artist}`} className="insight-row">
+                        <div className="flex flex-col min-w-0">
+                          <span className="truncate text-sm claudio-theme-text-strong">{sample.title}</span>
+                          <span className="truncate text-xs text-[#71717a]">
+                            {sample.localTrack
+                              ? `${sample.localTrack.title} · ${sample.localTrack.artist}`
+                              : sample.artist}
+                          </span>
+                        </div>
+                        <span className={`text-[10px] uppercase ${sample.matched ? "claudio-theme-accent" : "text-[#facc15]"}`}>
+                          {sample.matched ? "match" : "miss"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {activeLocalLibraryStatus.sampleTracks.length === 0 ? (
+              <div className="panel-empty mt-4">No local tracks found</div>
+            ) : (
+              <div className="mt-4 grid md:grid-cols-2 gap-3">
+                {activeLocalLibraryStatus.sampleTracks.slice(0, 6).map((track) => (
+                  <div key={track.sourceTrackId} className="insight-row">
+                    <div className="flex flex-col min-w-0">
+                      <span className="truncate text-sm claudio-theme-text-strong">{track.title}</span>
+                      <span className="truncate text-xs text-[#71717a]">
+                        {[track.artist, track.album].filter(Boolean).join(" · ")}
+                      </span>
+                    </div>
+                    <span className="text-[10px] claudio-theme-accent">LOCAL</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         <section className="panel-card">
           <div className="panel-card-head">
@@ -1787,6 +2196,57 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               </div>
             </section>
 
+            {runtimeTaste && (
+              <section className="panel-card">
+                <div className="panel-card-head">
+                  <span>RUNTIME TASTE</span>
+                  <span>{runtimeTaste.effectiveFeedbackCount}/{runtimeTaste.feedbackCount}</span>
+                </div>
+                <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+                  <div className="stat-card">
+                    <span className="stat-label">LIKE</span>
+                    <span className="stat-value">{runtimeTaste.likedArtists.length}</span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-label">LESS</span>
+                    <span className="stat-value">{runtimeTaste.avoidedArtists.length}</span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-label">ENERGY</span>
+                    <span className="stat-value">{runtimeTaste.likedEnergy.length + runtimeTaste.avoidedEnergy.length}</span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-label">MOOD</span>
+                    <span className="stat-value">{runtimeTaste.likedMoods.length + runtimeTaste.avoidedMoods.length}</span>
+                  </div>
+                </div>
+                <div className="grid md:grid-cols-2 gap-3">
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] claudio-theme-accent mb-2">Positive</div>
+                      {renderRuntimeSignals([
+                        ...runtimeTaste.likedArtists,
+                        ...runtimeTaste.languageSignals.filter((signal) => signal.score > 0),
+                        ...runtimeTaste.likedEnergy,
+                        ...runtimeTaste.likedMoods,
+                      ], "No positive runtime signals")}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.18em] text-[#f87171] mb-2">Pull Back</div>
+                      {renderRuntimeSignals([
+                        ...runtimeTaste.avoidedArtists,
+                        ...runtimeTaste.languageSignals.filter((signal) => signal.score < 0),
+                        ...runtimeTaste.avoidedEnergy,
+                        ...runtimeTaste.avoidedMoods,
+                      ], "No pull-back signals")}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+
             <section className="panel-card">
               <div className="panel-card-head">
                 <span>TOP ARTISTS</span>
@@ -1799,7 +2259,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                       <span className="truncate text-sm claudio-theme-text-strong">{artist.name}</span>
                       <span className="truncate text-xs text-[#71717a]">{artist.sampleTracks.slice(0, 2).join(" · ") || "No samples"}</span>
                     </div>
-                    <span className="text-[10px] text-[#4ade80]">{artist.count}</span>
+                    <span className="text-[10px] claudio-theme-accent">{artist.count}</span>
                   </div>
                 ))}
               </div>
@@ -1817,7 +2277,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                       <span className="truncate text-sm claudio-theme-text-strong">{album.name}</span>
                       <span className="truncate text-xs text-[#71717a]">{album.artist}</span>
                     </div>
-                    <span className="text-[10px] text-[#4ade80]">{album.count}</span>
+                    <span className="text-[10px] claudio-theme-accent">{album.count}</span>
                   </div>
                 ))}
               </div>

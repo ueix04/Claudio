@@ -13,6 +13,8 @@ function AppLayout() {
     djMessages,
     favoriteTracks,
     playHistory,
+    userFeedback,
+    discoveryCandidates,
     tasteProfile,
     status,
     isConnected,
@@ -23,6 +25,7 @@ function AppLayout() {
     isSyncingLibrary,
     lastSyncSummary,
     musicSourceStatus,
+    playbackDiagnostics,
     localLibraryStatus,
     localLibraryMatchStatus,
     programAudit,
@@ -33,6 +36,7 @@ function AppLayout() {
     statusText,
     isTriggerBusy,
     subtitle,
+    subtitleFading,
     visualizerBars,
     voicePreset,
     isUpdatingVoicePreset,
@@ -45,6 +49,7 @@ function AppLayout() {
     onSeek,
     onVolumeChange,
     onToggleFavorite,
+    onTrackFeedback,
     onSelectTrack,
     onReplayAudio,
     updateVoicePreset,
@@ -80,10 +85,13 @@ function AppLayout() {
                   playerState={playerState}
                   favoriteTracks={favoriteTracks}
                   playHistory={playHistory}
+                  userFeedback={userFeedback}
+                  discoveryCandidates={discoveryCandidates}
                   tasteProfile={tasteProfile}
                   isSyncingLibrary={isSyncingLibrary}
                   lastSyncSummary={lastSyncSummary}
                   musicSourceStatus={musicSourceStatus}
+                  playbackDiagnostics={playbackDiagnostics}
                   localLibraryStatus={localLibraryStatus}
                   localLibraryMatchStatus={localLibraryMatchStatus}
                   programAudit={programAudit}
@@ -98,6 +106,7 @@ function AppLayout() {
                   onSeek={onSeek}
                   onVolumeChange={onVolumeChange}
                   onToggleFavorite={onToggleFavorite}
+                  onTrackFeedback={onTrackFeedback}
                   onSelectTrack={onSelectTrack}
                   onPlaySavedTrack={playSavedTrack}
                   onUserAvatarUpload={setUserAvatarUrl}
@@ -135,6 +144,7 @@ function AppLayout() {
                   onFullscreenToggle={() => {}}
                   isFullscreen={mode === "chat-fullscreen"}
                   subtitle={subtitle}
+                  subtitleFading={subtitleFading}
                   statusText={statusText}
                 />
             </div>

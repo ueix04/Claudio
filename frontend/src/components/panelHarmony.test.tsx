@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { LocalLibraryStatus, PlayerState } from "../types";
+import type { DiscoveryCandidateRecord, LocalLibraryStatus, PlayerState } from "../types";
 import { ChatPanel } from "./ChatPanel";
 import { LayoutManager } from "./LayoutManager";
 import { PlayerPanel } from "./PlayerPanel";
@@ -18,6 +18,7 @@ const playerState: PlayerState = {
   currentTime: 65,
   duration: 200,
   volume: 0.72,
+  audioSignalLevel: 0.18,
   playlist: [
     {
       id: "track-1",
@@ -54,6 +55,23 @@ const localLibraryStatus: LocalLibraryStatus = {
   ],
 };
 
+const discoveryCandidates: DiscoveryCandidateRecord[] = [
+  {
+    id: "discovery-1",
+    query: "dream pop adjacent",
+    direction: "dream pop adjacent",
+    title: "Discovery Song",
+    artist: "Discovery Artist",
+    reason: "Adjacent to current taste.",
+    risk: "adjacent",
+    source: "netease_legacy",
+    sourceTrackId: "123",
+    urlSource: "netease_legacy",
+    health: "ready",
+    createdAt: 123456789,
+  },
+];
+
 describe("split panel harmony", () => {
   it("keeps the player progress rail inside the dock divider", () => {
     const markup = renderToStaticMarkup(
@@ -62,10 +80,13 @@ describe("split panel harmony", () => {
           playerState={playerState}
           favoriteTracks={[]}
           playHistory={[]}
+          userFeedback={[]}
+          discoveryCandidates={discoveryCandidates}
           tasteProfile={null}
           isSyncingLibrary={false}
           lastSyncSummary={null}
           musicSourceStatus={null}
+          playbackDiagnostics={null}
           localLibraryStatus={localLibraryStatus}
           localLibraryMatchStatus={null}
           programAudit={null}
@@ -80,6 +101,7 @@ describe("split panel harmony", () => {
           onSeek={() => {}}
           onVolumeChange={() => {}}
           onToggleFavorite={() => {}}
+          onTrackFeedback={() => {}}
           onSelectTrack={() => {}}
           onPlaySavedTrack={() => {}}
           onUserAvatarUpload={async () => {}}
@@ -100,11 +122,13 @@ describe("split panel harmony", () => {
     expect(markup).toContain("player-dock-shell");
     expect(markup).toContain("player-dock-progress");
     expect(markup).toContain("claudio-bottom-bar");
+    expect(markup).toContain("DISCOVERY CANDIDATES");
+    expect(markup).toContain("Discovery Song");
     expect(markup.indexOf("player-dock-progress")).toBeLessThan(markup.indexOf("player-dock-grid"));
     expect(markup).toMatch(/1:05<\/span><span class="flex-shrink-0">\/<\/span><span class="flex-shrink-0">3:20/);
   });
 
-  it("shows local library readiness in the empty player state", () => {
+  it("shows online source standby in the empty player state", () => {
     const markup = renderToStaticMarkup(
       <LayoutManager>
         <PlayerPanel
@@ -117,10 +141,13 @@ describe("split panel harmony", () => {
           }}
           favoriteTracks={[]}
           playHistory={[]}
+          userFeedback={[]}
+          discoveryCandidates={[]}
           tasteProfile={null}
           isSyncingLibrary={false}
           lastSyncSummary={null}
           musicSourceStatus={null}
+          playbackDiagnostics={null}
           localLibraryStatus={localLibraryStatus}
           localLibraryMatchStatus={null}
           programAudit={null}
@@ -135,6 +162,7 @@ describe("split panel harmony", () => {
           onSeek={() => {}}
           onVolumeChange={() => {}}
           onToggleFavorite={() => {}}
+          onTrackFeedback={() => {}}
           onSelectTrack={() => {}}
           onPlaySavedTrack={() => {}}
           onUserAvatarUpload={async () => {}}
@@ -152,7 +180,7 @@ describe("split panel harmony", () => {
       </LayoutManager>,
     );
 
-    expect(markup).toContain("2 local tracks");
+    expect(markup).toContain("Online sources standby");
   });
 
   it("uses the same bottom bar skin in the chat panel", () => {
@@ -175,6 +203,7 @@ describe("split panel harmony", () => {
           onFullscreenToggle={() => {}}
           isFullscreen={false}
           subtitle=""
+          subtitleFading={false}
           statusText="Ready"
           currentTrack={null}
         />

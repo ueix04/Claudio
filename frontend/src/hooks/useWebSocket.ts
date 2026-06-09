@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import type {
   AppStatus,
   ChatEntry,
+  DiscoveryCandidateRecord,
   DjProfile,
   DJMessage,
   ListenAcceptanceSummary,
@@ -9,11 +10,14 @@ import type {
   LocalLibraryStatus,
   LocalLibraryTasteMatchSummary,
   MusicSourceRuntimeStatus,
+  PlaybackDiagnostics,
   PlayHistoryEntry,
   ProgramExperienceAudit,
   SyncSummary,
   TasteProfile,
+  TrackFeedbackType,
   TtsPreset,
+  UserFeedbackRecord,
   WSMessage,
   TrackInfo,
   PlayerState,
@@ -33,6 +37,11 @@ const USER_AVATAR_STORAGE_KEY = "claudio-user-avatar";
 const MUSIC_FADE_MS = 420;
 const TTS_DUCK_RATIO = 0.34;
 const PRELOAD_READY_STATE = 2;
+const AUDIO_SIGNAL_STATE_INTERVAL_MS = 500;
+const AUDIO_SILENCE_RECOVERY_LEVEL = 0.006;
+const AUDIO_SILENCE_RECOVERY_MIN_VOLUME = 0.05;
+const AUDIO_SILENCE_RECOVERY_MS = 8_000;
+const AUDIO_SILENCE_RECOVERY_COOLDOWN_MS = 12_000;
 
 type PlayableTrackInfo = TrackInfo & {
   id?: string;
@@ -44,8 +53,32 @@ type PreloadedTrack = {
   ready: boolean;
 };
 
+type QueueStepReason = "manual_skip" | "track_complete";
+type QueueStepPayload = {
+  reason?: QueueStepReason;
+  trackId?: string;
+  title?: string;
+  artist?: string;
+  positionSec?: number;
+  durationSec?: number;
+};
+
+type ClientPlaybackIssueCode = "client_silent_audio" | "audio_error";
+
 const getTrackPlaybackKey = (track?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null) =>
   track?.id || track?.url || "";
+
+const isSamePlaybackTrack = (
+  a?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null,
+  b?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null,
+) => Boolean(
+  a
+    && b
+    && (
+      (a.id && b.id && a.id === b.id)
+      || a.url === b.url
+    ),
+);
 
 export function useWebSocket() {
   const [hasHydratedState, setHasHydratedState] = useState(false);
@@ -55,14 +88,18 @@ export function useWebSocket() {
   const [isConnected, setIsConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [subtitle, setSubtitle] = useState("");
+  const [subtitleFading, setSubtitleFading] = useState(false);
   const [visualizerBars, setVisualizerBars] = useState<number[]>(Array.from({ length: 20 }, () => 0.08));
   const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
   const [playHistory, setPlayHistory] = useState<PlayHistoryEntry[]>([]);
+  const [userFeedback, setUserFeedback] = useState<UserFeedbackRecord[]>([]);
+  const [discoveryCandidates, setDiscoveryCandidates] = useState<DiscoveryCandidateRecord[]>([]);
   const [tasteProfile, setTasteProfile] = useState<TasteProfile | null>(null);
   const [isSyncingLibrary, setIsSyncingLibrary] = useState(false);
   const [isUpdatingVoicePreset, setIsUpdatingVoicePreset] = useState(false);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
   const [musicSourceStatus, setMusicSourceStatus] = useState<MusicSourceRuntimeStatus | null>(null);
+  const [playbackDiagnostics, setPlaybackDiagnostics] = useState<PlaybackDiagnostics | null>(null);
   const [localLibraryStatus, setLocalLibraryStatus] = useState<LocalLibraryStatus | null>(null);
   const [localLibraryMatchStatus, setLocalLibraryMatchStatus] = useState<LocalLibraryTasteMatchSummary | null>(null);
   const [programAudit, setProgramAudit] = useState<ProgramExperienceAudit | null>(null);
@@ -81,6 +118,7 @@ export function useWebSocket() {
     currentTime: 0,
     duration: 0,
     volume: 0.8,
+    audioSignalLevel: null,
     playlist: [],
     queueCount: 0,
     status: "idle",
@@ -97,16 +135,30 @@ export function useWebSocket() {
   const activeMusicAudioRef = useRef<HTMLAudioElement | null>(null);
   const standbyMusicAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioRecoveryRef = useRef<{ trackKey?: string; url?: string; attempts: number }>({ attempts: 0 });
+  const silentAudioRecoveryRef = useRef<{
+    trackKey?: string;
+    url?: string;
+    lastPositionSec: number | null;
+    silentRunMs: number;
+    lastActionAt: number;
+  }>({
+    lastPositionSec: null,
+    silentRunMs: 0,
+    lastActionAt: 0,
+  });
   const userVolumeRef = useRef(0.8);
   const fadeFramesRef = useRef<WeakMap<HTMLAudioElement, number>>(new WeakMap());
   const playerStateRef = useRef(playerState);
   const favoriteIdsRef = useRef<string[]>([]);
   const trackCatalogRef = useRef<Map<string, TrackInfo>>(new Map());
   const utilityNoticeTimerRef = useRef<number | null>(null);
+  const subtitleFadeTimerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const mediaSourcesRef = useRef<WeakMap<HTMLAudioElement, MediaElementAudioSourceNode>>(new WeakMap());
+  const analyserNodesRef = useRef<WeakMap<HTMLAudioElement, AnalyserNode>>(new WeakMap());
   const visualizerFrameRef = useRef<number | null>(null);
+  const lastAudioSignalStateAtRef = useRef(0);
   const [, setCatalogVersion] = useState(0);
 
   const todayTime = () =>
@@ -129,6 +181,35 @@ export function useWebSocket() {
       setUtilityNotice(null);
     }, 2400);
   }, []);
+
+  const clearSubtitleFadeTimer = useCallback(() => {
+    if (subtitleFadeTimerRef.current !== null) {
+      window.clearTimeout(subtitleFadeTimerRef.current);
+      subtitleFadeTimerRef.current = null;
+    }
+  }, []);
+
+  const showSubtitle = useCallback((text: string) => {
+    clearSubtitleFadeTimer();
+    setSubtitle(text);
+    setSubtitleFading(false);
+  }, [clearSubtitleFadeTimer]);
+
+  const hideSubtitle = useCallback((fade = true) => {
+    clearSubtitleFadeTimer();
+    if (!fade) {
+      setSubtitle("");
+      setSubtitleFading(false);
+      return;
+    }
+
+    setSubtitleFading(true);
+    subtitleFadeTimerRef.current = window.setTimeout(() => {
+      setSubtitle("");
+      setSubtitleFading(false);
+      subtitleFadeTimerRef.current = null;
+    }, 900);
+  }, [clearSubtitleFadeTimer]);
 
   const getActiveMusicAudio = useCallback(() => {
     if (!activeMusicAudioRef.current && audioRef.current) {
@@ -374,6 +455,7 @@ export function useWebSocket() {
       isPlaying: true,
       currentTime: 0,
       duration: duration ?? 0,
+      audioSignalLevel: null,
     }));
     setStatus("playing");
     rememberTrack({ id, url, title, artist, album, duration, isFavorite });
@@ -429,12 +511,54 @@ export function useWebSocket() {
     ws.send(JSON.stringify({ type: "queue_prefetch" }));
   }, [preloadNextPlaylistTrack]);
 
-  const requestQueueStep = useCallback((direction: "next" | "previous", fallback: () => void) => {
+  const buildQueueStepPayload = useCallback((reason: QueueStepReason, audio?: HTMLAudioElement): QueueStepPayload => {
+    const state = playerStateRef.current;
+    const track = state.currentTrack;
+    return {
+      reason,
+      trackId: track?.id,
+      title: track?.title,
+      artist: track?.artist,
+      positionSec: Number.isFinite(audio?.currentTime)
+        ? audio!.currentTime
+        : state.currentTime,
+      durationSec: Number.isFinite(audio?.duration)
+        ? audio!.duration
+        : state.duration,
+    };
+  }, []);
+
+  const requestQueueStep = useCallback((direction: "next" | "previous", fallback: () => void, data?: QueueStepPayload) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: direction === "next" ? "queue_next" : "queue_previous" }));
+      wsRef.current.send(JSON.stringify({
+        type: direction === "next" ? "queue_next" : "queue_previous",
+        data,
+      }));
       return;
     }
     fallback();
+  }, []);
+
+  const reportClientPlaybackIssue = useCallback((code: ClientPlaybackIssueCode, message: string) => {
+    const state = playerStateRef.current;
+    const track = state.currentTrack;
+    if (!track || wsRef.current?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    wsRef.current.send(JSON.stringify({
+      type: "playback_issue",
+      data: {
+        code,
+        message,
+        trackId: track.id,
+        title: track.title,
+        artist: track.artist,
+        positionSec: Number.isFinite(state.currentTime) ? state.currentTime : undefined,
+        durationSec: Number.isFinite(state.duration) ? state.duration : undefined,
+        signalLevel: typeof state.audioSignalLevel === "number" ? state.audioSignalLevel : undefined,
+      },
+    }));
   }, []);
 
   const playRelativeTrackLocally = useCallback((step: number) => {
@@ -449,8 +573,8 @@ export function useWebSocket() {
   const onNext = useCallback(() => {
     const pl = playerStateRef.current.playlist;
     if (pl.length === 0) return;
-    requestQueueStep("next", () => playRelativeTrackLocally(1));
-  }, [playRelativeTrackLocally, requestQueueStep]);
+    requestQueueStep("next", () => playRelativeTrackLocally(1), buildQueueStepPayload("manual_skip", getActiveMusicAudio() ?? undefined));
+  }, [buildQueueStepPayload, getActiveMusicAudio, playRelativeTrackLocally, requestQueueStep]);
 
   const onPrevious = useCallback(() => {
     const pl = playerStateRef.current.playlist;
@@ -458,14 +582,14 @@ export function useWebSocket() {
     requestQueueStep("previous", () => playRelativeTrackLocally(-1));
   }, [playRelativeTrackLocally, requestQueueStep]);
 
-  const handleActiveAudioFailure = useCallback((reason: "error" | "stalled" | "waiting") => {
+  const handleActiveAudioFailure = useCallback((reason: "error" | "stalled" | "waiting" | "silent") => {
     const currentTrack = playerStateRef.current.currentTrack;
     const trackKey = getTrackPlaybackKey(currentTrack);
     if (!currentTrack || !trackKey) {
       return;
     }
 
-    if (reason !== "error") {
+    if (reason === "waiting" || reason === "stalled") {
       requestUpcomingPrefetch();
       return;
     }
@@ -479,16 +603,22 @@ export function useWebSocket() {
       attempts,
     };
 
+    if (reason === "error") {
+      reportClientPlaybackIssue("audio_error", "Browser audio element reported a playback error");
+    } else if (reason === "silent") {
+      reportClientPlaybackIssue("client_silent_audio", "Playback position advanced while browser audio signal stayed too low");
+    }
+
     if (attempts === 1 && currentTrack.id && wsRef.current?.readyState === WebSocket.OPEN) {
-      showUtilityNotice("Refreshing audio signal");
-      wsRef.current.send(JSON.stringify({ type: "queue_select", data: { trackId: currentTrack.id } }));
+      showUtilityNotice(reason === "silent" ? "Recovering silent audio" : "Refreshing audio signal");
+      wsRef.current.send(JSON.stringify({ type: "queue_select", data: { trackId: currentTrack.id, forceRefresh: true } }));
       requestUpcomingPrefetch();
       return;
     }
 
     showUtilityNotice("Skipping unavailable track");
     requestQueueStep("next", () => playRelativeTrackLocally(1));
-  }, [playRelativeTrackLocally, requestQueueStep, requestUpcomingPrefetch, showUtilityNotice]);
+  }, [playRelativeTrackLocally, reportClientPlaybackIssue, requestQueueStep, requestUpcomingPrefetch, showUtilityNotice]);
 
   const onPlayPause = useCallback(() => {
     const a = getActiveMusicAudio();
@@ -511,6 +641,13 @@ export function useWebSocket() {
 
   const onToggleFavorite = useCallback(async (trackId: string) => {
     const nextFavorited = !favoriteIdsRef.current.includes(trackId);
+    const catalogTrack = trackCatalogRef.current.get(trackId) ?? trackCatalogRef.current.get(`url:${trackId}`);
+    const currentTrack = playerStateRef.current.currentTrack;
+    const feedbackTrack = catalogTrack ?? (
+      currentTrack && (currentTrack.id === trackId || currentTrack.url === trackId)
+        ? currentTrack
+        : null
+    );
     setFavoriteIds((prev) => nextFavorited ? [...prev, trackId] : prev.filter((id) => id !== trackId));
     setPlayerState((p) => ({
       ...p,
@@ -519,7 +656,14 @@ export function useWebSocket() {
         : p.currentTrack,
     }));
     try {
-      await fetch(`/api/favorites/${encodeURIComponent(trackId)}`, { method: "POST" });
+      await fetch(`/api/favorites/${encodeURIComponent(trackId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: feedbackTrack?.title,
+          artist: feedbackTrack?.artist,
+        }),
+      });
     } catch {
       setFavoriteIds((prev) => !nextFavorited ? [...prev, trackId] : prev.filter((id) => id !== trackId));
     }
@@ -592,10 +736,25 @@ export function useWebSocket() {
     if (found?.audioUrl && ttsAudioRef.current) {
       ttsPlayingRef.current = true;
       applyActiveMusicVolume(160);
+      showSubtitle(found.text);
       ttsAudioRef.current.src = found.audioUrl;
       ttsAudioRef.current.play().catch(console.error);
+      const currentTrack = playerStateRef.current.currentTrack;
+      if (currentTrack) {
+        void fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "replay_dj",
+            trackId: currentTrack.id,
+            title: currentTrack.title,
+            artist: currentTrack.artist,
+            note: "implicit: replayed DJ audio",
+          }),
+        }).catch(() => {});
+      }
     }
-  }, [applyActiveMusicVolume, messages]);
+  }, [applyActiveMusicVolume, messages, showSubtitle]);
 
   const sendTrigger = useCallback((mode: TriggerMode) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -625,9 +784,12 @@ export function useWebSocket() {
       const [
         favoritesRes,
         historyRes,
+        feedbackRes,
+        discoveryCandidatesRes,
         tasteRes,
         djTasteRes,
         musicSourcesRes,
+        playbackDiagnosticsRes,
         localLibraryRes,
         localLibraryMatchesRes,
         programAuditRes,
@@ -636,9 +798,12 @@ export function useWebSocket() {
       ] = await Promise.all([
         fetch("/api/favorites"),
         fetch("/api/history"),
+        fetch("/api/feedback?limit=6"),
+        fetch("/api/radio/discovery-candidates?limit=6"),
         fetch("/api/taste-profile"),
         fetch("/api/taste"),
         fetch("/api/music-sources"),
+        fetch("/api/radio/playback-diagnostics"),
         fetch("/api/music-sources/local-library"),
         fetch("/api/music-sources/local-library/matches"),
         fetch("/api/radio/program-audit"),
@@ -654,6 +819,14 @@ export function useWebSocket() {
         const history = await historyRes.json() as PlayHistoryEntry[];
         setPlayHistory(history);
       }
+      if (feedbackRes.ok) {
+        const records = await feedbackRes.json() as UserFeedbackRecord[];
+        setUserFeedback(records);
+      }
+      if (discoveryCandidatesRes.ok) {
+        const records = await discoveryCandidatesRes.json() as DiscoveryCandidateRecord[];
+        setDiscoveryCandidates(records);
+      }
       if (tasteRes.ok) {
         const profile = await tasteRes.json() as TasteProfile | null;
         setTasteProfile(profile);
@@ -665,6 +838,10 @@ export function useWebSocket() {
       if (musicSourcesRes.ok) {
         const status = await musicSourcesRes.json() as MusicSourceRuntimeStatus;
         setMusicSourceStatus(status);
+      }
+      if (playbackDiagnosticsRes.ok) {
+        const diagnostics = await playbackDiagnosticsRes.json() as PlaybackDiagnostics;
+        setPlaybackDiagnostics(diagnostics);
       }
       if (localLibraryRes.ok) {
         const status = await localLibraryRes.json() as LocalLibraryStatus;
@@ -690,6 +867,66 @@ export function useWebSocket() {
       // keep best-effort behavior
     }
   }, []);
+
+  const onTrackFeedback = useCallback(async (type: TrackFeedbackType) => {
+    const currentTrack = playerStateRef.current.currentTrack;
+    if (!currentTrack) {
+      showUtilityNotice("No track to tag yet");
+      return;
+    }
+
+    const labels: Record<TrackFeedbackType, string> = {
+      more_like_this: "已记录：多来点这种",
+      less_like_this: "已记录：少放这种",
+      dislike_track: "已记录：不喜欢这首",
+      favorite_track: "已记录：收藏",
+      complete_track: "已记录：听完",
+      skip_track: "已记录：跳过",
+      replay_dj: "已记录：重播",
+      ask_about_track: "已记录：追问",
+    };
+    const djReplies: Partial<Record<TrackFeedbackType, string>> = {
+      more_like_this: currentTrack.artist
+        ? `收到，后面我会往 ${currentTrack.artist} 这条线靠近一点。`
+        : "收到，后面我会多接一点这种方向。",
+      less_like_this: "收到，后面我会把这类歌的密度降下来。",
+      dislike_track: "明白，这首我会避开，后面换个更合适的方向。",
+    };
+    showUtilityNotice(labels[type]);
+
+    try {
+      const res = await fetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type,
+          trackId: currentTrack.id,
+          title: currentTrack.title,
+          artist: currentTrack.artist,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`Feedback failed: ${res.status}`);
+      }
+      const record = await res.json() as UserFeedbackRecord;
+      setUserFeedback((current) => [record, ...current].slice(0, 50));
+      const reply = djReplies[type];
+      if (reply) {
+        const timestamp = Date.now();
+        setMessages((current) => [...current, {
+          id: crypto.randomUUID(),
+          role: "dj",
+          text: reply,
+          time: formatClockTime(timestamp),
+          timestamp,
+          sender: DJ_DISPLAY_NAME,
+        }]);
+      }
+      void refreshLibraryData();
+    } catch (error) {
+      showUtilityNotice(error instanceof Error ? error.message : "Feedback failed");
+    }
+  }, [refreshLibraryData, showUtilityNotice]);
 
   const updateVoicePreset = useCallback(async (preset: TtsPreset) => {
     setIsUpdatingVoicePreset(true);
@@ -800,6 +1037,96 @@ export function useWebSocket() {
     requestUpcomingPrefetch,
   ]);
 
+  const playlistPreloadSignature = playerState.playlist
+    .map((track) => `${track.id}:${track.url}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!playerState.currentTrack || playerState.queueCount < 2) {
+      return;
+    }
+
+    preloadNextPlaylistTrack();
+  }, [
+    playerState.currentTrack?.id,
+    playerState.currentTrack?.url,
+    playerState.queueCount,
+    playlistPreloadSignature,
+    preloadNextPlaylistTrack,
+  ]);
+
+  useEffect(() => {
+    const track = playerState.currentTrack;
+    const trackKey = getTrackPlaybackKey(track);
+    const signalLevel = playerState.audioSignalLevel;
+    const resetSilentRecovery = () => {
+      silentAudioRecoveryRef.current = {
+        trackKey,
+        url: track?.url,
+        lastPositionSec: Number.isFinite(playerState.currentTime) ? playerState.currentTime : null,
+        silentRunMs: 0,
+        lastActionAt: silentAudioRecoveryRef.current.lastActionAt,
+      };
+    };
+
+    if (
+      !track
+      || !trackKey
+      || !playerState.isPlaying
+      || status === "speaking"
+      || playerState.volume < AUDIO_SILENCE_RECOVERY_MIN_VOLUME
+      || typeof signalLevel !== "number"
+    ) {
+      resetSilentRecovery();
+      return;
+    }
+
+    const recovery = silentAudioRecoveryRef.current;
+    const samePlayback = recovery.trackKey === trackKey && recovery.url === track.url;
+    const previousPositionSec = samePlayback ? recovery.lastPositionSec : null;
+    const currentPositionSec = Number.isFinite(playerState.currentTime)
+      ? playerState.currentTime
+      : previousPositionSec;
+    const positionDeltaMs = previousPositionSec !== null && currentPositionSec !== null
+      ? Math.max(0, (currentPositionSec - previousPositionSec) * 1000)
+      : 0;
+    const progressedMs = positionDeltaMs > 0 ? Math.min(positionDeltaMs, 1_500) : 0;
+    const nextSilentRunMs = signalLevel <= AUDIO_SILENCE_RECOVERY_LEVEL
+      ? (samePlayback ? recovery.silentRunMs : 0) + progressedMs
+      : 0;
+
+    silentAudioRecoveryRef.current = {
+      trackKey,
+      url: track.url,
+      lastPositionSec: currentPositionSec,
+      silentRunMs: nextSilentRunMs,
+      lastActionAt: recovery.lastActionAt,
+    };
+
+    const now = performance.now();
+    if (
+      nextSilentRunMs >= AUDIO_SILENCE_RECOVERY_MS
+      && now - recovery.lastActionAt >= AUDIO_SILENCE_RECOVERY_COOLDOWN_MS
+    ) {
+      silentAudioRecoveryRef.current = {
+        trackKey,
+        url: track.url,
+        lastPositionSec: currentPositionSec,
+        silentRunMs: 0,
+        lastActionAt: now,
+      };
+      handleActiveAudioFailure("silent");
+    }
+  }, [
+    handleActiveAudioFailure,
+    playerState.audioSignalLevel,
+    playerState.currentTime,
+    playerState.currentTrack,
+    playerState.isPlaying,
+    playerState.volume,
+    status,
+  ]);
+
   useEffect(() => {
     favoriteIdsRef.current = favoriteIds;
     setPlayerState((prev) => {
@@ -818,6 +1145,10 @@ export function useWebSocket() {
   useEffect(() => {
     void refreshLibraryData();
   }, [refreshLibraryData]);
+
+  useEffect(() => () => {
+    clearSubtitleFadeTimer();
+  }, [clearSubtitleFadeTimer]);
 
   useEffect(() => {
     if (status !== "playing" && status !== "speaking") {
@@ -870,7 +1201,7 @@ export function useWebSocket() {
       const a = event.currentTarget as HTMLAudioElement;
       if (!isActiveAudio(a)) return;
       prefetchedTrackKeyRef.current = null;
-      requestQueueStep("next", () => playRelativeTrackLocally(1));
+      requestQueueStep("next", () => playRelativeTrackLocally(1), buildQueueStepPayload("track_complete", a));
     };
     const onPl = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
@@ -950,6 +1281,7 @@ export function useWebSocket() {
   }, [
     getActiveMusicAudio,
     getEffectiveMusicVolume,
+    buildQueueStepPayload,
     handleActiveAudioFailure,
     playRelativeTrackLocally,
     requestQueueStep,
@@ -974,23 +1306,24 @@ export function useWebSocket() {
         }
       }
 
-      if (!mediaSourcesRef.current.get(audio)) {
-        const source = ctx.createMediaElementSource(audio);
+      let source = mediaSourcesRef.current.get(audio);
+      if (!source) {
+        source = ctx.createMediaElementSource(audio);
         mediaSourcesRef.current.set(audio, source);
-        analyserRef.current = ctx.createAnalyser();
-        analyserRef.current.fftSize = 128;
-        analyserRef.current.smoothingTimeConstant = 0.82;
-        source.connect(analyserRef.current);
-        analyserRef.current.connect(ctx.destination);
-      } else if (!analyserRef.current) {
-        analyserRef.current = ctx.createAnalyser();
-        analyserRef.current.fftSize = 128;
-        analyserRef.current.smoothingTimeConstant = 0.82;
-        mediaSourcesRef.current.get(audio)?.connect(analyserRef.current);
-        analyserRef.current.connect(ctx.destination);
       }
 
-      return analyserRef.current;
+      let analyser = analyserNodesRef.current.get(audio);
+      if (!analyser) {
+        analyser = ctx.createAnalyser();
+        analyser.fftSize = 128;
+        analyser.smoothingTimeConstant = 0.82;
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+        analyserNodesRef.current.set(audio, analyser);
+      }
+
+      analyserRef.current = analyser;
+      return analyser;
     };
 
     const stopVisualizer = () => {
@@ -999,6 +1332,9 @@ export function useWebSocket() {
         visualizerFrameRef.current = null;
       }
       setVisualizerBars((prev) => prev.map((_, index) => 0.04 + ((index % 5) * 0.01)));
+      setPlayerState((prev) => (
+        prev.audioSignalLevel === null ? prev : { ...prev, audioSignalLevel: null }
+      ));
     };
 
     const startVisualizer = async (audio: HTMLAudioElement) => {
@@ -1021,6 +1357,15 @@ export function useWebSocket() {
           return Number(normalized.toFixed(3));
         });
         setVisualizerBars(nextBars);
+        const rawAverage = buffer.reduce((total, value) => total + value, 0) / Math.max(1, buffer.length);
+        const signalLevel = Number((rawAverage / 255).toFixed(4));
+        const now = performance.now();
+        if (now - lastAudioSignalStateAtRef.current >= AUDIO_SIGNAL_STATE_INTERVAL_MS) {
+          lastAudioSignalStateAtRef.current = now;
+          setPlayerState((prev) => (
+            prev.audioSignalLevel === signalLevel ? prev : { ...prev, audioSignalLevel: signalLevel }
+          ));
+        }
         visualizerFrameRef.current = window.requestAnimationFrame(tick);
       };
 
@@ -1075,6 +1420,7 @@ export function useWebSocket() {
     const onEnd = () => {
       ttsPlayingRef.current = false;
       applyActiveMusicVolume(220);
+      hideSubtitle(true);
       const active = getActiveMusicAudio();
       const isMusicPlaying = Boolean(active && !active.paused && active.currentSrc);
       const nextStatus: AppStatus = isMusicPlaying ? "playing" : "idle";
@@ -1084,6 +1430,7 @@ export function useWebSocket() {
     const onError = () => {
       ttsPlayingRef.current = false;
       applyActiveMusicVolume(220);
+      hideSubtitle(true);
       const active = getActiveMusicAudio();
       if (active && !active.paused && active.currentSrc) {
         setStatus("playing");
@@ -1098,7 +1445,7 @@ export function useWebSocket() {
       t.removeEventListener("ended", onEnd);
       t.removeEventListener("error", onError);
     };
-  }, [applyActiveMusicVolume, getActiveMusicAudio]);
+  }, [applyActiveMusicVolume, getActiveMusicAudio, hideSubtitle]);
 
   useEffect(() => {
     let disposed = false;
@@ -1184,15 +1531,11 @@ export function useWebSocket() {
               rememberTrack(normalizedTrack);
               setPlayerState((p) => ({ ...p, currentTrack: normalizedTrack, duration: normalizedTrack.duration ?? 0, status: d.status ?? "idle" }));
               const activeTrack = playerStateRef.current.currentTrack;
-              const isSameTrack = Boolean(
-                activeTrack
-                && (
-                  (activeTrack.id && normalizedTrack.id && activeTrack.id === normalizedTrack.id)
-                  || activeTrack.url === normalizedTrack.url
-                ),
-              );
+              const isSameTrack = isSamePlaybackTrack(activeTrack, normalizedTrack);
               const active = getActiveMusicAudio();
-              if (active && normalizedTrack.url && (!active.currentSrc || !isSameTrack)) {
+              const loadedUrl = active?.dataset.loadedUrl ?? activeTrack?.url;
+              const isSameLoadedUrl = loadedUrl === normalizedTrack.url;
+              if (active && normalizedTrack.url && (!active.currentSrc || !isSameTrack || !isSameLoadedUrl)) {
                 active.dataset.playbackKey = getTrackPlaybackKey(normalizedTrack);
                 active.dataset.playbackUrl = normalizedTrack.url;
                 active.src = normalizedTrack.url;
@@ -1216,7 +1559,6 @@ export function useWebSocket() {
           case "dj_message": {
             const d = msg.data as WSDJMessagePayload;
             const timestamp = d.timestamp ?? Date.now();
-            setSubtitle(d.text);
             const fn = d.ttsAudioPath?.split(/[/\\]/).pop() ?? "";
             const audioUrl = fn ? `/api/audio/tts/${fn}` : undefined;
             setMessages((p) => [...p, {
@@ -1229,6 +1571,7 @@ export function useWebSocket() {
               audioUrl,
             }]);
             if (d.ttsAudioPath) {
+              showSubtitle(d.text);
               ttsPlayingRef.current = true;
               applyActiveMusicVolume(160);
               setStatus("speaking");
@@ -1238,6 +1581,7 @@ export function useWebSocket() {
                 ttsAudioRef.current.play().catch(() => {
                   ttsPlayingRef.current = false;
                   applyActiveMusicVolume(220);
+                  hideSubtitle(true);
                   const active = getActiveMusicAudio();
                   if (active && !active.paused && active.currentSrc) {
                     setStatus("playing");
@@ -1245,6 +1589,8 @@ export function useWebSocket() {
                   }
                 });
               }
+            } else {
+              hideSubtitle(false);
             }
             break;
           }
@@ -1381,13 +1727,13 @@ export function useWebSocket() {
     userAvatarUrl,
     status, messages, djMessages, currentTrack: playerState.currentTrack,
     isConnected, reconnecting, playerState, audioRef, nextAudioRef, ttsAudioRef,
-    statusText, isTriggerBusy, subtitle,
+    statusText, isTriggerBusy, subtitle, subtitleFading,
     visualizerBars,
-    favoriteIds, favoriteTracks, playHistory, tasteProfile,
-    isSyncingLibrary, lastSyncSummary, musicSourceStatus, localLibraryStatus, localLibraryMatchStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
+    favoriteIds, favoriteTracks, playHistory, userFeedback, discoveryCandidates, tasteProfile,
+    isSyncingLibrary, lastSyncSummary, musicSourceStatus, playbackDiagnostics, localLibraryStatus, localLibraryMatchStatus, programAudit, listenCheckRecords, listenAcceptance, isRescanningLocalLibrary, utilityNotice,
     sendTrigger, sendMessage,
     onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
-    onToggleFavorite, onSelectTrack, onReplayAudio, updateVoicePreset,
+    onToggleFavorite, onTrackFeedback, onSelectTrack, onReplayAudio, updateVoicePreset,
     setUserAvatarUrl: async (file: File) => {
       const dataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();

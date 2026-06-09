@@ -21,6 +21,7 @@ interface ChatPanelProps {
   onFullscreenToggle: () => void;
   isFullscreen: boolean;
   subtitle: string;
+  subtitleFading: boolean;
   statusText: string;
   currentTrack: TrackInfo | null;
 }
@@ -42,6 +43,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onFullscreenToggle,
   isFullscreen,
   subtitle,
+  subtitleFading,
   statusText,
   currentTrack,
 }) => {
@@ -256,7 +258,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       {subtitle && (
         <div className="absolute bottom-[88px] left-0 right-0 flex justify-center pointer-events-none px-4 z-10">
           <div 
-            className="subtitle-overlay text-xl md:text-2xl font-bold text-white text-center tracking-wide" 
+            className={`subtitle-overlay ${subtitleFading ? "subtitle-overlay-fading" : ""} text-xl md:text-2xl font-bold text-white text-center tracking-wide`}
             style={{ textShadow: '0 2px 4px rgba(0,0,0,0.8), 0 0 10px rgba(0,0,0,0.5)' }}
           >
             {subtitle}

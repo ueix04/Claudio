@@ -323,7 +323,20 @@ body {
 
 /* Subtitle overlay style */
 .subtitle-overlay {
+  opacity: 1;
+  transform: translateY(0);
+  filter: blur(0);
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8), 0 0 2px rgba(0, 0, 0, 0.9);
+  transition:
+    opacity 900ms ease,
+    transform 900ms ease,
+    filter 900ms ease;
+}
+
+.subtitle-overlay-fading {
+  opacity: 0;
+  transform: translateY(8px);
+  filter: blur(2px);
 }
 
 :root[data-theme="light"] .subtitle-overlay {
