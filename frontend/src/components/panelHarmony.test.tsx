@@ -124,6 +124,7 @@ describe("split panel harmony", () => {
     expect(markup).toContain("claudio-bottom-bar");
     expect(markup).toContain("DISCOVERY CANDIDATES");
     expect(markup).toContain("Discovery Song");
+    expect(markup).toContain(">STATE</button>");
     expect(markup.indexOf("player-dock-progress")).toBeLessThan(markup.indexOf("player-dock-grid"));
     expect(markup).toMatch(/1:05<\/span><span class="flex-shrink-0">\/<\/span><span class="flex-shrink-0">3:20/);
   });

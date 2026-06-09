@@ -64,7 +64,7 @@ interface PlayerPanelProps {
   status: AppStatus;
 }
 
-type PlayerView = "list" | "favorites" | "taste";
+type PlayerView = "list" | "favorites" | "taste" | "state";
 type PlayerDisplayMode = "playlist" | "clock";
 type SettingsPanel = "root" | "theme" | "display" | "audio";
 type WeatherBadge = { emoji: string; summary: string };
@@ -984,6 +984,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
           {activeView === "list" && renderListView()}
           {activeView === "favorites" && renderFavoritesView()}
           {activeView === "taste" && renderTasteView()}
+          {activeView === "state" && renderStateView()}
         </div>
       </div>
     </div>
@@ -995,6 +996,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         { id: "list" as const, label: "LIST" },
         { id: "favorites" as const, label: "FAV" },
         { id: "taste" as const, label: "TASTE" },
+        { id: "state" as const, label: "STATE" },
       ].map((item) => (
         <button
           key={item.id}
@@ -1235,7 +1237,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         <div className="flex items-center justify-between gap-4">
           {renderPanelTabs()}
           <span className="text-[10px] font-bold tracking-[0.2em] uppercase claudio-theme-text-muted">
-            {activeView === "list" ? "QUEUE / RECENT" : activeView === "favorites" ? "FAVORITES" : "TASTE / AUDIT"}
+            {activeView === "list"
+              ? "QUEUE / RECENT"
+              : activeView === "favorites" ? "FAVORITES"
+                : activeView === "taste" ? "TASTE PROFILE" : "PLAYBACK STATE"}
           </span>
         </div>
         <div className="flex items-center justify-between pt-3">
@@ -1244,7 +1249,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               ? `${playerState.queueCount} TRACKS`
               : activeView === "favorites"
                 ? `${favoriteTracks.length} SAVED`
-                : tasteProfile ? `${tasteProfile.uniqueArtistCount} ARTISTS` : "NO PROFILE"}
+                : activeView === "taste"
+                  ? tasteProfile ? `${tasteProfile.uniqueArtistCount} ARTISTS` : "NO PROFILE"
+                  : statusText}
           </span>
           {utilityNotice && (
             <span className="text-[10px] uppercase tracking-[0.18em] claudio-theme-accent">
@@ -1259,6 +1266,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
           {activeView === "list" && renderListView()}
           {activeView === "favorites" && renderFavoritesView()}
           {activeView === "taste" && renderTasteView()}
+          {activeView === "state" && renderStateView()}
         </div>
       </div>
     </div>
@@ -1336,7 +1344,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     </section>
   );
 
-  const renderTasteView = () => {
+  const renderDetailView = (view: "taste" | "state") => {
     const failedCount = lastSyncSummary?.failedPlaylists.length ?? 0;
     const languageMix = tasteProfile?.languageMix ?? { chinese: 0, latin: 0, mixed: 0, other: 0 };
     const totalTracks = tasteProfile?.totalTrackCount ?? 0;
@@ -1580,8 +1588,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       )
     );
 
-    return (
-      <div className="flex flex-col gap-6">
+    if (view === "state") {
+      return (
+        <div className="flex flex-col gap-6">
         <section className="panel-card">
           <div className="panel-card-head">
             <span>PROGRAM AUDIT</span>
@@ -2135,7 +2144,12 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             )}
           </section>
         )}
+        </div>
+      );
+    }
 
+    return (
+      <div className="flex flex-col gap-6">
         <section className="panel-card">
           <div className="panel-card-head">
             <span>TASTE PROFILE</span>
@@ -2306,6 +2320,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       </div>
     );
   };
+
+  const renderTasteView = () => renderDetailView("taste");
+  const renderStateView = () => renderDetailView("state");
 
   if (!playerState.playlist || playerState.playlist.length === 0) {
     return renderEmptyState();
