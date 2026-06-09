@@ -81,6 +81,7 @@ describe("program experience audit", () => {
         { role: "dj", text: "晚上好，欢迎回来，我是 Claudio。", timestamp: 2 },
         { role: "dj", text: "今天的天气很适合慢慢听。", timestamp: 3 },
         { role: "dj", text: "气温也会影响这一段的氛围。", timestamp: 4 },
+        { role: "dj", text: "这段夜色和房间里的灯光会把空气里的故事慢慢拉长，像一场梦一样推着我们继续往前走。", timestamp: 5 },
       ],
     }));
 
@@ -93,6 +94,7 @@ describe("program experience audit", () => {
       "weather_restraint",
       "restart_greetings",
       "line_repetition",
+      "dj_specificity",
     ]));
   });
 

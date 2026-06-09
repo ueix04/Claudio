@@ -52,6 +52,8 @@ const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
 const PLAYABLE_URL_FALLBACKS: Partial<Record<MusicSourceId, MusicSourceId[]>> = {
   [NETEASE_LEGACY_SOURCE_ID]: [UNBLOCK_NETEASE_SOURCE_ID],
 };
+const PLAYABLE_URL_VALIDATION_TIMEOUT_MS = 5_000;
+const PLAYABLE_URL_VALIDATION_BYTES = "bytes=0-4095";
 
 export interface MusicSourceRuntimeStatus {
   generatedAt: number;
@@ -130,6 +132,82 @@ function isSourceEnabled(source: MusicSourceId): boolean {
   if (source === LOCAL_LIBRARY_SOURCE_ID) return isLocalLibraryEnabled();
   if (source === UNBLOCK_NETEASE_SOURCE_ID) return isUnblockNeteaseEnabled();
   return true;
+}
+
+function shouldValidatePlayableUrl(url: string): boolean {
+  return process.env.NODE_ENV !== "test" && /^https?:\/\//i.test(url);
+}
+
+function looksLikeAudioResponse(contentType: string | null, head: Uint8Array): boolean {
+  const normalizedType = contentType?.toLowerCase() ?? "";
+  if (normalizedType.startsWith("audio/")) {
+    return true;
+  }
+
+  const bytes = Buffer.from(head);
+  if (bytes.length < 4) {
+    return false;
+  }
+
+  const asciiHead = bytes.subarray(0, 12).toString("latin1");
+  const first = bytes[0];
+  const second = bytes[1];
+  return (
+    asciiHead.startsWith("ID3")
+    || asciiHead.startsWith("OggS")
+    || asciiHead.startsWith("RIFF")
+    || asciiHead.includes("ftyp")
+    || (first === 0xff && (second & 0xe0) === 0xe0)
+  );
+}
+
+async function validatePlayableUrlResult(result: PlayableUrlResult): Promise<PlayableUrlResult> {
+  if (!shouldValidatePlayableUrl(result.url)) {
+    return result;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PLAYABLE_URL_VALIDATION_TIMEOUT_MS);
+  try {
+    const response = await fetch(result.url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 Claudio/1.0",
+        "Accept": "audio/*,*/*;q=0.9",
+        "Range": PLAYABLE_URL_VALIDATION_BYTES,
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok || !response.body) {
+      throw new MusicSourceError(
+        result.source,
+        response.status >= 500 ? "source_502" : "unplayable",
+        `Resolved URL validation failed with status ${response.status}`,
+      );
+    }
+
+    const reader = response.body.getReader();
+    const chunk = await reader.read();
+    await reader.cancel().catch(() => {});
+    const head = chunk.value ?? new Uint8Array();
+    if (!looksLikeAudioResponse(response.headers.get("content-type"), head)) {
+      throw new MusicSourceError(
+        result.source,
+        "unplayable",
+        "Resolved URL did not return recognizable audio data",
+      );
+    }
+
+    return result;
+  } catch (error) {
+    if (error instanceof MusicSourceError) {
+      throw error;
+    }
+
+    throw normalizeMusicSourceError(result.source, error);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function getMusicSourceRuntimeStatus(): Promise<MusicSourceRuntimeStatus> {
@@ -279,7 +357,8 @@ async function resolvePlayableUrlWithFallback(
 ): Promise<PlayableUrlResult> {
   try {
     const adapter = getMusicSourceAdapter(source);
-    return await adapter.resolvePlayableUrl(sourceTrackId, options);
+    const result = await adapter.resolvePlayableUrl(sourceTrackId, options);
+    return await validatePlayableUrlResult(result);
   } catch (error) {
     const primaryError = normalizeMusicSourceError(source, error);
     const fallbackSources = getPlayableUrlFallbacks(source);
@@ -287,9 +366,10 @@ async function resolvePlayableUrlWithFallback(
     for (const fallbackSource of fallbackSources) {
       try {
         const fallbackAdapter = getMusicSourceAdapter(fallbackSource);
-        return await fallbackAdapter.resolvePlayableUrl(sourceTrackId, {
+        const fallbackResult = await fallbackAdapter.resolvePlayableUrl(sourceTrackId, {
           forceRefresh: options?.forceRefresh ?? true,
         });
+        return await validatePlayableUrlResult(fallbackResult);
       } catch (fallbackError) {
         const normalizedFallbackError = normalizeMusicSourceError(fallbackSource, fallbackError);
         console.warn(
@@ -358,6 +438,8 @@ export async function refreshStoredTrackPlayableUrl(
       url: playableUrl.url,
       urlExpiresAt: playableUrl.expiresAt,
       urlRefreshedAt: playableUrl.refreshedAt,
+      playbackHealth: playableUrl.source !== identity.source ? "fallback" : "ready",
+      lastPlaybackIssue: undefined,
       lastResolveError: undefined,
     };
   } catch (error) {

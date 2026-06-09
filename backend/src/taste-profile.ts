@@ -3,6 +3,7 @@ import path from "node:path";
 import { dataDir } from "./runtime.js";
 import type { NeteaseSnapshot, NeteaseSnapshotPlaylist } from "./db.js";
 import type { PlayRecord } from "./db.js";
+import type { UserFeedbackRecord } from "./db.js";
 
 export interface TasteProfileArtist {
   name: string;
@@ -47,6 +48,29 @@ export interface TasteProfileLanguageMix {
   other: number;
 }
 
+export interface RuntimeTasteSignal {
+  key: string;
+  label: string;
+  score: number;
+  positiveCount: number;
+  negativeCount: number;
+  sampleTracks: string[];
+}
+
+export interface RuntimeTasteProfile {
+  generatedAt: number;
+  feedbackCount: number;
+  effectiveFeedbackCount: number;
+  likedArtists: RuntimeTasteSignal[];
+  avoidedArtists: RuntimeTasteSignal[];
+  languageSignals: RuntimeTasteSignal[];
+  likedEnergy: RuntimeTasteSignal[];
+  avoidedEnergy: RuntimeTasteSignal[];
+  likedMoods: RuntimeTasteSignal[];
+  avoidedMoods: RuntimeTasteSignal[];
+  summary: string;
+}
+
 export interface TasteProfile {
   generatedAt: number;
   sourceSyncedAt: number;
@@ -62,6 +86,7 @@ export interface TasteProfile {
   titleKeywords: TasteProfileKeyword[];
   artistKeywords: TasteProfileKeyword[];
   playlistFingerprints: TasteProfilePlaylistFingerprint[];
+  runtimeTaste?: RuntimeTasteProfile;
   summary: string;
 }
 
@@ -82,6 +107,66 @@ const STOPWORDS = new Set([
   "feat", "featuring", "with", "the", "and", "from", "for", "version",
   "edit", "demo", "live", "remix", "ost", "ep", "lp", "deluxe", "album",
 ]);
+
+const LANGUAGE_LABELS: Record<keyof TasteProfileLanguageMix, string> = {
+  chinese: "中文",
+  latin: "英文/拉丁",
+  mixed: "中英混合",
+  other: "其他语种",
+};
+
+const ENERGY_DIRECTIONS = [
+  {
+    key: "low_energy",
+    label: "低能量 / 安静",
+    pattern: /安静|轻|慢|柔|睡|低能量|舒缓|民谣|钢琴|原声|quiet|soft|calm|slow|low\s*energy|ambient|acoustic|piano|lo-?fi/i,
+  },
+  {
+    key: "mid_groove",
+    label: "中速 / 律动",
+    pattern: /律动|顺滑|中速|r&b|city\s*pop|soul|funk|groove|smooth|mid[-\s]?tempo/i,
+  },
+  {
+    key: "high_energy",
+    label: "高能量 / 提速",
+    pattern: /燃|炸|快|冲|提速|高能量|摇滚|电子|舞曲|鼓|贝斯|节拍|high\s*energy|dance|edm|rock|punk|upbeat|beat|drum|bass/i,
+  },
+] as const;
+
+const MOOD_DIRECTIONS = [
+  {
+    key: "warm",
+    label: "温暖 / 治愈",
+    pattern: /温暖|治愈|陪伴|舒服|松弛|warm|healing|cozy|comfort/i,
+  },
+  {
+    key: "nostalgic",
+    label: "怀旧 / 复古",
+    pattern: /怀旧|复古|旧|经典|粤语老歌|nostalg|retro|classic|oldies|80s|90s/i,
+  },
+  {
+    key: "melancholy",
+    label: "伤感 / 低落",
+    pattern: /伤感|难过|低落|失恋|孤独|emo|sad|blue|lonely|melanchol/i,
+  },
+  {
+    key: "dreamy",
+    label: "梦幻 / 氛围",
+    pattern: /梦|迷幻|氛围|漂浮|shoegaze|dream|dreamy|ethereal|ambient|psychedelic/i,
+  },
+  {
+    key: "bright",
+    label: "明亮 / 轻快",
+    pattern: /明亮|开心|轻快|清爽|夏天|happy|bright|sunny|summer|fresh/i,
+  },
+  {
+    key: "dark",
+    label: "冷感 / 暗色",
+    pattern: /冷|暗|夜|黑|压抑|dark|cold|noir|night/i,
+  },
+] as const;
+
+type RuntimeDirection = typeof ENERGY_DIRECTIONS[number] | typeof MOOD_DIRECTIONS[number];
 
 function normalizeToken(token: string): string {
   return token.trim().toLowerCase();
@@ -161,7 +246,7 @@ function buildSummary(profile: TasteProfile): string {
     })
     .join("\n");
 
-  return `本地音乐口味索引（构建于 ${new Date(profile.generatedAt).toLocaleString("zh-CN")}，基于 ${profile.playlistCount} 个网易云歌单快照）：
+  return `在线音乐口味索引（构建于 ${new Date(profile.generatedAt).toLocaleString("zh-CN")}，基于 ${profile.playlistCount} 个网易云歌单快照）：
 - 总曲目数：${profile.totalTrackCount}
 - 去重后曲目数：${profile.uniqueTrackCount}
 - 去重后艺人数：${profile.uniqueArtistCount}
@@ -178,7 +263,7 @@ ${playlistFingerprints || "- 无"}
 推荐要求：
 - 优先从上述核心艺人、相近艺人和相似氛围中挖掘，不要只看歌单名
 - 优先推荐“熟悉体系里的新发现”，避免总是推最头部最显眼的曲目
-- 当本地曲库里存在相似曲风、相似语言、相似情绪时，优先沿着这些线索扩展`;
+- 当在线候选池里存在相似曲风、相似语言、相似情绪时，优先沿着这些线索扩展`;
 }
 
 export function buildTasteProfile(snapshot: NeteaseSnapshot): TasteProfile {
@@ -306,10 +391,19 @@ export async function writeTasteProfile(profile: TasteProfile): Promise<void> {
 export async function getTasteProfile(): Promise<TasteProfile | null> {
   try {
     const raw = await fs.readFile(tasteProfilePath, "utf-8");
-    return JSON.parse(raw) as TasteProfile;
+    return normalizeTasteProfile(JSON.parse(raw) as TasteProfile);
   } catch {
     return null;
   }
+}
+
+function normalizeTasteProfile(profile: TasteProfile): TasteProfile {
+  return {
+    ...profile,
+    summary: profile.summary
+      .replace("本地音乐口味索引", "在线音乐口味索引")
+      .replace("当本地曲库里存在相似曲风、相似语言、相似情绪时", "当在线候选池里存在相似曲风、相似语言、相似情绪时"),
+  };
 }
 
 export async function rebuildTasteProfileFromSnapshot(snapshot: NeteaseSnapshot): Promise<TasteProfile> {
@@ -332,13 +426,249 @@ function buildRecentTrackKey(record: PlayRecord): string {
   return `${record.title.toLowerCase()}::${record.artist.toLowerCase()}`;
 }
 
+function buildFeedbackTrackKey(record: Pick<UserFeedbackRecord, "title" | "artist">): string {
+  return `${record.title.toLowerCase()}::${record.artist.toLowerCase()}`;
+}
+
+function getFeedbackSignalWeight(type: UserFeedbackRecord["type"]): number {
+  switch (type) {
+    case "more_like_this":
+      return 1;
+    case "favorite_track":
+      return 1.3;
+    case "complete_track":
+      return 0.55;
+    case "ask_about_track":
+    case "replay_dj":
+      return 0.35;
+    case "less_like_this":
+      return -1;
+    case "dislike_track":
+      return -1.35;
+    case "skip_track":
+      return -0.8;
+    default:
+      return 0;
+  }
+}
+
+function getFeedbackTimeDecay(createdAt: number, now = Date.now()): number {
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return 0.65;
+  if (createdAt < 946_684_800_000) return 1;
+  const ageDays = Math.max(0, (now - createdAt) / 86_400_000);
+  if (ageDays <= 1) return 1;
+  if (ageDays <= 3) return 0.75;
+  if (ageDays <= 7) return 0.45;
+  if (ageDays <= 14) return 0.2;
+  return 0.05;
+}
+
+function getRuntimeFeedbackWeight(feedback: UserFeedbackRecord, now = Date.now()): number {
+  return getFeedbackSignalWeight(feedback.type) * getFeedbackTimeDecay(feedback.createdAt, now);
+}
+
+function getFeedbackSignalText(feedback: UserFeedbackRecord): string {
+  return [feedback.title, feedback.artist, feedback.note].filter(Boolean).join(" ");
+}
+
+function formatFeedbackTrack(feedback: Pick<UserFeedbackRecord, "title" | "artist">): string {
+  return `${feedback.title} - ${feedback.artist}`;
+}
+
+function roundSignalScore(score: number): number {
+  return Math.round(score * 10) / 10;
+}
+
+function createSignalMapEntry(key: string, label: string) {
+  return {
+    key,
+    label,
+    score: 0,
+    positiveCount: 0,
+    negativeCount: 0,
+    sampleTracks: [] as string[],
+  };
+}
+
+function addRuntimeSignal(
+  map: Map<string, RuntimeTasteSignal>,
+  key: string,
+  label: string,
+  weight: number,
+  sampleTrack: string,
+): void {
+  if (!key || weight === 0) return;
+  const existing = map.get(key) ?? createSignalMapEntry(key, label);
+  existing.score += weight;
+  if (weight > 0) {
+    existing.positiveCount += 1;
+  } else {
+    existing.negativeCount += 1;
+  }
+  if (sampleTrack && existing.sampleTracks.length < 4 && !existing.sampleTracks.includes(sampleTrack)) {
+    existing.sampleTracks.push(sampleTrack);
+  }
+  map.set(key, existing);
+}
+
+function matchDirections(text: string, directions: readonly RuntimeDirection[]): RuntimeDirection[] {
+  return directions.filter((direction) => direction.pattern.test(text));
+}
+
+function getPositiveSignals(map: Map<string, RuntimeTasteSignal>, limit: number): RuntimeTasteSignal[] {
+  return [...map.values()]
+    .filter((signal) => signal.score > 0)
+    .map((signal) => ({ ...signal, score: roundSignalScore(signal.score) }))
+    .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+    .slice(0, limit);
+}
+
+function getNegativeSignals(map: Map<string, RuntimeTasteSignal>, limit: number): RuntimeTasteSignal[] {
+  return [...map.values()]
+    .filter((signal) => signal.score < 0)
+    .map((signal) => ({ ...signal, score: roundSignalScore(signal.score) }))
+    .sort((a, b) => a.score - b.score || a.label.localeCompare(b.label))
+    .slice(0, limit);
+}
+
+function getNetSignals(map: Map<string, RuntimeTasteSignal>, limit: number): RuntimeTasteSignal[] {
+  return [...map.values()]
+    .filter((signal) => Math.abs(signal.score) >= 0.1)
+    .map((signal) => ({ ...signal, score: roundSignalScore(signal.score) }))
+    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score) || a.label.localeCompare(b.label))
+    .slice(0, limit);
+}
+
+function formatRuntimeSignalList(signals: RuntimeTasteSignal[], emptyLabel = "无"): string {
+  if (signals.length === 0) return emptyLabel;
+  return signals
+    .map((signal) => `${signal.label}(${signal.score > 0 ? "+" : ""}${signal.score})`)
+    .join(", ");
+}
+
+function buildRuntimeTasteSummary(profile: Omit<RuntimeTasteProfile, "summary">): string {
+  const likedLanguages = profile.languageSignals.filter((signal) => signal.score > 0);
+  const avoidedLanguages = profile.languageSignals.filter((signal) => signal.score < 0);
+
+  return `运行期口味画像（来自最近 ${profile.feedbackCount} 条反馈，已按时间衰减）：
+- 正向艺人：${formatRuntimeSignalList(profile.likedArtists)}
+- 暂时少放：${formatRuntimeSignalList(profile.avoidedArtists)}
+- 正向语种：${formatRuntimeSignalList(likedLanguages)}
+- 回避语种：${formatRuntimeSignalList(avoidedLanguages)}
+- 正向能量：${formatRuntimeSignalList(profile.likedEnergy)}
+- 回避能量：${formatRuntimeSignalList(profile.avoidedEnergy)}
+- 正向情绪：${formatRuntimeSignalList(profile.likedMoods)}
+- 回避情绪：${formatRuntimeSignalList(profile.avoidedMoods)}
+
+使用规则：
+- 这是今晚的短期偏好，不覆盖长期网易云歌单画像
+- 正反馈可以扩大相邻探索，负反馈先收回到稳定区域
+- 如果信号很少，仍以长期口味和可播放性为主`;
+}
+
+export function buildRuntimeTasteProfile(
+  userFeedback: UserFeedbackRecord[],
+  now = Date.now(),
+): RuntimeTasteProfile {
+  const artistSignals = new Map<string, RuntimeTasteSignal>();
+  const languageSignals = new Map<string, RuntimeTasteSignal>();
+  const energySignals = new Map<string, RuntimeTasteSignal>();
+  const moodSignals = new Map<string, RuntimeTasteSignal>();
+  let effectiveFeedbackCount = 0;
+
+  for (const feedback of userFeedback.slice(0, 100)) {
+    const weight = getRuntimeFeedbackWeight(feedback, now);
+    if (Math.abs(weight) < 0.05) continue;
+    effectiveFeedbackCount += 1;
+
+    const sampleTrack = formatFeedbackTrack(feedback);
+    const artist = feedback.artist.trim();
+    if (artist) {
+      addRuntimeSignal(artistSignals, artist.toLowerCase(), artist, weight, sampleTrack);
+    }
+
+    const language = classifyLanguage(`${feedback.title} ${feedback.artist}`);
+    addRuntimeSignal(languageSignals, language, LANGUAGE_LABELS[language], weight, sampleTrack);
+
+    const signalText = getFeedbackSignalText(feedback);
+    for (const direction of matchDirections(signalText, ENERGY_DIRECTIONS)) {
+      addRuntimeSignal(energySignals, direction.key, direction.label, weight, sampleTrack);
+    }
+    for (const direction of matchDirections(signalText, MOOD_DIRECTIONS)) {
+      addRuntimeSignal(moodSignals, direction.key, direction.label, weight, sampleTrack);
+    }
+  }
+
+  const profileWithoutSummary = {
+    generatedAt: now,
+    feedbackCount: userFeedback.length,
+    effectiveFeedbackCount,
+    likedArtists: getPositiveSignals(artistSignals, 8),
+    avoidedArtists: getNegativeSignals(artistSignals, 8),
+    languageSignals: getNetSignals(languageSignals, 4),
+    likedEnergy: getPositiveSignals(energySignals, 5),
+    avoidedEnergy: getNegativeSignals(energySignals, 5),
+    likedMoods: getPositiveSignals(moodSignals, 6),
+    avoidedMoods: getNegativeSignals(moodSignals, 6),
+  };
+
+  return {
+    ...profileWithoutSummary,
+    summary: buildRuntimeTasteSummary(profileWithoutSummary),
+  };
+}
+
+export function summarizeRuntimeTasteProfile(userFeedback: UserFeedbackRecord[], now = Date.now()): string {
+  if (userFeedback.length === 0) return "";
+  const runtimeProfile = buildRuntimeTasteProfile(userFeedback, now);
+  return runtimeProfile.effectiveFeedbackCount > 0 ? runtimeProfile.summary : "";
+}
+
+function getRuntimeSignalWeight(signals: RuntimeTasteSignal[], key: string): number {
+  return signals.find((signal) => signal.key === key)?.score ?? 0;
+}
+
+function getDirectionRuntimeWeight(
+  text: string,
+  directions: readonly RuntimeDirection[],
+  positiveSignals: RuntimeTasteSignal[],
+  negativeSignals: RuntimeTasteSignal[],
+): number {
+  return matchDirections(text, directions).reduce((total, direction) => (
+    total
+      + getRuntimeSignalWeight(positiveSignals, direction.key)
+      + getRuntimeSignalWeight(negativeSignals, direction.key)
+  ), 0);
+}
+
 export function buildRecommendationCandidates(
   snapshot: NeteaseSnapshot,
   profile: TasteProfile,
   playHistory: PlayRecord[],
   limit = 20,
+  userFeedback: UserFeedbackRecord[] = [],
 ): RecommendationCandidate[] {
   const recentTrackKeys = new Set(playHistory.slice(0, 50).map(buildRecentTrackKey));
+  const dislikedTrackKeys = new Set(
+    userFeedback
+      .filter((feedback) => feedback.type === "dislike_track" && getFeedbackTimeDecay(feedback.createdAt) >= 0.2)
+      .slice(0, 50)
+      .map(buildFeedbackTrackKey),
+  );
+  const artistFeedbackWeights = new Map<string, number>();
+  userFeedback.slice(0, 50).forEach((feedback, index) => {
+    const artist = feedback.artist.trim();
+    if (!artist) return;
+    const recencyWeight = Math.max(1, 10 - Math.floor(index / 5));
+    const signalWeight = getFeedbackSignalWeight(feedback.type);
+    if (signalWeight === 0) return;
+    const timeDecay = getFeedbackTimeDecay(feedback.createdAt);
+    artistFeedbackWeights.set(
+      artist,
+      (artistFeedbackWeights.get(artist) ?? 0) + signalWeight * recencyWeight * timeDecay,
+    );
+  });
+  const runtimeTaste = buildRuntimeTasteProfile(userFeedback);
   const topArtistWeights = new Map(profile.topArtists.map((artist, index) => [artist.name, Math.max(1, 12 - index)]));
   const topAlbumWeights = new Map(profile.topAlbums.map((album, index) => [`${album.artist}::${album.name}`, Math.max(1, 8 - index)]));
   const dominant = dominantLanguage(profile);
@@ -347,7 +677,7 @@ export function buildRecommendationCandidates(
   for (const playlist of snapshot.playlists) {
     for (const track of playlist.tracks) {
       const trackKey = `${track.name.toLowerCase()}::${track.artist.toLowerCase()}`;
-      if (recentTrackKeys.has(trackKey)) {
+      if (recentTrackKeys.has(trackKey) || dislikedTrackKeys.has(trackKey)) {
         continue;
       }
 
@@ -378,6 +708,19 @@ export function buildRecommendationCandidates(
         }
       }
 
+      const feedbackWeight = artistFeedbackWeights.get(track.artist) ?? 0;
+      if (feedbackWeight > 0) {
+        existing.score += feedbackWeight;
+        if (!existing.reasons.includes("positive-feedback")) {
+          existing.reasons.push("positive-feedback");
+        }
+      } else if (feedbackWeight < 0) {
+        existing.score += feedbackWeight;
+        if (!existing.reasons.includes("reduced-by-feedback")) {
+          existing.reasons.push("reduced-by-feedback");
+        }
+      }
+
       const albumWeight = topAlbumWeights.get(`${track.artist}::${track.album ?? ""}`) ?? 0;
       if (albumWeight > 0) {
         existing.score += albumWeight;
@@ -398,6 +741,43 @@ export function buildRecommendationCandidates(
         existing.score += 2;
         if (!existing.reasons.includes("language-match")) {
           existing.reasons.push("language-match");
+        }
+      }
+      const runtimeLanguageWeight = getRuntimeSignalWeight(runtimeTaste.languageSignals, language);
+      if (runtimeLanguageWeight !== 0) {
+        existing.score += runtimeLanguageWeight;
+        const reason = runtimeLanguageWeight > 0 ? "runtime-language-match" : "runtime-language-reduced";
+        if (!existing.reasons.includes(reason)) {
+          existing.reasons.push(reason);
+        }
+      }
+
+      const runtimeDirectionText = `${track.name} ${track.artist} ${track.album ?? ""}`;
+      const runtimeEnergyWeight = getDirectionRuntimeWeight(
+        runtimeDirectionText,
+        ENERGY_DIRECTIONS,
+        runtimeTaste.likedEnergy,
+        runtimeTaste.avoidedEnergy,
+      );
+      if (runtimeEnergyWeight !== 0) {
+        existing.score += runtimeEnergyWeight;
+        const reason = runtimeEnergyWeight > 0 ? "runtime-energy-match" : "runtime-energy-reduced";
+        if (!existing.reasons.includes(reason)) {
+          existing.reasons.push(reason);
+        }
+      }
+
+      const runtimeMoodWeight = getDirectionRuntimeWeight(
+        runtimeDirectionText,
+        MOOD_DIRECTIONS,
+        runtimeTaste.likedMoods,
+        runtimeTaste.avoidedMoods,
+      );
+      if (runtimeMoodWeight !== 0) {
+        existing.score += runtimeMoodWeight;
+        const reason = runtimeMoodWeight > 0 ? "runtime-mood-match" : "runtime-mood-reduced";
+        if (!existing.reasons.includes(reason)) {
+          existing.reasons.push(reason);
         }
       }
 
@@ -427,7 +807,7 @@ export function buildRecommendationCandidates(
 export function summarizeRecommendationCandidates(candidates: RecommendationCandidate[]): string {
   if (candidates.length === 0) return "";
 
-  return `本地候选曲库（请优先从中选择，避免脱离用户现有口味体系）：\n${candidates
+  return `在线候选池（请优先从中选择，避免脱离用户现有口味体系）：\n${candidates
     .map((candidate, index) => {
       const code = `C${String(index + 1).padStart(2, "0")}`;
       const album = candidate.album ? ` | 专辑：${candidate.album}` : "";
@@ -435,5 +815,5 @@ export function summarizeRecommendationCandidates(candidates: RecommendationCand
       const reasons = candidate.reasons.join(", ");
       return `- ${code} | id=${candidate.id} | ${candidate.title} - ${candidate.artist}${album} | 来源歌单：${playlists} | 命中线索：${reasons || "local-match"}`;
     })
-    .join("\n")}\n\n返回 play 字段时，如果选择了候选曲库中的歌曲，请带上对应的 id。`;
+    .join("\n")}\n\n返回 play 字段时，如果选择了候选池中的歌曲，请带上对应的 id。`;
 }

@@ -36,6 +36,24 @@ const STARTUP_FALLBACK_TRACKS = [
   { title: "夜空中最亮的星", artist: "逃跑计划" },
 ];
 
+const DISCOVERY_FALLBACK_DIRECTIONS = [
+  {
+    query: "Coldplay alternative pop deep cut",
+    reason: "Keeps close to a familiar melodic center while opening a less obvious lane.",
+    risk: "adjacent" as const,
+  },
+  {
+    query: "周杰伦 相近 华语 慢歌",
+    reason: "Uses a known Chinese-pop anchor while moving away from the most repeated songs.",
+    risk: "adjacent" as const,
+  },
+  {
+    query: "indie pop night drive underrated",
+    reason: "A controlled small step into a wider late-night indie lane.",
+    risk: "small_adventure" as const,
+  },
+];
+
 async function buildNcmPlaylistContext(): Promise<string> {
   const indexedSummary = await tasteProfile.summarizeTasteProfile();
   if (indexedSummary) {
@@ -85,12 +103,36 @@ interface StationProgramResponse {
   reason: string;
 }
 
+interface DiscoveryScoutDirection {
+  query?: string;
+  direction?: string;
+  reason?: string;
+  risk?: db.DiscoveryRisk;
+}
+
+interface DiscoveryScoutResponse {
+  say?: string;
+  ttsText?: string;
+  directions?: DiscoveryScoutDirection[];
+  reason?: string;
+}
+
+interface DiscoveredPlayableTrack {
+  track: PlayableTrack;
+  query: string;
+  direction: string;
+  reason: string;
+  risk: db.DiscoveryRisk;
+}
+
 interface MusicContext {
   state: Awaited<ReturnType<typeof db.getState>>;
   timeOfDay: string;
   recentHistory: string;
+  feedbackContext: string;
   mergedPlaylistContext: string;
   candidateContext: string;
+  recommendationCandidates: tasteProfile.RecommendationCandidate[];
   localCandidateMap: Map<number, tasteProfile.RecommendationCandidate>;
   weatherContext?: string;
 }
@@ -131,6 +173,11 @@ async function gatherMusicContext(
     .slice(-10)
     .map((msg) => `${msg.role}: ${msg.text}`)
     .join("\n");
+  const feedbackSummary = db.summarizeUserFeedback(20);
+  const runtimeTasteContext = tasteProfile.summarizeRuntimeTasteProfile(
+    Array.isArray(state.userFeedback) ? state.userFeedback : [],
+  );
+  const feedbackContext = [feedbackSummary, runtimeTasteContext].filter(Boolean).join("\n\n");
 
   const timeOfDay = new Date().toLocaleTimeString("zh-CN", {
     hour: "2-digit",
@@ -151,7 +198,13 @@ async function gatherMusicContext(
   ]);
 
   const candidatePool = snapshot && profile
-    ? tasteProfile.buildRecommendationCandidates(snapshot, profile, state.playHistory, options?.candidateLimit ?? 20)
+    ? tasteProfile.buildRecommendationCandidates(
+        snapshot,
+        profile,
+        Array.isArray(state.playHistory) ? state.playHistory : [],
+        options?.candidateLimit ?? 20,
+        Array.isArray(state.userFeedback) ? state.userFeedback : [],
+      )
     : [];
   const candidateContext = [
     tasteProfile.summarizeRecommendationCandidates(candidatePool),
@@ -166,11 +219,310 @@ async function gatherMusicContext(
     state,
     timeOfDay,
     recentHistory,
+    feedbackContext,
     mergedPlaylistContext,
     candidateContext,
+    recommendationCandidates: candidatePool,
     localCandidateMap,
     weatherContext,
   };
+}
+
+function hasRecentNegativeFeedback(context: MusicContext): boolean {
+  const feedback = Array.isArray(context.state.userFeedback) ? context.state.userFeedback : [];
+  return feedback.slice(0, 5).some((item) =>
+    item.type === "less_like_this"
+    || item.type === "dislike_track"
+    || item.type === "skip_track"
+  );
+}
+
+function hasRecentPositiveFeedback(context: MusicContext): boolean {
+  const feedback = Array.isArray(context.state.userFeedback) ? context.state.userFeedback : [];
+  return feedback.slice(0, 5).some((item) =>
+    item.type === "more_like_this"
+    || item.type === "favorite_track"
+    || item.type === "complete_track"
+    || item.type === "ask_about_track"
+    || item.type === "replay_dj"
+  );
+}
+
+function normalizeDiscoveryRisk(
+  value: unknown,
+  context: MusicContext,
+): db.DiscoveryRisk {
+  if (value === "small_adventure" && !hasRecentNegativeFeedback(context)) {
+    return "small_adventure";
+  }
+  return "adjacent";
+}
+
+function buildDiscoveryScoutPrompt(
+  context: MusicContext,
+  purpose: "random_discover" | "program",
+): string {
+  const { timeOfDay, recentHistory, feedbackContext, mergedPlaylistContext, candidateContext, state } = context;
+  const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
+  const useEnglish = language === "en";
+  const recentNegative = hasRecentNegativeFeedback(context);
+  const verifiedContext = db.summarizeDiscoveryCandidates(8);
+
+  if (useEnglish) {
+    return `You are Claudio's Discovery Scout.
+Current time: ${timeOfDay}
+Purpose: ${purpose === "random_discover" ? "the listener pressed Discover" : "add limited exploration to a stable radio program"}
+Recent chat and playback clues:
+${recentHistory || "none"}
+Explicit listener feedback:
+${feedbackContext || "none"}
+Verified previous discoveries:
+${verifiedContext || "none"}
+User taste / playlists:
+${mergedPlaylistContext || "No playlist context yet"}
+${candidateContext ? `\n\nOnline candidate pool:\n${candidateContext}` : ""}
+
+Return exploration directions only. Do not decide the final playable songs. The backend will search online sources and verify playable audio.
+Rules:
+- Produce 4 to 7 search directions that are close to the listener's taste, not random
+- At least 70% should be stable or adjacent to the current taste
+- Use small_adventure only when it is still explainable from the taste context
+- ${recentNegative ? "Recent negative feedback exists, so do not use small_adventure." : "At most one direction may be small_adventure."}
+- Each query should be searchable as plain text on a music source
+- Avoid exact repeats from recent playback and explicit dislikes
+
+Return JSON only:
+- say: one short DJ line, natural English, 10-26 words, explaining that you will test a nearby direction
+- ttsText: same meaning, normal conversational pace, no slow/deep/whisper/theatrical tags
+- directions: array of objects with query, direction, reason, risk ("adjacent" or "small_adventure")
+- reason: short explanation of the exploration strategy`;
+  }
+
+  return `你是 Claudio 的 Discovery Scout。
+当前时间：${timeOfDay}
+目的：${purpose === "random_discover" ? "用户点击了 Discover" : "给稳定节目加入有限探索"}
+最近聊天和播放线索：
+${recentHistory || "无"}
+用户显性音乐反馈：
+${feedbackContext || "无"}
+最近已验证探索候选：
+${verifiedContext || "无"}
+用户口味 / 歌单：
+${mergedPlaylistContext || "暂无歌单信息"}
+${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
+
+只返回探索方向，不要直接决定最终播放歌曲。后端会用这些方向去在线搜索真实歌曲，并验证音频可播放。
+规则：
+- 输出 4 到 7 个搜索方向，必须贴近用户口味，不要随机乱跳
+- 至少 70% 是稳定口味或相邻探索
+- small_adventure 必须能从口味上下文解释出来
+- ${recentNegative ? "最近有负反馈，所以不要使用 small_adventure。" : "最多一个方向可以是 small_adventure。"}
+- query 必须是可以直接拿去音乐源搜索的普通文本
+- 避免最近播放和明确不喜欢的歌曲
+
+只输出 JSON：
+- say: 一句很短的 DJ 说明，中文 20-60 字，说明会试一个相邻方向
+- ttsText: 语义相同，正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+- directions: 数组，每项包含 query、direction、reason、risk（"adjacent" 或 "small_adventure"）
+- reason: 简短说明这次探索策略`;
+}
+
+function buildFallbackDiscoveryScoutResponse(context: MusicContext): DiscoveryScoutResponse {
+  const fromCandidates = context.recommendationCandidates.slice(0, 4).map((candidate) => ({
+    query: `${candidate.artist} ${candidate.title}`,
+    direction: `${candidate.artist} adjacent pick`,
+    reason: `Uses a known taste signal from ${candidate.sourcePlaylists.slice(0, 2).join(" / ") || "the online candidate pool"}.`,
+    risk: "adjacent" as const,
+  }));
+  const directions = [...fromCandidates, ...DISCOVERY_FALLBACK_DIRECTIONS].slice(0, 6);
+
+  return {
+    say: "我先沿着你的熟悉口味往旁边试一小步，能播再放进队列。",
+    ttsText: "我先沿着你的熟悉口味往旁边试一小步，能播再放进队列。",
+    directions,
+    reason: "Fallback discovery keeps exploration bounded when the scout model is temporarily unavailable.",
+  };
+}
+
+async function runDiscoveryScout(
+  context: MusicContext,
+  purpose: "random_discover" | "program",
+): Promise<DiscoveryScoutResponse> {
+  try {
+    const response = await claude.callJsonLLM<DiscoveryScoutResponse>(
+      buildDiscoveryScoutPrompt(context, purpose),
+      25_000,
+    );
+    if (Array.isArray(response.directions) && response.directions.length > 0) {
+      return response;
+    }
+  } catch (error) {
+    console.warn(`[radio] discovery scout failed, using fallback directions: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  return buildFallbackDiscoveryScoutResponse(context);
+}
+
+function normalizeDiscoveryDirections(
+  response: DiscoveryScoutResponse,
+  context: MusicContext,
+): Array<{ query: string; direction: string; reason: string; risk: db.DiscoveryRisk }> {
+  const normalized: Array<{ query: string; direction: string; reason: string; risk: db.DiscoveryRisk }> = [];
+  let usedSmallAdventure = false;
+
+  for (const item of response.directions ?? []) {
+    const query = (item.query ?? item.direction ?? "").trim().slice(0, 180);
+    if (!query) continue;
+
+    const direction = (item.direction ?? item.query ?? query).trim().slice(0, 180);
+    const reason = (item.reason ?? response.reason ?? "Exploration direction from Discovery Scout.").trim().slice(0, 240);
+    let risk = normalizeDiscoveryRisk(item.risk, context);
+    if (risk === "small_adventure") {
+      if (usedSmallAdventure) {
+        risk = "adjacent";
+      } else {
+        usedSmallAdventure = true;
+      }
+    }
+
+    normalized.push({ query, direction, reason, risk });
+    if (normalized.length >= 7) break;
+  }
+
+  return normalized;
+}
+
+async function resolveDiscoveryDirections(
+  response: DiscoveryScoutResponse,
+  context: MusicContext,
+  maxTracks: number,
+): Promise<DiscoveredPlayableTrack[]> {
+  const directions = normalizeDiscoveryDirections(response, context);
+  const avoidKeys = new Set(
+    buildAvoidTracks(context)
+      .map((track) => normalizeTrackKey(track.title ?? track.name, track.artist))
+      .filter((key) => key !== "::"),
+  );
+  const seen = new Set<string>();
+  const discoveries: DiscoveredPlayableTrack[] = [];
+
+  for (const direction of directions) {
+    if (discoveries.length >= maxTracks) break;
+    try {
+      const track = await musicSources.resolveTrack(
+        direction.query,
+        undefined,
+        musicSources.NETEASE_LEGACY_SOURCE_ID,
+      );
+      if (!track) continue;
+      const key = normalizeTrackKey(track.name, track.artist);
+      if (key === "::" || seen.has(key) || avoidKeys.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      discoveries.push({
+        track,
+        ...direction,
+      });
+    } catch (error) {
+      console.warn(`[radio] discovery direction failed "${direction.query}": ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (discoveries.length > 0) {
+    await db.addDiscoveryCandidates(discoveries.map((discovery) => ({
+      query: discovery.query,
+      direction: discovery.direction,
+      title: discovery.track.name,
+      artist: discovery.track.artist,
+      reason: discovery.reason,
+      risk: discovery.risk,
+      source: discovery.track.source,
+      sourceTrackId: discovery.track.sourceTrackId,
+      urlSource: discovery.track.urlSource,
+      health: "ready",
+    })));
+  }
+
+  return discoveries;
+}
+
+function buildStableSeedRequests(context: MusicContext, limit: number): RequestedTrack[] {
+  const fromCandidates = context.recommendationCandidates.slice(0, limit).map((candidate) => ({
+    id: candidate.id,
+    title: candidate.title,
+    artist: candidate.artist,
+  }));
+  return fromCandidates.length > 0
+    ? fromCandidates
+    : STARTUP_FALLBACK_TRACKS.slice(0, limit);
+}
+
+function mergeExplorationTracks(
+  stableTracks: PlayableTrack[],
+  discoveries: DiscoveredPlayableTrack[],
+  options?: {
+    maxExploration?: number;
+    firstInsertAfter?: number;
+  },
+): PlayableTrack[] {
+  if (discoveries.length === 0) {
+    return stableTracks;
+  }
+  if (stableTracks.length === 0) {
+    return dedupePlayableTracks(discoveries.map((discovery) => discovery.track));
+  }
+
+  const maxExploration = Math.min(
+    discoveries.length,
+    Math.max(0, options?.maxExploration ?? Math.max(1, Math.floor(stableTracks.length / 4))),
+  );
+  if (maxExploration === 0) {
+    return stableTracks;
+  }
+
+  const firstInsertAfter = Math.max(1, options?.firstInsertAfter ?? 3);
+  const merged: PlayableTrack[] = [];
+  let inserted = 0;
+  stableTracks.forEach((track, index) => {
+    merged.push(track);
+    const stableCount = index + 1;
+    const shouldInsert =
+      inserted < maxExploration
+      && stableCount >= firstInsertAfter
+      && (stableCount - firstInsertAfter) % 4 === 0;
+    if (shouldInsert) {
+      merged.push(discoveries[inserted].track);
+      inserted += 1;
+    }
+  });
+
+  if (inserted < maxExploration && stableTracks.length <= firstInsertAfter) {
+    merged.push(...discoveries.slice(inserted, maxExploration).map((discovery) => discovery.track));
+  }
+
+  return dedupePlayableTracks(merged);
+}
+
+async function addControlledDiscoveriesToProgram(
+  stableTracks: PlayableTrack[],
+  context: MusicContext,
+): Promise<PlayableTrack[]> {
+  if (stableTracks.length < 4 || context.recommendationCandidates.length === 0) {
+    return stableTracks;
+  }
+
+  const scoutResponse = await runDiscoveryScout(context, "program");
+  const discoveries = await resolveDiscoveryDirections(scoutResponse, context, 3);
+  const baseExploration = Math.max(1, Math.floor(stableTracks.length / 4));
+  const maxExploration = Math.min(
+    3,
+    baseExploration + (hasRecentPositiveFeedback(context) ? 1 : 0),
+  );
+  return mergeExplorationTracks(stableTracks, discoveries, {
+    maxExploration,
+    firstInsertAfter: 3,
+  });
 }
 
 async function resolvePlayableTracks(
@@ -361,7 +713,7 @@ export async function ensureDataDirs(): Promise<void> {
 }
 
 function buildStartupProgramPrompt(context: MusicContext): string {
-  const { timeOfDay, weatherContext, recentHistory, mergedPlaylistContext, candidateContext, state } = context;
+  const { timeOfDay, weatherContext, recentHistory, feedbackContext, mergedPlaylistContext, candidateContext, state } = context;
   const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
   const useEnglish = language === "en";
   const hostStyleGuide = radioStyle.buildHostStyleGuide(timeOfDay, weatherContext, language);
@@ -373,17 +725,19 @@ ${weatherContext ? `Current weather: ${weatherContext}` : "Current weather: unkn
 ${hostStyleGuide}
 Recent chat and playback clues:
 ${recentHistory || "none"}
+Explicit listener feedback:
+${feedbackContext || "none"}
 
 User playlists / snapshots / taste profile:
 ${mergedPlaylistContext || "No playlist context yet"}
-${candidateContext ? `\n\nLocal candidate library:\n${candidateContext}` : ""}
+${candidateContext ? `\n\nOnline candidate pool:\n${candidateContext}` : ""}
 
 Please program a 20-40 minute radio session for “the station right after the service starts”. Requirements:
 - Organize the mood using time, weather, and the listener's playlist taste
 - The opening should sound like a real DJ opening the mic: warm, companionable, never like a system notice
 - The intro should happen only once, like the real start of a show, not like every song is a fresh opening
 - Order the songs naturally so each handoff feels deliberate
-- Prefer the local candidate library. For numeric Netease candidates, return id/title/artist exactly; for local_library file candidates, return title/artist exactly and omit id
+- Prefer the online candidate pool. For numeric Netease candidates, return id/title/artist exactly
 - Output 6 to 10 songs, enough for roughly 20-40 minutes
 - Include a speechPlan: intro before the first song, then only short talk or bumper spots every 2-3 songs
 
@@ -392,8 +746,8 @@ Return JSON only. Required fields:
 - mood: the overall mood of this session
 - plannedMinutes: target duration, an integer from 20 to 40
 - say: the opening line for the UI, natural English, 20-65 words
-- ttsText: same meaning as say, but you may add light inline performance tags
-- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates, omitted for local_library file candidates), mood (optional), reason (optional)
+- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
 - reason: why this set is arranged this way, natural English, 14-30 words
 `;
@@ -405,17 +759,19 @@ ${weatherContext ? `当前天气：${weatherContext}` : "当前天气：未知"}
 ${hostStyleGuide}
 最近聊天和播放线索：
 ${recentHistory || "无"}
+用户显性音乐反馈：
+${feedbackContext || "无"}
 
 用户歌单 / 快照 / 画像：
 ${mergedPlaylistContext || "暂无歌单信息"}
-${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
+${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 
 请为“服务刚启动时的电台节目”编排一段 20 到 40 分钟的 Radio Session，要求：
 - 结合时间、天气、用户歌单口味来组织节目气氛
 - 节目开场要像真实 DJ 开麦，温柔、有陪伴感，不要太像公告
 - 开场对白只能像节目真正开始时说一次，不要像每首歌前都在重新开场
 - 歌单按顺序编排，前后过渡自然
-- 优先使用本地候选曲库；命中网易云数字 id 候选时原样返回 id、title、artist，命中 local_library 本地文件候选时只原样返回 title、artist，不要返回本地路径
+- 优先使用在线候选池；命中网易云数字 id 候选时原样返回 id、title、artist
 - 输出 6 到 10 首歌，整体约 20 到 40 分钟
 - 增加 speechPlan：第一首前是 intro，之后每 2 到 3 首歌才安排一次 short_say 或 bumper
 
@@ -424,8 +780,8 @@ ${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
 - mood: 这段节目的整体氛围
 - plannedMinutes: 目标时长，20 到 40 之间的整数
 - say: 开场对白，给前端显示，中文 40-120 字
-- ttsText: 给 TTS 的版本，语义与 say 一致，可加入适度行内标签
-- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填，命中 local_library 本地文件候选时省略）、mood（选填）、reason（选填）
+- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
 - reason: 说明这档节目为什么这么编排，中文 30-80 字
 `;
@@ -435,7 +791,7 @@ function buildChatSwitchProgramPrompt(
   userText: string,
   context: MusicContext,
 ): string {
-  const { timeOfDay, weatherContext, recentHistory, mergedPlaylistContext, candidateContext, state } = context;
+  const { timeOfDay, weatherContext, recentHistory, feedbackContext, mergedPlaylistContext, candidateContext, state } = context;
   const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
   const useEnglish = language === "en";
   const currentTrack = state.currentTrack
@@ -452,24 +808,26 @@ ${hostStyleGuide}
 Current track: ${currentTrack}
 Recent chat and playback clues:
 ${recentHistory || "none"}
+Explicit listener feedback:
+${feedbackContext || "none"}
 
 User playlists / snapshots / taste profile:
 ${mergedPlaylistContext || "No playlist context yet"}
-${candidateContext ? `\n\nLocal candidate library:\n${candidateContext}` : ""}
+${candidateContext ? `\n\nOnline candidate pool:\n${candidateContext}` : ""}
 
 The listener wants to reshape the current set through chat. Build a tighter mini-program around that request. Requirements:
 - Start by replying like a DJ to the listener and briefly explain why this new set fits
 - The reply must continue the current show. Do not reintroduce yourself and do not sound like a rebooted program
 - Prefer adjusting within the listener's taste instead of drifting away from their library
-- Prefer the local candidate library. For numeric Netease candidates, return id/title/artist exactly; for local_library file candidates, return title/artist exactly and omit id
+- Prefer the online candidate pool. For numeric Netease candidates, return id/title/artist exactly
 - Output 3 to 5 songs
 - The first song must feel ready to cut to immediately
 
 Return JSON only. Required fields:
 - title: optional show title
 - say: the DJ's reply to the listener, natural English, 16-44 words
-- ttsText: same meaning as say, but you may add light inline performance tags
-- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates, omitted for local_library file candidates), mood (optional), reason (optional)
+- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+- lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - reason: why this switch works, natural English, 12-28 words
 `;
   }
@@ -482,24 +840,26 @@ ${hostStyleGuide}
 当前歌曲：${currentTrack}
 最近聊天和播放线索：
 ${recentHistory || "无"}
+用户显性音乐反馈：
+${feedbackContext || "无"}
 
 用户歌单 / 快照 / 画像：
 ${mergedPlaylistContext || "暂无歌单信息"}
-${candidateContext ? `\n\n本地候选曲库：\n${candidateContext}` : ""}
+${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 
 用户想通过聊天调整现在的节目。请重新给出一个更贴合他这句需求的小节目单，要求：
 - 开头先像 DJ 回应用户，说明为什么换这组歌
 - 回应必须承接当前节目，不要重新自我介绍，不要像节目重新开播
 - 优先用用户歌单口味做调整，不要完全脱离他的库
-- 优先使用本地候选曲库；命中网易云数字 id 候选时原样返回 id、title、artist，命中 local_library 本地文件候选时只原样返回 title、artist，不要返回本地路径
+- 优先使用在线候选池；命中网易云数字 id 候选时原样返回 id、title、artist
 - 输出 3 到 5 首歌
 - 歌单第一首应当适合立刻切过去播放
 
 只输出 JSON，对象字段必须是：
 - title: 节目标题，可选
 - say: DJ 对用户的回应，中文 35-100 字
-- ttsText: 给 TTS 的版本，语义与 say 一致，可加入适度行内标签
-- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填，命中 local_library 本地文件候选时省略）、mood（选填）、reason（选填）
+- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+- lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - reason: 说明这次为什么这么换歌，中文 30-80 字
 `;
 }
@@ -634,7 +994,7 @@ export async function runStartupRadioProgram(
     if (!background) {
       await db.setStatus("speaking");
     }
-    const [ttsAudioPath, playableTracks] = await Promise.all([
+    const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
         response.ttsText?.trim() || response.say,
         context.state.djProfile,
@@ -649,6 +1009,7 @@ export async function runStartupRadioProgram(
         { minTracks: STARTUP_FALLBACK_TRACKS.length, maxTracks: 10 },
       ),
     ]);
+    const playableTracks = await addControlledDiscoveriesToProgram(stableTracks, context);
 
     await applyProgramQueue("startup", response, playableTracks, context);
     await db.setStatus("playing");
@@ -684,7 +1045,7 @@ export async function runChatSwitchProgram(
     const response = await claude.callJsonLLM<StationProgramResponse>(prompt, 30_000);
 
     await db.setStatus("speaking");
-    const [ttsAudioPath, playableTracks] = await Promise.all([
+    const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
         response.ttsText?.trim() || response.say,
         context.state.djProfile,
@@ -699,6 +1060,7 @@ export async function runChatSwitchProgram(
         { minTracks: 3, maxTracks: 5 },
       ),
     ]);
+    const playableTracks = await addControlledDiscoveriesToProgram(stableTracks, context);
 
     const currentTrackPreserved = Boolean(options?.preserveCurrentTrack && context.state.currentTrack);
     await applyProgramQueue("chat_switch", response, playableTracks, context, userText, {
@@ -734,12 +1096,79 @@ export async function runPipeline(
       candidateLimit: mode === "random_discover" ? 20 : 12,
     });
 
+    if (mode === "random_discover") {
+      const scoutResponse = await runDiscoveryScout(context, "random_discover");
+      await db.setStatus("speaking");
+
+      const say = scoutResponse.say?.trim()
+        || "我先从你的稳定口味旁边试一个新方向，能播的我再接进来。";
+      const reason = scoutResponse.reason?.trim()
+        || "Discovery Scout selected nearby directions and the backend verified playable audio.";
+      const [ttsAudioPath, stableTracks, discoveries] = await Promise.all([
+        speakDjText(
+          scoutResponse.ttsText?.trim() || say,
+          context.state.djProfile,
+          "music_recommendation",
+          reason,
+        ),
+        resolvePlayableTracksFromRequests(
+          buildStableSeedRequests(context, 1),
+          FALLBACK_TRACKS.random_discover,
+          context.localCandidateMap,
+          buildAvoidTracks(context),
+          { minTracks: 1, maxTracks: 1 },
+        ),
+        resolveDiscoveryDirections(
+          scoutResponse,
+          context,
+          hasRecentPositiveFeedback(context) ? 2 : 1,
+        ),
+      ]);
+      const playableTracks = mergeExplorationTracks(stableTracks, discoveries, {
+        maxExploration: hasRecentPositiveFeedback(context) ? 2 : 1,
+        firstInsertAfter: 1,
+      });
+
+      if (playableTracks.length > 0) {
+        const firstTrack = playableTracks[0];
+        const queue = playableTracks.map(toStoredTrack);
+        const generatedAt = Date.now();
+        await db.setRadioQueue(queue, {
+          currentIndex: 0,
+          program: radioSession.createRadioProgramMetadata({
+            source: "manual",
+            summary: reason,
+            generatedAt,
+            weatherContext: context.weatherContext,
+            tracks: queue,
+          }),
+        });
+        await db.recordPlay(firstTrack.name, firstTrack.artist);
+      }
+
+      await db.addChatMessage({
+        role: "dj",
+        text: say,
+      });
+
+      await db.setStatus("playing");
+
+      return {
+        status: "success",
+        djMessage: say,
+        tracks: playableTracks,
+        reason,
+        ttsAudioPath,
+      };
+    }
+
     let claudeResponse: claude.LLMResponse;
     try {
       const prompt = claude.buildContextPrompt({
         mode,
         timeOfDay: context.timeOfDay,
         recentHistory: context.recentHistory,
+        userFeedbackContext: context.feedbackContext,
         playlistContext: context.mergedPlaylistContext,
         candidateContext: context.candidateContext,
         weatherContext: context.weatherContext,

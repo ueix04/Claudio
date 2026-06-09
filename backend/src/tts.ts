@@ -46,12 +46,12 @@ const TTS_PRESET_CONFIG: Record<TtsPresetName, { voice: string; character: strin
   冰糖: {
     voice: "冰糖",
     character:
-      "内置音色“冰糖”。她不是温吞的抒情女声，而是明亮、轻盈、灵动、带一点少女感与真实呼吸感的陪伴型主播。她可以活泼、俏皮、带笑意，但不能幼稚做作，也不能一直悬浮发甜。真正进入深夜、雨夜、钢琴或安静氛围时，她会主动把亮度收住，保留灵气，但不抢戏。",
+      "内置音色“冰糖”。她不是温吞的抒情女声，而是明亮、轻盈、灵动、带一点少女感与真实呼吸感的陪伴型主播。她可以活泼、俏皮、带笑意，但不能幼稚做作，也不能一直悬浮发甜。表达要接近日常聊天速度，不要故意拖长、压低或装深沉；安静氛围里只需要收住亮度，保留灵气，但不抢戏。",
   },
   Dean: {
     voice: "Dean",
     character:
-      "Built-in voice preset \"Dean\". His baseline tone is relaxed, close-mic, slightly lower, with a touch of warmth and magnetism, like a real late-night radio host speaking directly to one listener. He should never sound preachy or artificially deep. Keep the delivery natural, restrained, and breathable. When the mood drops, he can settle lower and darker; when the mood opens up, he should still stay calm, warm, and effortless.",
+      "Built-in voice preset \"Dean\". His baseline tone is relaxed, close-mic, warm, and conversational, like a real host speaking directly to one listener. Keep a normal speaking pace and natural word flow. He should never sound preachy, artificially deep, theatrical, or drawn out. When the mood is quiet, stay calm and simple instead of lowering the voice for effect.",
   },
 };
 
@@ -159,7 +159,7 @@ function buildSceneInstruction(
     switch (scene) {
       case "program_intro":
         return [
-          "The show is just opening. Use the first lines to bring the listener into the mood of this moment.",
+          "The show is just opening. Bring the listener in with plain, natural spoken rhythm.",
           "Sound like a real DJ opening the mic, not a machine announcement and not a formal news anchor.",
           atmosphereLine,
         ].filter(Boolean).join("\n");
@@ -192,7 +192,7 @@ function buildSceneInstruction(
   switch (scene) {
     case "program_intro":
       return [
-        "刚刚开麦进入节目，正在用第一段声音把听众带进今晚/此刻的氛围。",
+        "刚刚开麦进入节目，用自然口语节奏把听众带入此刻。",
         "要像真人 DJ 自然开场，而不是机器播报，也不要像新闻主持人念稿。",
         atmosphereLine,
       ].filter(Boolean).join("\n");
@@ -231,15 +231,15 @@ function buildDirectionInstruction(
 
   if (useEnglish) {
     const baseLength = textLength && textLength > 80
-      ? "If the copy is longer, shape it with natural breathing and phrasing instead of pushing through in one pass."
+      ? "If the copy is longer, follow punctuation for light phrasing, but keep a normal conversational pace."
       : "If the copy is short, make it feel spontaneous and spoken, not stretched for effect.";
-    const presetDirection = "Place the voice slightly farther back, stay relaxed, and avoid overly bright tail endings.";
+    const presetDirection = "Keep the voice relaxed and close, but do not lower it, dramatize it, or drag out endings.";
 
     switch (scene) {
       case "program_intro":
         return [
-          "Use the first two lines to establish the atmosphere before you let the emotion reach the listener.",
-          "Keep the pace natural with light pauses. Do not rush and do not sound rehearsed.",
+          "Open at an everyday radio pace, as if you are speaking to one person in real time.",
+          "Use only small natural pauses. Do not slow down to sound profound or rehearsed.",
           presetDirection,
           baseLength,
         ].join("\n");
@@ -274,18 +274,16 @@ function buildDirectionInstruction(
   }
 
   const baseLength = textLength && textLength > 80
-    ? "文本偏长时要有自然停连和呼吸，不要一口气念完。"
+    ? "文本偏长时按标点自然停连，但保持正常聊天语速。"
     : "文本偏短时像真人即兴说出来，不要故意拖长。";
 
-  const presetDirection = preset === "Dean"
-    ? "声音位置可以略靠后一点，语气更松弛，尾音少收得太亮。"
-    : "允许有一点明亮笑意和轻巧起伏，但不要一直飘着发甜。";
+  const presetDirection = "声音清楚贴近，语气放松自然，不要故意压低、拖长尾音或装深沉。";
 
   switch (scene) {
     case "program_intro":
       return [
-        "开场的前两句要把氛围先立住，再把情绪慢慢送到听众面前。",
-        "语速自然，允许轻微停顿，不要过快，不要像背稿。",
+        "开场像正常 DJ 开麦，不要拉成长段抒情。",
+        "语速按正常聊天来，允许轻微停顿，但不要为了氛围刻意变慢。",
         presetDirection,
         baseLength,
       ].join("\n");
@@ -305,8 +303,8 @@ function buildDirectionInstruction(
       ].join("\n");
     case "chat_reply":
       return [
-        "像真人电台 DJ 在听完对方一句话后立刻回应，句子口语化，停顿自然。",
-        "可以带轻微呼吸感、轻笑感或思考感，但不要腔调太满。",
+        "像真人电台 DJ 在听完对方一句话后立刻回应，句子口语化，语序自然。",
+        "可以带轻微呼吸感、轻笑感或思考感，但不要腔调太满，也不要拖慢。",
         presetDirection,
         baseLength,
       ].join("\n");

@@ -170,6 +170,80 @@ describe("db.ts", () => {
     expect(summarizePlaylists()).toBe("");
   });
 
+  it("stores explicit user music feedback", async () => {
+    const { addUserFeedback, getUserFeedback, summarizeUserFeedback, getState } = await loadModule();
+
+    const record = await addUserFeedback({
+      type: "less_like_this",
+      trackId: "track-1",
+      title: "Too Much",
+      artist: "Loud Artist",
+      queueIndex: 1,
+    });
+
+    const records = await getUserFeedback();
+    const state = await getState();
+
+    expect(record.id).toMatch(/^feedback_/);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      type: "less_like_this",
+      title: "Too Much",
+      artist: "Loud Artist",
+      queueIndex: 1,
+    });
+    expect(state.userFeedback[0].id).toBe(record.id);
+    expect(summarizeUserFeedback()).toContain("少放这种");
+    expect(summarizeUserFeedback()).toContain("Too Much - Loud Artist");
+
+    await addUserFeedback({
+      type: "favorite_track",
+      trackId: "track-2",
+      title: "Keeper",
+      artist: "Warm Artist",
+      queueIndex: 2,
+    });
+
+    expect(summarizeUserFeedback()).toContain("收藏了这首");
+    expect(summarizeUserFeedback()).toContain("Keeper - Warm Artist");
+  });
+
+  it("stores verified discovery candidates", async () => {
+    const {
+      addDiscoveryCandidates,
+      getDiscoveryCandidates,
+      summarizeDiscoveryCandidates,
+      getState,
+    } = await loadModule();
+
+    const records = await addDiscoveryCandidates([{
+      query: "dream pop adjacent",
+      direction: "dream pop adjacent lane",
+      title: "New Song",
+      artist: "New Artist",
+      reason: "Adjacent to the current taste.",
+      risk: "adjacent",
+      source: "netease_legacy",
+      sourceTrackId: "123",
+      urlSource: "unblock_netease",
+      health: "ready",
+    }]);
+
+    const candidates = await getDiscoveryCandidates();
+    const state = await getState();
+
+    expect(records[0].id).toMatch(/^discovery_/);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      title: "New Song",
+      artist: "New Artist",
+      risk: "adjacent",
+      health: "ready",
+    });
+    expect(state.discoveryCandidates[0].id).toBe(records[0].id);
+    expect(summarizeDiscoveryCandidates()).toContain("New Song - New Artist");
+  });
+
   it("persists netease snapshot and summarizes it", async () => {
     const { setNeteaseSnapshot, getNeteaseSnapshot, summarizeNeteaseSnapshot } = await loadModule();
     await setNeteaseSnapshot({

@@ -50,8 +50,55 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 const PREFETCH_LOOKAHEAD_COUNT = 3;
+const CURRENT_URL_REFRESH_THRESHOLD_MS = 2 * 60 * 1000;
+const UPCOMING_URL_REFRESH_THRESHOLD_MS = 3 * 60 * 1000;
+const PLAYBACK_LEASE_MAINTENANCE_INTERVAL_MS = 45 * 1000;
 const preparedQueueTransitions = new Map<string, PreparedQueueTransition>();
 const preparedQueueTransitionInFlight = new Map<string, Promise<PreparedQueueTransition | null>>();
+let playbackLeaseMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
+
+type PlaybackLeaseStatus = "ready" | "expiring" | "expired" | "unknown" | "missing" | "failed";
+type PlaybackHealth = NonNullable<db.Track["playbackHealth"]>;
+
+interface PlaybackDiagnosticTrack {
+  queueIndex: number;
+  id: string;
+  name: string;
+  artist: string;
+  source?: string;
+  sourceTrackId?: string;
+  urlSource?: string;
+  urlExpiresAt?: number;
+  urlRefreshedAt?: number;
+  urlTtlMs: number | null;
+  leaseStatus: PlaybackLeaseStatus;
+  health: PlaybackHealth;
+  shouldRefresh: boolean;
+  lastResolveError?: db.Track["lastResolveError"];
+  lastPlaybackIssue?: db.Track["lastPlaybackIssue"];
+}
+
+interface PlaybackDiagnostics {
+  generatedAt: number;
+  queueLength: number;
+  currentQueueIndex: number;
+  thresholds: {
+    currentRefreshMs: number;
+    upcomingRefreshMs: number;
+  };
+  current: PlaybackDiagnosticTrack | null;
+  upcoming: PlaybackDiagnosticTrack[];
+  fallbacks: musicSources.MusicSourceRuntimeStatus["playableUrlFallbacks"];
+  sources: musicSources.MusicSourceRuntimeStatus["sources"];
+  recentIssue?: db.Track["lastResolveError"] | db.Track["lastPlaybackIssue"];
+}
+
+const CLIENT_PLAYBACK_ISSUE_CODES = new Set([
+  "client_silent_audio",
+  "audio_error",
+  "audio_waiting",
+  "audio_stalled",
+]);
 
 app.use(cors());
 app.use(express.json());
@@ -105,6 +152,9 @@ function toClientStoredTrack(track: db.Track) {
     sourceTrackId: track.sourceTrackId,
     urlSource: track.urlSource,
     urlExpiresAt: track.urlExpiresAt,
+    urlRefreshedAt: track.urlRefreshedAt,
+    playbackHealth: track.playbackHealth,
+    lastPlaybackIssue: track.lastPlaybackIssue,
     lastResolveError: track.lastResolveError,
   };
 }
@@ -315,8 +365,18 @@ app.get("/api/netease/snapshot", async (_req, res) => {
 });
 
 app.get("/api/taste-profile", async (_req, res) => {
-  const profile = await tasteProfile.getTasteProfile();
-  res.json(profile);
+  const [profile, state] = await Promise.all([
+    tasteProfile.getTasteProfile(),
+    db.getState(),
+  ]);
+  res.json(profile
+    ? {
+        ...profile,
+        runtimeTaste: tasteProfile.buildRuntimeTasteProfile(
+          Array.isArray(state.userFeedback) ? state.userFeedback : [],
+        ),
+      }
+    : null);
 });
 
 app.get("/api/music-sources", async (_req, res) => {
@@ -535,8 +595,114 @@ app.get("/api/favorites", async (_req, res) => {
 
 app.post("/api/favorites/:trackId", async (req, res) => {
   const { trackId } = req.params;
+  const state = await db.getState();
   const result = await db.toggleFavorite(trackId);
+  if (result.favorited) {
+    const title = getBoundedString(req.body?.title, 160);
+    const artist = getBoundedString(req.body?.artist, 160);
+    const fallbackTrack = findFeedbackTrack(state, trackId, title, artist);
+    if (fallbackTrack) {
+      await addTrackFeedbackFromState(state, fallbackTrack, "favorite_track", "implicit: favorite");
+    }
+  }
   res.json(result);
+});
+
+function parseUserFeedbackType(value: unknown): db.UserFeedbackType | null {
+  return value === "more_like_this"
+    || value === "less_like_this"
+    || value === "dislike_track"
+    || value === "favorite_track"
+    || value === "complete_track"
+    || value === "skip_track"
+    || value === "replay_dj"
+    || value === "ask_about_track"
+    ? value
+    : null;
+}
+
+function findFeedbackTrack(
+  state: db.AppState,
+  trackId?: string,
+  fallbackTitle?: string,
+  fallbackArtist?: string,
+): db.Track | null {
+  const normalizedTrackId = trackId?.trim();
+  const matchingTrack = normalizedTrackId
+    ? [
+        state.currentTrack,
+        ...state.radioQueue,
+      ].find((track) => track?.id === normalizedTrackId || track?.sourceTrackId === normalizedTrackId)
+    : state.currentTrack;
+  if (matchingTrack) return matchingTrack;
+  if (fallbackTitle && fallbackArtist) {
+    return {
+      id: normalizedTrackId || `${fallbackTitle}::${fallbackArtist}`,
+      name: fallbackTitle,
+      artist: fallbackArtist,
+      url: "",
+    };
+  }
+  return null;
+}
+
+async function addTrackFeedbackFromState(
+  state: db.AppState,
+  track: db.Track,
+  type: db.UserFeedbackType,
+  note?: string,
+): Promise<void> {
+  await db.addUserFeedback({
+    type,
+    trackId: track.id,
+    title: track.name,
+    artist: track.artist,
+    source: track.source,
+    sourceTrackId: track.sourceTrackId,
+    urlSource: track.urlSource,
+    programSessionId: state.currentProgram?.sessionId,
+    queueIndex: state.currentQueueIndex,
+    note,
+  });
+}
+
+app.get("/api/feedback", async (req, res) => {
+  const parsedLimit = parseQueryNumber(req.query.limit);
+  const limit = parsedLimit && parsedLimit > 0
+    ? Math.min(Math.round(parsedLimit), 100)
+    : 50;
+  res.json(await db.getUserFeedback(limit));
+});
+
+app.post("/api/feedback", async (req, res) => {
+  const feedbackType = parseUserFeedbackType(req.body?.type);
+  if (!feedbackType) {
+    res.status(400).json({ error: "Invalid feedback type" });
+    return;
+  }
+
+  const state = await db.getState();
+  const currentTrack = state.currentTrack;
+  const title = getBoundedString(req.body?.title, 160) ?? currentTrack?.name;
+  const artist = getBoundedString(req.body?.artist, 160) ?? currentTrack?.artist;
+  if (!title || !artist) {
+    res.status(400).json({ error: "No track available for feedback" });
+    return;
+  }
+
+  const record = await db.addUserFeedback({
+    type: feedbackType,
+    trackId: getBoundedString(req.body?.trackId, 160) ?? currentTrack?.id,
+    title,
+    artist,
+    source: getBoundedString(req.body?.source, 80) ?? currentTrack?.source,
+    sourceTrackId: getBoundedString(req.body?.sourceTrackId, 160) ?? currentTrack?.sourceTrackId,
+    urlSource: getBoundedString(req.body?.urlSource, 80) ?? currentTrack?.urlSource,
+    programSessionId: state.currentProgram?.sessionId,
+    queueIndex: state.currentQueueIndex,
+    note: getBoundedString(req.body?.note, 240),
+  });
+  res.status(201).json(record);
 });
 
 app.get("/api/plan/today", async (_req, res) => {
@@ -566,6 +732,23 @@ app.get("/api/radio/listen-checks", async (req, res) => {
 app.get("/api/radio/listen-acceptance", async (_req, res) => {
   const records = await db.getListenCheckRecords(20);
   res.json(summarizeListenAcceptance(records));
+});
+
+app.get("/api/radio/playback-diagnostics", async (_req, res) => {
+  try {
+    const state = await db.getState();
+    res.json(await buildPlaybackDiagnostics(state));
+  } catch (error) {
+    res.status(500).json({ error: getErrorMessage(error) });
+  }
+});
+
+app.get("/api/radio/discovery-candidates", async (req, res) => {
+  const parsedLimit = parseQueryNumber(req.query.limit);
+  const limit = parsedLimit && parsedLimit > 0
+    ? Math.min(Math.round(parsedLimit), 100)
+    : 30;
+  res.json(await db.getDiscoveryCandidates(limit));
 });
 
 function buildListenProgramSnapshot(state: db.AppState): db.ListenCheckRecord["programSnapshot"] {
@@ -626,6 +809,187 @@ function buildListenProgramContinuity(
     completedSessionId,
     startedGeneratedAt,
     completedGeneratedAt,
+  };
+}
+
+function normalizeEvidenceTrackKey(title?: string, artist?: string): string {
+  return `${(title ?? "").trim().toLowerCase()}::${(artist ?? "").trim().toLowerCase()}`;
+}
+
+function normalizeClientPlaybackIssueCode(value: unknown): string {
+  if (typeof value !== "string") return "client_playback_issue";
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9_:-]/g, "_").slice(0, 48);
+  return CLIENT_PLAYBACK_ISSUE_CODES.has(normalized) ? normalized : "client_playback_issue";
+}
+
+async function recordClientPlaybackIssue(payload: unknown): Promise<db.AppState> {
+  const raw = payload && typeof payload === "object"
+    ? payload as Record<string, unknown>
+    : {};
+  const data = raw.data && typeof raw.data === "object"
+    ? raw.data as Record<string, unknown>
+    : raw;
+  const state = await db.getState();
+  const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
+  const currentIndex = clampQueueIndex(queue.length, state.currentQueueIndex);
+  const currentTrack = state.currentTrack ?? queue[currentIndex] ?? null;
+
+  if (!currentTrack) {
+    return state;
+  }
+
+  const trackId = getBoundedString(data.trackId, 160);
+  if (
+    trackId
+    && currentTrack.id !== trackId
+    && currentTrack.url !== trackId
+  ) {
+    return state;
+  }
+
+  const code = normalizeClientPlaybackIssueCode(data.code);
+  const fallbackMessage = code === "client_silent_audio"
+    ? "Browser detected progressing playback with very low audio signal"
+    : "Browser reported a playback issue";
+  const message = getBoundedString(data.message, 180) ?? fallbackMessage;
+  const issue = {
+    code,
+    message,
+    at: Date.now(),
+  };
+  const updatedCurrentTrack: db.Track = {
+    ...currentTrack,
+    playbackHealth: "failed",
+    lastPlaybackIssue: issue,
+  };
+  const updatedQueue = queue.map((track, index) => {
+    const isCurrentQueueTrack = index === currentIndex;
+    const matchesCurrent = track.id === currentTrack.id || track.url === currentTrack.url;
+    const matchesPayload = Boolean(trackId && (track.id === trackId || track.url === trackId));
+    return isCurrentQueueTrack || matchesCurrent || matchesPayload
+      ? {
+          ...track,
+          playbackHealth: "failed" as const,
+          lastPlaybackIssue: issue,
+        }
+      : track;
+  });
+
+  return updatePlaybackState({
+    radioQueue: updatedQueue,
+    currentTrack: updatedCurrentTrack,
+    lastInteraction: Date.now(),
+  }, state);
+}
+
+function buildListenEvidence(
+  state: db.AppState,
+  startedAt: number,
+  completedAt: number,
+  playbackSegments?: db.ListenCheckRecord["playbackSegments"],
+  clientAudioEvidence?: {
+    signalSampleCount: number;
+    lowSignalSampleCount: number;
+    silentMs: number;
+    maxSilentRunMs: number;
+  },
+): db.ListenCheckEvidence {
+  const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
+  const discoveryCandidates = Array.isArray(state.discoveryCandidates) ? state.discoveryCandidates : [];
+  const discoveryByTrackKey = new Map(
+    discoveryCandidates.map((candidate) => [
+      normalizeEvidenceTrackKey(candidate.title, candidate.artist),
+      candidate,
+    ]),
+  );
+  const discoveryTracks = queue
+    .flatMap((track) => {
+      const candidate = discoveryByTrackKey.get(normalizeEvidenceTrackKey(track.name, track.artist));
+      return candidate
+        ? [{
+            title: track.name,
+            artist: track.artist,
+            risk: candidate.risk,
+          }]
+        : [];
+    })
+    .slice(0, 10);
+  const feedbackCount = Array.isArray(state.userFeedback)
+    ? state.userFeedback.filter((feedback) =>
+        feedback.createdAt >= startedAt && feedback.createdAt <= completedAt
+      ).length
+    : 0;
+  const djLineCount = Array.isArray(state.chatHistory)
+    ? state.chatHistory.filter((message) =>
+        message.role === "dj"
+        && message.timestamp >= startedAt
+        && message.timestamp <= completedAt
+      ).length
+    : 0;
+  const recentIssues = queue
+    .flatMap((track) => [track.lastPlaybackIssue, track.lastResolveError]
+      .flatMap((issue) => issue
+        ? [{
+            code: issue.code,
+            message: issue.message,
+            at: issue.at,
+            trackTitle: track.name,
+          }]
+        : []))
+    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+    .slice(0, 6);
+  const fallbackCount = queue.filter((track) =>
+    track.playbackHealth === "fallback"
+    || (Boolean(track.source) && Boolean(track.urlSource) && track.source !== track.urlSource)
+  ).length;
+  const playedTrackCount = playbackSegments?.length ?? 0;
+
+  return {
+    playbackIssueCount: recentIssues.length,
+    fallbackCount,
+    discoveryCount: discoveryTracks.length,
+    feedbackCount,
+    djLineCount,
+    playedTrackCount,
+    clientSignalSampleCount: clientAudioEvidence?.signalSampleCount,
+    clientLowSignalSampleCount: clientAudioEvidence?.lowSignalSampleCount,
+    clientSilentMs: clientAudioEvidence?.silentMs,
+    clientMaxSilentRunMs: clientAudioEvidence?.maxSilentRunMs,
+    discoveryTracks,
+    recentIssues,
+  };
+}
+
+function normalizeListenClientAudioEvidence(value: unknown): {
+  signalSampleCount: number;
+  lowSignalSampleCount: number;
+  silentMs: number;
+  maxSilentRunMs: number;
+} | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const normalizeCount = (input: unknown, max: number) => {
+    const numeric = Math.round(Number(input));
+    if (!Number.isFinite(numeric) || numeric < 0) return 0;
+    return Math.min(numeric, max);
+  };
+  const normalizeMs = (input: unknown) => {
+    const numeric = Math.round(Number(input));
+    if (!Number.isFinite(numeric) || numeric < 0) return 0;
+    return Math.min(numeric, 24 * 60 * 60 * 1000);
+  };
+  const signalSampleCount = normalizeCount(raw.signalSampleCount, 200_000);
+  const lowSignalSampleCount = Math.min(
+    normalizeCount(raw.lowSignalSampleCount, 200_000),
+    signalSampleCount,
+  );
+  const silentMs = normalizeMs(raw.silentMs);
+  const maxSilentRunMs = Math.min(normalizeMs(raw.maxSilentRunMs), silentMs);
+  return {
+    signalSampleCount,
+    lowSignalSampleCount,
+    silentMs,
+    maxSilentRunMs,
   };
 }
 
@@ -704,18 +1068,21 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     speechSlotCount: audit.speechSlotCount,
     issueCount: audit.issues.length,
   };
+  const playbackSegments = normalizeListenPlaybackSegments(body?.playbackSegments, playbackMs);
+  const clientAudioEvidence = normalizeListenClientAudioEvidence(body?.clientAudioEvidence);
 
   const record = await db.addListenCheckRecord({
     startedAt,
     completedAt,
     durationMs,
     playbackMs,
-    playbackSegments: normalizeListenPlaybackSegments(body?.playbackSegments, playbackMs),
+    playbackSegments,
     checks: normalizedChecks,
     note,
     needsFollowUp,
     programAudit,
     programContinuity: buildListenProgramContinuity(state, body?.startedProgram),
+    listenEvidence: buildListenEvidence(state, startedAt, completedAt, playbackSegments, clientAudioEvidence),
     programSnapshot: buildListenProgramSnapshot(state),
   });
   res.status(201).json(record);
@@ -762,11 +1129,11 @@ export function broadcast(data: object) {
   });
 }
 
-function clampQueueIndex(queueLength: number, index: number): number {
+function clampQueueIndex(queueLength: number, index: number | undefined): number {
   if (queueLength <= 0) {
     return 0;
   }
-  return Math.min(Math.max(index, 0), queueLength - 1);
+  return Math.min(Math.max(typeof index === "number" ? index : 0, 0), queueLength - 1);
 }
 
 function getQueueStepContext(state: db.AppState, step = 1) {
@@ -843,6 +1210,133 @@ function invalidatePreparedQueueTransition(): void {
   preparedQueueTransitionInFlight.clear();
 }
 
+function getTrackUrlTtlMs(track: db.Track, now = Date.now()): number | null {
+  if (typeof track.urlExpiresAt !== "number" || !Number.isFinite(track.urlExpiresAt)) {
+    return null;
+  }
+
+  return track.urlExpiresAt - now;
+}
+
+function getTrackUrlLeaseStatus(
+  track: db.Track,
+  thresholdMs: number,
+  now = Date.now(),
+): PlaybackLeaseStatus {
+  if (track.lastResolveError) {
+    return "failed";
+  }
+  if (!track.url) {
+    return "missing";
+  }
+
+  const ttlMs = getTrackUrlTtlMs(track, now);
+  if (ttlMs === null) {
+    return "unknown";
+  }
+  if (ttlMs <= 0) {
+    return "expired";
+  }
+  if (ttlMs <= thresholdMs) {
+    return "expiring";
+  }
+
+  return "ready";
+}
+
+function shouldRefreshTrackUrl(track: db.Track, thresholdMs: number, now = Date.now()): boolean {
+  return getTrackUrlLeaseStatus(track, thresholdMs, now) !== "ready";
+}
+
+function getTrackPlaybackHealth(
+  track: db.Track,
+  thresholdMs: number,
+  now = Date.now(),
+): PlaybackHealth {
+  if (track.lastResolveError || track.lastPlaybackIssue) {
+    return "failed";
+  }
+
+  const leaseStatus = getTrackUrlLeaseStatus(track, thresholdMs, now);
+  if (leaseStatus === "expired" || leaseStatus === "missing") {
+    return "expired";
+  }
+  if (leaseStatus === "expiring" || leaseStatus === "unknown") {
+    return "refreshing";
+  }
+  if (track.source && track.urlSource && track.urlSource !== track.source) {
+    return "fallback";
+  }
+
+  return "ready";
+}
+
+function buildPlaybackDiagnosticTrack(
+  track: db.Track,
+  queueIndex: number,
+  thresholdMs: number,
+  now = Date.now(),
+): PlaybackDiagnosticTrack {
+  const leaseStatus = getTrackUrlLeaseStatus(track, thresholdMs, now);
+  return {
+    queueIndex,
+    id: track.id,
+    name: track.name,
+    artist: track.artist,
+    source: track.source,
+    sourceTrackId: track.sourceTrackId,
+    urlSource: track.urlSource,
+    urlExpiresAt: track.urlExpiresAt,
+    urlRefreshedAt: track.urlRefreshedAt,
+    urlTtlMs: getTrackUrlTtlMs(track, now),
+    leaseStatus,
+    health: getTrackPlaybackHealth(track, thresholdMs, now),
+    shouldRefresh: leaseStatus !== "ready",
+    lastResolveError: track.lastResolveError,
+    lastPlaybackIssue: track.lastPlaybackIssue,
+  };
+}
+
+async function buildPlaybackDiagnostics(state: db.AppState): Promise<PlaybackDiagnostics> {
+  const now = Date.now();
+  const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
+  const currentIndex = clampQueueIndex(queue.length, state.currentQueueIndex);
+  const currentTrack = state.currentTrack ?? queue[currentIndex] ?? null;
+  const current = currentTrack
+    ? buildPlaybackDiagnosticTrack(currentTrack, currentIndex, CURRENT_URL_REFRESH_THRESHOLD_MS, now)
+    : null;
+  const upcoming = queue.length > 1
+    ? Array.from({ length: Math.min(PREFETCH_LOOKAHEAD_COUNT, queue.length - 1) }, (_, index) => {
+        const step = index + 1;
+        const queueIndex = (currentIndex + step + queue.length) % queue.length;
+        const track = queue[queueIndex];
+        return track
+          ? buildPlaybackDiagnosticTrack(track, queueIndex, UPCOMING_URL_REFRESH_THRESHOLD_MS, now)
+          : null;
+      }).filter((track): track is PlaybackDiagnosticTrack => Boolean(track))
+    : [];
+  const runtimeStatus = await musicSources.getMusicSourceRuntimeStatus();
+  const recentIssue = current?.lastPlaybackIssue
+    ?? current?.lastResolveError
+    ?? upcoming.find((track) => track.lastPlaybackIssue || track.lastResolveError)?.lastPlaybackIssue
+    ?? upcoming.find((track) => track.lastResolveError)?.lastResolveError;
+
+  return {
+    generatedAt: now,
+    queueLength: queue.length,
+    currentQueueIndex: currentIndex,
+    thresholds: {
+      currentRefreshMs: CURRENT_URL_REFRESH_THRESHOLD_MS,
+      upcomingRefreshMs: UPCOMING_URL_REFRESH_THRESHOLD_MS,
+    },
+    current,
+    upcoming,
+    fallbacks: runtimeStatus.playableUrlFallbacks,
+    sources: runtimeStatus.sources,
+    recentIssue,
+  };
+}
+
 async function ensurePlayableQueueState(
   options?: {
     refreshCurrentTrack?: boolean;
@@ -864,7 +1358,13 @@ async function ensurePlayableQueueState(
     return state;
   }
 
-  const refreshedTrack = await refreshTrackUrl(state.currentTrack);
+  if (!shouldRefreshTrackUrl(state.currentTrack, CURRENT_URL_REFRESH_THRESHOLD_MS)) {
+    return state;
+  }
+
+  const refreshedTrack = await refreshTrackUrl(state.currentTrack, {
+    forceRefresh: true,
+  });
   if (!hasPlaybackResolutionChanged(refreshedTrack, state.currentTrack)) {
     return state;
   }
@@ -892,6 +1392,9 @@ function hasPlaybackResolutionChanged(next: db.Track, previous: db.Track | undef
     || next.urlSource !== previous.urlSource
     || next.urlExpiresAt !== previous.urlExpiresAt
     || next.urlRefreshedAt !== previous.urlRefreshedAt
+    || next.playbackHealth !== previous.playbackHealth
+    || next.lastPlaybackIssue?.code !== previous.lastPlaybackIssue?.code
+    || next.lastPlaybackIssue?.message !== previous.lastPlaybackIssue?.message
     || next.lastResolveError?.code !== previous.lastResolveError?.code
     || next.lastResolveError?.message !== previous.lastResolveError?.message;
 }
@@ -907,9 +1410,14 @@ async function updatePlaybackState(
   };
 }
 
-async function refreshTrackUrl(track: db.Track): Promise<db.Track> {
+async function refreshTrackUrl(
+  track: db.Track,
+  options?: {
+    forceRefresh?: boolean;
+  },
+): Promise<db.Track> {
   const refreshedTrack = await musicSources.refreshStoredTrackPlayableUrl(track, {
-    forceRefresh: true,
+    forceRefresh: options?.forceRefresh ?? true,
   });
   if (refreshedTrack.lastResolveError) {
     console.warn(
@@ -940,7 +1448,9 @@ async function primeUpcomingQueueTransition(step = 1): Promise<PreparedQueueTran
   }
 
   const pending = (async () => {
-    let nextTrack = await refreshTrackUrl(context.nextTrack);
+    let nextTrack = shouldRefreshTrackUrl(context.nextTrack, UPCOMING_URL_REFRESH_THRESHOLD_MS)
+      ? await refreshTrackUrl(context.nextTrack, { forceRefresh: true })
+      : context.nextTrack;
     if (hasPlaybackResolutionChanged(nextTrack, context.nextTrack)) {
       const updatedQueue = context.queue.map((track, index) =>
         index === context.nextIndex ? nextTrack : track,
@@ -1025,7 +1535,10 @@ async function refreshUpcomingQueueUrls(startStep: number, count: number): Promi
       if (!track) {
         return null;
       }
-      const refreshed = await refreshTrackUrl(track);
+      if (!shouldRefreshTrackUrl(track, UPCOMING_URL_REFRESH_THRESHOLD_MS)) {
+        return null;
+      }
+      const refreshed = await refreshTrackUrl(track, { forceRefresh: true });
       return { index: nextIndex, track: refreshed };
     }),
   );
@@ -1089,6 +1602,44 @@ async function broadcastStateSnapshot(
     refreshCurrentTrack: options?.refreshCurrentTrack ?? false,
   });
   broadcast({ type: "state", data: state });
+}
+
+async function maintainPlaybackQueueLeases(): Promise<void> {
+  if (wss.clients.size === 0) {
+    return;
+  }
+
+  const before = await db.getState();
+  const nextState = await ensurePlayableQueueState({ refreshCurrentTrack: true });
+  const currentChanged = nextState.currentTrack && before.currentTrack
+    ? hasPlaybackResolutionChanged(nextState.currentTrack, before.currentTrack)
+    : nextState.currentTrack !== before.currentTrack;
+  const refreshedIndexes = await refreshUpcomingQueueUrls(1, PREFETCH_LOOKAHEAD_COUNT);
+  if (currentChanged || refreshedIndexes.length > 0) {
+    await broadcastStateSnapshot();
+  }
+}
+
+function startPlaybackLeaseMaintenanceLoop(): void {
+  if (isTestEnv() || playbackLeaseMaintenanceTimer) {
+    return;
+  }
+
+  playbackLeaseMaintenanceTimer = setInterval(() => {
+    void maintainPlaybackQueueLeases().catch((error) => {
+      console.warn(`[radio] playback lease maintenance failed: ${getErrorMessage(error)}`);
+    });
+  }, PLAYBACK_LEASE_MAINTENANCE_INTERVAL_MS);
+  playbackLeaseMaintenanceTimer.unref?.();
+}
+
+function stopPlaybackLeaseMaintenanceLoop(): void {
+  if (!playbackLeaseMaintenanceTimer) {
+    return;
+  }
+
+  clearInterval(playbackLeaseMaintenanceTimer);
+  playbackLeaseMaintenanceTimer = null;
 }
 
 async function broadcastPipelineResult(result: pipeline.PipelineResult) {
@@ -1212,7 +1763,7 @@ No weather context is provided because this is not a weather request. Do not men
 Return JSON only. Required fields:
 - action: "reply_only"
 - say: the line shown in the UI, natural English, 10-28 words, warm and conversational, no inline audio tags
-- ttsText: same meaning as say, with optional light inline stage directions for MiMo TTS
+- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
 
 If the intent is recommendation_reason, explain the current track using only the current track and current program notes. Do not invent private listener data.
 If the intent is emotion_expression, acknowledge the feeling briefly and keep the show moving gently.
@@ -1233,7 +1784,7 @@ ${recentHistory || "无"}
 请输出 JSON，不要 Markdown，不要额外说明。字段必须是：
 - action: "reply_only"
 - say: 前端显示给用户的话，中文 30-80 字，温柔自然，不要包含音频标签
-- ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，可适度加入少量行内音频标签
+- ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 
 如果 intent 是 recommendation_reason，只能基于当前歌曲和当前节目说明推荐原因，不要编造用户隐私或不存在的资料。
 如果 intent 是 emotion_expression，先轻轻承接情绪，再自然把后面的音乐接住。
@@ -1259,7 +1810,7 @@ ${recentHistory || "none"}
 You are Claudio, an AI emotional radio DJ. Return JSON only.
 - action: "answer_weather"
 - say: answer the weather question naturally in English, 12-34 words, based only on the weather context above
-- ttsText: same meaning as say, with optional light inline stage directions
+- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
 
 If the weather context is unavailable, say you cannot get the latest weather right now.
 `;
@@ -1276,7 +1827,7 @@ ${recentHistory || "无"}
 你是 Claudio，AI 情感电台 DJ。请输出 JSON，不要 Markdown，不要额外说明。
 - action: "answer_weather"
 - say: 自然回答天气问题，中文 30-90 字，只能基于上面的天气上下文
-- ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，可加少量行内音频标签
+- ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 
 如果天气上下文不可用，就说明现在拿不到最新天气，不要编造。
 `;
@@ -1359,6 +1910,53 @@ async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
   await broadcastDjChatReply(replyText, ttsAudioPath);
 }
 
+function splitTransitionSentences(text: string): string[] {
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?。！？])\s+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function clampEnglishTransitionText(text: string, fallbackText: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return fallbackText;
+  const sentences = splitTransitionSentences(normalized);
+  const picked: string[] = [];
+  for (const sentence of sentences.length ? sentences : [normalized]) {
+    const next = [...picked, sentence].join(" ");
+    const wordCount = next.split(/\s+/).filter(Boolean).length;
+    if (wordCount <= 20 && next.length <= 94) {
+      picked.push(sentence);
+    }
+    if (picked.length > 0 && (wordCount >= 14 || next.length >= 72)) break;
+  }
+  const joined = picked.join(" ").trim();
+  if (joined) return joined;
+
+  const words = normalized.split(/\s+/).filter(Boolean).slice(0, 18);
+  const clipped = words.join(" ").replace(/[,:;，、；：]+$/u, "").trim();
+  return clipped ? `${clipped}.` : fallbackText;
+}
+
+function clampChineseTransitionText(text: string, fallbackText: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return fallbackText;
+  if (normalized.length <= 58) return normalized;
+  const firstSentence = normalized.split(/[。！？!?]/u).map((part) => part.trim()).filter(Boolean)[0];
+  const candidate = firstSentence && firstSentence.length <= 58
+    ? firstSentence
+    : normalized.slice(0, 56).replace(/[，、；：,.!?！？。]+$/u, "");
+  return candidate ? `${candidate}。` : fallbackText;
+}
+
+function clampTransitionText(text: string, fallbackText: string, useEnglish: boolean): string {
+  return useEnglish
+    ? clampEnglishTransitionText(text, fallbackText)
+    : clampChineseTransitionText(text, fallbackText);
+}
+
 async function buildTransitionReply(
   previousTrack: db.Track | null,
   nextTrack: db.Track,
@@ -1394,13 +1992,13 @@ async function buildTransitionReply(
   const fallbackText = previousTrack
     ? djLanguage.pickDjCopy(
       state.djProfile,
-      `这首 ${nextTrack.name}，我想接在 ${previousTrack.name} 后面放给你，氛围会更顺一点。`,
-      `I want to place ${nextTrack.name} right after ${previousTrack.name}. The mood will land more naturally that way.`,
+      `${previousTrack.name} 收得比较轻，接 ${nextTrack.name} 会让节奏继续稳住。`,
+      `${previousTrack.name} lands softly, so ${nextTrack.name} keeps the rhythm steady.`,
     )
     : djLanguage.pickDjCopy(
       state.djProfile,
-      `接下来这首 ${nextTrack.name}，继续陪你。`,
-      `Up next is ${nextTrack.name}. I'll stay with you through it.`,
+      `接下来 ${nextTrack.name}，先把主线放稳。`,
+      `Up next is ${nextTrack.name}, keeping the main line steady.`,
     );
 
   if (speechSlot.type === "bumper") {
@@ -1446,12 +2044,15 @@ ${recentDjLines ? `A few recent DJ lines you already said:\n${recentDjLines}` : 
 
 Return JSON only. No markdown, no extra explanation.
 - say: one natural radio segue, natural English, 8-24 words, like a real DJ handing one song into the next
-- ttsText: same meaning as say, with optional light inline performance tags
+- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
 
 Extra constraints:
 - Do not reintroduce yourself
 - Do not say things like "good evening", "welcome back", or "I'm Claudio" as if the show restarted
 - Do not repeat wording that is too close to the last few lines
+- Say one concrete judgment about the handoff: tempo, vocal, rhythm, melody, texture, or why the next track belongs here
+- Prefer one track-specific detail over abstract mood words
+- Avoid vague filler such as "atmosphere", "vibe", "room", "light", "temperature", "story", "dream", unless tied to a concrete musical detail
 - If this is a closing slot, give the section a soft landing without sounding final unless the note asks for it
 - The focus is the handoff from the previous track to the next, not a long lyrical monologue
 `
@@ -1469,19 +2070,22 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
 
 请输出 JSON，不要 markdown，不要额外说明：
 - say: 一句自然的电台串场词，中文 18-45 字，要像 DJ 真的在接歌
-- ttsText: 给 TTS 的版本，语义与 say 一致，可加少量行内标签
+- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 
 额外限制：
 - 不要重新自我介绍
 - 不要说“下午好/晚上好/欢迎回来/我是 Claudio”这类重新开场的话
 - 不要重复最近几句已经说过的表述
+- 必须说一个具体判断：节奏、人声、旋律、鼓点、吉他、钢琴、音色，或者为什么下一首适合接在这里
+- 优先说歌曲本身的变化，不要只说“氛围、情绪、房间、灯光、温度、故事、梦”这类抽象词
+- 如果用了抽象词，必须同时给出一个具体音乐理由
 - 如果是收束位置，要让这一小段有落点，但不要像整档节目结束，除非备注要求
 - 重点是把上一首自然接到下一首，不要写成长段抒情文
 `;
 
     const reply = await claude.callJsonLLM<TransitionReplyPayload>(prompt, 25_000);
-    replyText = reply.say?.trim() || fallbackText;
-    replyTtsText = reply.ttsText?.trim() || replyText;
+    replyText = clampTransitionText(reply.say?.trim() || fallbackText, fallbackText, useEnglish);
+    replyTtsText = clampTransitionText(reply.ttsText?.trim() || replyText, replyText, useEnglish);
   } catch {
     // keep fallback text
   }
@@ -1503,9 +2107,34 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
   }
 }
 
-async function advanceQueueWithSegue(step: number) {
+function parseQueueAdvanceFeedback(payload: any): { type: db.UserFeedbackType; note: string } | null {
+  const reason = typeof (payload.data?.reason ?? payload.reason) === "string"
+    ? (payload.data?.reason ?? payload.reason).trim()
+    : "";
+  if (reason === "track_complete") {
+    return { type: "complete_track", note: "implicit: track completed" };
+  }
+  if (reason === "manual_skip" || reason === "chat_skip") {
+    const positionSec = Number(payload.data?.positionSec ?? payload.positionSec);
+    const durationSec = Number(payload.data?.durationSec ?? payload.durationSec);
+    const played = Number.isFinite(positionSec) && positionSec >= 0 ? `${Math.round(positionSec)}s` : "unknown";
+    const duration = Number.isFinite(durationSec) && durationSec > 0 ? `${Math.round(durationSec)}s` : "unknown";
+    return { type: "skip_track", note: `implicit: ${reason}; played ${played}/${duration}` };
+  }
+  return null;
+}
+
+async function advanceQueueWithSegue(
+  step: number,
+  options?: {
+    feedback?: { type: db.UserFeedbackType; note: string } | null;
+  },
+) {
   const previousState = await db.getState();
   const previousTrack = previousState.currentTrack;
+  if (step === 1 && previousTrack && options?.feedback) {
+    await addTrackFeedbackFromState(previousState, previousTrack, options.feedback.type, options.feedback.note);
+  }
   const preparedTransition = step === 1
     ? await getPreparedQueueTransitionForAdvance(previousState, step)
     : null;
@@ -1537,7 +2166,9 @@ async function advanceQueueWithSegue(step: number) {
       ttsAudioPath: preparedTransition.ttsAudioPath,
     };
   } else {
-    const refreshedTrack = await refreshTrackUrl(nextState.currentTrack);
+    const refreshedTrack = shouldRefreshTrackUrl(nextState.currentTrack, CURRENT_URL_REFRESH_THRESHOLD_MS)
+      ? await refreshTrackUrl(nextState.currentTrack, { forceRefresh: true })
+      : nextState.currentTrack;
     if (hasPlaybackResolutionChanged(refreshedTrack, nextState.currentTrack)) {
       const updatedQueue = nextState.radioQueue.map((track, index) =>
         index === nextState.currentQueueIndex ? refreshedTrack : track,
@@ -1589,14 +2220,23 @@ async function advanceQueueWithSegue(step: number) {
   return playableState;
 }
 
-async function playSelectedQueueTrack(trackId: string) {
+async function playSelectedQueueTrack(
+  trackId: string,
+  options?: {
+    forceRefresh?: boolean;
+  },
+) {
   invalidatePreparedQueueTransition();
   const selectedState = await db.selectRadioQueueTrack(trackId);
   if (!selectedState?.currentTrack) {
     return null;
   }
 
-  const refreshedTrack = await refreshTrackUrl(selectedState.currentTrack);
+  const needsRefresh = options?.forceRefresh === true
+    || shouldRefreshTrackUrl(selectedState.currentTrack, CURRENT_URL_REFRESH_THRESHOLD_MS);
+  const refreshedTrack = needsRefresh
+    ? await refreshTrackUrl(selectedState.currentTrack, { forceRefresh: true })
+    : selectedState.currentTrack;
   let playableState = selectedState;
   if (hasPlaybackResolutionChanged(refreshedTrack, selectedState.currentTrack)) {
     const updatedQueue = selectedState.radioQueue.map((track, index) =>
@@ -1675,7 +2315,9 @@ wss.on("connection", async (ws) => {
 
       if (payload.type === "queue_next") {
         try {
-          const nextState = await advanceQueueWithSegue(1);
+          const nextState = await advanceQueueWithSegue(1, {
+            feedback: parseQueueAdvanceFeedback(payload),
+          });
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可切换的歌曲队列" } }));
           }
@@ -1715,12 +2357,23 @@ wss.on("connection", async (ws) => {
           ws.send(JSON.stringify({ type: "error", data: { message: "trackId required" } }));
           return;
         }
+        const forceRefresh = (payload.data?.forceRefresh ?? payload.forceRefresh) === true;
 
         try {
-          const nextState = await playSelectedQueueTrack(trackId);
+          const nextState = await playSelectedQueueTrack(trackId, { forceRefresh });
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "未找到对应的队列歌曲" } }));
           }
+        } catch (error) {
+          ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
+        }
+        return;
+      }
+
+      if (payload.type === "playback_issue") {
+        try {
+          await recordClientPlaybackIssue(payload);
+          await broadcastStateSnapshot();
         } catch (error) {
           ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
         }
@@ -1744,7 +2397,9 @@ wss.on("connection", async (ws) => {
         }
 
         if (chatRoute.action === "skip_track") {
-          const nextState = await advanceQueueWithSegue(1);
+          const nextState = await advanceQueueWithSegue(1, {
+            feedback: { type: "skip_track", note: "implicit: chat_skip" },
+          });
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可切换的歌曲队列" } }));
           }
@@ -1801,6 +2456,13 @@ wss.on("connection", async (ws) => {
           return;
         }
 
+        if (chatRoute.intent === "recommendation_reason") {
+          const state = await db.getState();
+          if (state.currentTrack) {
+            await addTrackFeedbackFromState(state, state.currentTrack, "ask_about_track", "implicit: recommendation reason question");
+          }
+        }
+
         await replyOnlyChat(text, chatRoute);
       }
     } catch (e) {}
@@ -1819,12 +2481,20 @@ server.on("upgrade", (request, socket, head) => {
   }
 });
 
+server.on("close", () => {
+  stopPlaybackLeaseMaintenanceLoop();
+  wss.clients.forEach((client) => {
+    client.terminate();
+  });
+});
+
 export function startServer(port?: number | string) {
   const PORT = port !== undefined ? port : (process.env.PORT || 3000);
   if (!isTestEnv()) {
     void db.setStatus("idle");
   }
   void weather.startWeatherRefreshLoop();
+  startPlaybackLeaseMaintenanceLoop();
   return server.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
     void initializeStartupRadioProgram();

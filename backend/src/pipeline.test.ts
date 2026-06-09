@@ -382,7 +382,7 @@ describe("Pipeline Engine", () => {
     });
     vi.mocked(netease.getPlayableUrl).mockResolvedValue("http://example.com/local.mp3");
 
-    const result = await pipeline.runPipeline("random_discover");
+    const result = await pipeline.runPipeline("mood_pick");
 
     expect(netease.getPlayableUrl).toHaveBeenCalledWith(999, undefined);
     expect(netease.searchSongs).not.toHaveBeenCalled();
@@ -393,6 +393,137 @@ describe("Pipeline Engine", () => {
       artist: "Local Artist",
       url: "http://example.com/local.mp3",
     });
+  });
+
+  it("should resolve random_discover through Discovery Scout directions", async () => {
+    vi.mocked(db.getState).mockResolvedValue(baseState);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("");
+    vi.mocked(db.summarizeDiscoveryCandidates).mockReturnValue("");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      say: "我先沿着你的口味旁边试一首新的。",
+      ttsText: "我先沿着你的口味旁边试一首新的。",
+      directions: [
+        {
+          query: "Discovery Lane",
+          direction: "adjacent discovery",
+          reason: "Near the current taste.",
+          risk: "adjacent",
+        },
+      ],
+      reason: "test discovery strategy",
+    });
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/discovery.wav",
+    });
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => (
+      keyword.includes("Discovery Lane")
+        ? mockNeteaseSearchTrack({
+            id: 222,
+            name: "Discovery Song",
+            artist: "Discovery Artist",
+          })
+        : mockNeteaseSearchTrack({
+            id: 111,
+            name: "Stable Anchor",
+            artist: "Stable Artist",
+          })
+    ));
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
+
+    const result = await pipeline.runPipeline("random_discover");
+
+    expect(claude.callLLM).not.toHaveBeenCalled();
+    expect(claude.callJsonLLM).toHaveBeenCalled();
+    expect(netease.searchSongs).toHaveBeenCalledWith("Discovery Lane", 5);
+    expect(result.tracks.map((track) => track.name)).toEqual(["Stable Anchor", "Discovery Song"]);
+    expect(db.addDiscoveryCandidates).toHaveBeenCalledWith([
+      expect.objectContaining({
+        title: "Discovery Song",
+        artist: "Discovery Artist",
+        health: "ready",
+      }),
+    ]);
+    expect(db.setRadioQueue).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ id: "111", name: "Stable Anchor" }),
+        expect.objectContaining({ id: "222", name: "Discovery Song" }),
+      ],
+      expect.objectContaining({ currentIndex: 0 }),
+    );
+  });
+
+  it("limits Discovery Scout small adventures to one backend risk", async () => {
+    vi.mocked(db.getState).mockResolvedValue({
+      ...baseState,
+      userFeedback: [{
+        id: "feedback-1",
+        type: "more_like_this",
+        title: "Anchor",
+        artist: "Artist",
+        createdAt: Date.now(),
+      }],
+    } as any);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("");
+    vi.mocked(db.summarizeDiscoveryCandidates).mockReturnValue("");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      say: "我沿着正反馈试两个新方向。",
+      ttsText: "我沿着正反馈试两个新方向。",
+      directions: [
+        {
+          query: "Adventure Lane One",
+          direction: "small adventure one",
+          reason: "A wider but explainable step.",
+          risk: "small_adventure",
+        },
+        {
+          query: "Adventure Lane Two",
+          direction: "small adventure two",
+          reason: "Another wider step.",
+          risk: "small_adventure",
+        },
+      ],
+      reason: "test bounded discovery strategy",
+    });
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/bounded-discovery.wav",
+    });
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      if (keyword.includes("Adventure Lane One")) {
+        return mockNeteaseSearchTrack({ id: 331, name: "Adventure One", artist: "Discovery Artist" });
+      }
+      if (keyword.includes("Adventure Lane Two")) {
+        return mockNeteaseSearchTrack({ id: 332, name: "Adventure Two", artist: "Discovery Artist" });
+      }
+      return mockNeteaseSearchTrack({ id: 111, name: "Stable Anchor", artist: "Stable Artist" });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
+
+    await pipeline.runPipeline("random_discover");
+
+    expect(db.addDiscoveryCandidates).toHaveBeenCalledWith([
+      expect.objectContaining({
+        title: "Adventure One",
+        risk: "small_adventure",
+      }),
+      expect.objectContaining({
+        title: "Adventure Two",
+        risk: "adjacent",
+      }),
+    ]);
   });
 
   it("should include configured local library files in recommendation context", async () => {
@@ -422,7 +553,7 @@ describe("Pipeline Engine", () => {
       cachePath: "data/audio/local-library.wav",
     });
 
-    const result = await pipeline.runPipeline("random_discover");
+    const result = await pipeline.runPipeline("mood_pick");
 
     expect(claude.buildContextPrompt).toHaveBeenCalledWith(expect.objectContaining({
       candidateContext: expect.stringContaining("Library Song - Library Artist"),
@@ -516,6 +647,128 @@ describe("Pipeline Engine", () => {
         }),
       }),
     );
+  });
+
+  it("adds verified discoveries after a stable opening in long programs", async () => {
+    vi.mocked(db.getState).mockResolvedValue(baseState);
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue({
+      account: { userId: 1, nickname: "tester", avatarUrl: "" },
+      syncedAt: 1,
+      playlists: [
+        {
+          id: 1,
+          name: "Snapshot",
+          trackCount: 4,
+          playCount: 1,
+          coverImgUrl: "",
+          creator: { nickname: "tester", userId: 1 },
+          tracks: [
+            { id: 1, name: "Stable 1", artist: "Stable Artist", album: "Album" },
+          ],
+        },
+      ],
+    } as any);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("");
+    vi.mocked(db.summarizeDiscoveryCandidates).mockReturnValue("");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue({
+      generatedAt: 1,
+      sourceSyncedAt: 1,
+      playlistCount: 1,
+      totalTrackCount: 1,
+      uniqueTrackCount: 1,
+      uniqueArtistCount: 1,
+      uniqueAlbumCount: 1,
+      languageMix: { chinese: 0, latin: 1, mixed: 0, other: 0 },
+      topArtists: [],
+      topAlbums: [],
+      topTracks: [],
+      titleKeywords: [],
+      artistKeywords: [],
+      playlistFingerprints: [],
+      summary: "summary",
+    } as any);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("summary");
+    vi.mocked(tasteProfile.buildRecommendationCandidates).mockReturnValue([
+      {
+        id: 1,
+        title: "Stable 1",
+        artist: "Stable Artist",
+        album: "Album",
+        sourcePlaylists: ["Snapshot"],
+        playlistCount: 1,
+        occurrences: 1,
+        score: 10,
+        reasons: ["core-artist"],
+      },
+    ]);
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("candidate context");
+    vi.mocked(weather.getDefaultWeatherPromptContext).mockResolvedValue("广州多云，25°C");
+    vi.mocked(claude.callJsonLLM)
+      .mockResolvedValueOnce({
+        title: "稳定探索节目",
+        mood: "steady discovery",
+        plannedMinutes: 24,
+        speechPlan: [{ beforeTrackIndex: 0, type: "intro", note: "开场" }],
+        say: "先稳住主线，再试一点新方向。",
+        ttsText: "先稳住主线，再试一点新方向。",
+        lineup: [
+          { title: "Stable 1", artist: "Stable Artist" },
+          { title: "Stable 2", artist: "Stable Artist" },
+          { title: "Stable 3", artist: "Stable Artist" },
+          { title: "Stable 4", artist: "Stable Artist" },
+          { title: "Stable 5", artist: "Stable Artist" },
+          { title: "Stable 6", artist: "Stable Artist" },
+        ],
+        reason: "先稳定，后探索。",
+      })
+      .mockResolvedValueOnce({
+        say: "第三首后试一个相邻方向。",
+        ttsText: "第三首后试一个相邻方向。",
+        directions: [
+          {
+            query: "Discovery Lane",
+            direction: "adjacent discovery",
+            reason: "Near the current taste.",
+            risk: "adjacent",
+          },
+        ],
+        reason: "controlled discovery",
+      });
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/program-discovery.wav",
+    });
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      if (keyword.includes("Discovery Lane")) {
+        return mockNeteaseSearchTrack({ id: 900, name: "Discovery Song", artist: "Discovery Artist" });
+      }
+      const match = keyword.match(/Stable\s+(\d)/);
+      const id = match ? Number(match[1]) : 1;
+      return mockNeteaseSearchTrack({ id, name: `Stable ${id}`, artist: "Stable Artist" });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
+
+    const result = await pipeline.runStartupRadioProgram();
+
+    expect(result.tracks.map((track) => track.name)).toEqual([
+      "Stable 1",
+      "Stable 2",
+      "Stable 3",
+      "Discovery Song",
+      "Stable 4",
+      "Stable 5",
+      "Stable 6",
+    ]);
+    expect(result.tracks[0].name).toBe("Stable 1");
+    expect(db.addDiscoveryCandidates).toHaveBeenCalledWith([
+      expect.objectContaining({
+        title: "Discovery Song",
+        risk: "adjacent",
+        health: "ready",
+      }),
+    ]);
   });
 
   it("should generate English startup copy when Dean preset is active", async () => {

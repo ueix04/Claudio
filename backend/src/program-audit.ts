@@ -30,6 +30,8 @@ export interface ProgramExperienceAudit {
 
 const WEATHER_RE = /天气|气温|温度|湿度|下雨|下雪|forecast|weather|temperature|rain|snow|cloudy|sunny/i;
 const RESTART_GREETING_RE = /大家好|早上好|下午好|晚上好|欢迎回来|欢迎收听|我是\s*Claudio|这里是|good morning|good afternoon|good evening|welcome back|i'?m\s+claudio|this is claudio/i;
+const ABSTRACT_DJ_RE = /氛围|情绪|温度|夜色|灯光|空气|房间|故事|梦|灵魂|宇宙|城市|呼吸|atmosphere|vibe|mood|room|light|temperature|story|dream|soul|city|air/i;
+const CONCRETE_MUSIC_RE = /上一首|下一首|这首|接|收|放|旋律|节奏|人声|鼓|吉他|钢琴|贝斯|合成器|音色|副歌|track|song|next|previous|tempo|vocal|rhythm|melody|beat|guitar|piano|synth|texture|chorus|bass/i;
 
 function normalizeLine(text: string): string {
   return text
@@ -86,6 +88,14 @@ function countDuplicateTracks(queue: Track[]): number {
     seen.add(key);
   }
   return duplicated.size;
+}
+
+function countAbstractOnlyLines(lines: string[]): number {
+  return lines.filter((line) => ABSTRACT_DJ_RE.test(line) && !CONCRETE_MUSIC_RE.test(line)).length;
+}
+
+function countLongDjLines(lines: string[]): number {
+  return lines.filter((line) => line.length > 95).length;
 }
 
 function buildCheck(id: string, label: string, status: AuditStatus, detail: string): ProgramAuditCheck {
@@ -157,6 +167,15 @@ export function auditProgramExperience(state: AppState): ProgramExperienceAudit 
     "Line repetition",
     duplicateLineCount === 0 ? "pass" : "fail",
     `Recent DJ history contains ${duplicateLineCount} exact repeated DJ line(s).`,
+  ));
+
+  const abstractOnlyLineCount = countAbstractOnlyLines(djLines);
+  const longLineCount = countLongDjLines(djLines);
+  checks.push(buildCheck(
+    "dj_specificity",
+    "DJ specificity",
+    abstractOnlyLineCount <= 1 && longLineCount === 0 ? "pass" : "fail",
+    `Recent DJ history has ${abstractOnlyLineCount} abstract-only line(s) and ${longLineCount} long monologue line(s).`,
   ));
 
   checks.push(buildCheck(

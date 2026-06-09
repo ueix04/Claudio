@@ -213,6 +213,123 @@ describe("API Server", () => {
     expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
   });
 
+  it("GET /api/radio/playback-diagnostics 返回队列播放健康且不暴露真实 URL", async () => {
+    const db = await import("./db.js");
+    const now = Date.now();
+    const tracks = [
+      {
+        id: "1",
+        name: "Current Song",
+        artist: "Current Artist",
+        url: "https://media.example.com/current.mp3",
+        source: "netease_legacy",
+        sourceTrackId: "1",
+        urlSource: "unblock_netease",
+        urlExpiresAt: now + 10 * 60 * 1000,
+        urlRefreshedAt: now - 30 * 1000,
+      },
+      {
+        id: "2",
+        name: "Soon Song",
+        artist: "Soon Artist",
+        url: "https://media.example.com/soon.mp3",
+        source: "netease_legacy",
+        sourceTrackId: "2",
+        urlSource: "netease_legacy",
+        urlExpiresAt: now + 30 * 1000,
+        urlRefreshedAt: now - 60 * 1000,
+      },
+    ];
+    vi.mocked(db.getState).mockResolvedValue({
+      status: "playing",
+      currentTrack: tracks[0],
+      radioQueue: tracks,
+      currentQueueIndex: 0,
+      currentProgram: null,
+      chatHistory: [],
+      playHistory: [],
+      listenChecks: [],
+      djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: now,
+    } as any);
+
+    const res = await fetch(`http://localhost:${port}/api/radio/playback-diagnostics`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      current: { health: string; leaseStatus: string; urlSource: string; shouldRefresh: boolean };
+      upcoming: Array<{ health: string; leaseStatus: string; shouldRefresh: boolean }>;
+      fallbacks: Array<{ source: string; fallbacks: string[] }>;
+    };
+    expect(body.current).toMatchObject({
+      health: "fallback",
+      leaseStatus: "ready",
+      urlSource: "unblock_netease",
+      shouldRefresh: false,
+    });
+    expect(body.upcoming[0]).toMatchObject({
+      health: "refreshing",
+      leaseStatus: "expiring",
+      shouldRefresh: true,
+    });
+    expect(body.fallbacks[0].source).toBe("netease_legacy");
+    expect(JSON.stringify(body)).not.toContain("https://media.example.com");
+  });
+
+  it("GET /api/state 会在当前播放 URL 接近过期时主动刷新", async () => {
+    const db = await import("./db.js");
+    const netease = await import("./netease.js");
+    const expiringTrack = {
+      id: "42",
+      name: "Expiring Song",
+      artist: "Expiring Artist",
+      url: "old-url",
+      source: "netease_legacy",
+      sourceTrackId: "42",
+      urlSource: "netease_legacy",
+      urlExpiresAt: Date.now() + 30 * 1000,
+      urlRefreshedAt: Date.now() - 7 * 60 * 1000,
+    };
+    let currentState = {
+      status: "playing",
+      currentTrack: expiringTrack,
+      radioQueue: [expiringTrack],
+      currentQueueIndex: 0,
+      currentProgram: null,
+      chatHistory: [],
+      playHistory: [],
+      listenChecks: [],
+      djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+      };
+      return currentState;
+    });
+    vi.mocked(netease.getPlayableUrl).mockResolvedValue("fresh-url");
+
+    const res = await fetch(`http://localhost:${port}/api/state`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { currentTrack: { url: string; urlExpiresAt: number } };
+    expect(body.currentTrack.url).toBe("fresh-url");
+    expect(body.currentTrack.urlExpiresAt).toBeGreaterThan(Date.now());
+    expect(vi.mocked(netease.getPlayableUrl)).toHaveBeenCalledWith(42, { forceRefresh: true });
+    expect(currentState.radioQueue[0].url).toBe("fresh-url");
+  });
+
   it("GET /api/music-sources/local-library/matches 返回本地曲库口味命中率", async () => {
     const musicSources = await import("./music-sources/index.js");
     const tasteProfile = await import("./taste-profile.js");
@@ -437,6 +554,19 @@ describe("API Server", () => {
       duration: 240000,
       source: "local_library",
     }));
+    tracks[1] = {
+      ...tracks[1],
+      source: "netease_legacy",
+      urlSource: "unblock_netease",
+    };
+    tracks[2] = {
+      ...tracks[2],
+      lastPlaybackIssue: {
+        code: "waiting",
+        message: "buffer stalled",
+        at: 1_100_000,
+      },
+    };
     vi.mocked(db.getState).mockResolvedValue({
       status: "playing",
       currentTrack: tracks[0],
@@ -458,8 +588,31 @@ describe("API Server", () => {
       },
       chatHistory: [
         { role: "dj", text: "今晚先把这一段慢慢铺开。", timestamp: 1 },
+        { role: "dj", text: "这首之后接得更稳。", timestamp: 1_000_000 },
+      ],
+      userFeedback: [
+        {
+          id: "feedback_test",
+          type: "more_like_this",
+          title: "Song 1",
+          artist: "Artist 1",
+          createdAt: 1_000_000,
+        },
       ],
       playHistory: [],
+      discoveryCandidates: [
+        {
+          id: "discovery_test",
+          query: "adjacent",
+          direction: "adjacent",
+          title: "Song 4",
+          artist: "Artist 4",
+          reason: "verified adjacent",
+          risk: "adjacent",
+          health: "ready",
+          createdAt: 900_000,
+        },
+      ],
       listenChecks: [],
       djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
       playlists: [],
@@ -492,6 +645,24 @@ describe("API Server", () => {
         completedSessionId: "startup_test",
         startedGeneratedAt: 1,
         completedGeneratedAt: 1,
+      },
+      listenEvidence: {
+        playbackIssueCount: 1,
+        fallbackCount: 1,
+        discoveryCount: 1,
+        feedbackCount: 1,
+        djLineCount: 2,
+        playedTrackCount: 1,
+        clientSignalSampleCount: 200,
+        clientLowSignalSampleCount: 3,
+        clientSilentMs: 1500,
+        clientMaxSilentRunMs: 900,
+        discoveryTracks: [
+          { title: "Song 4", artist: "Artist 4", risk: "adjacent" },
+        ],
+        recentIssues: [
+          { code: "waiting", message: "buffer stalled", at: 1_100_000, trackTitle: "Song 3" },
+        ],
       },
       programSnapshot: {
         sessionId: "startup_test",
@@ -533,6 +704,12 @@ describe("API Server", () => {
           sessionId: "startup_test",
           generatedAt: 1,
         },
+        clientAudioEvidence: {
+          signalSampleCount: 200,
+          lowSignalSampleCount: 3,
+          silentMs: 1500,
+          maxSilentRunMs: 900,
+        },
       }),
     });
 
@@ -560,6 +737,29 @@ describe("API Server", () => {
         completedSessionId: "startup_test",
         startedGeneratedAt: 1,
         completedGeneratedAt: 1,
+      },
+      listenEvidence: {
+        playbackIssueCount: 1,
+        fallbackCount: 1,
+        discoveryCount: 1,
+        feedbackCount: 1,
+        djLineCount: 2,
+        playedTrackCount: 1,
+        clientSignalSampleCount: 200,
+        clientLowSignalSampleCount: 3,
+        clientSilentMs: 1500,
+        clientMaxSilentRunMs: 900,
+        discoveryTracks: [
+          { title: "Song 4", artist: "Artist 4", risk: "adjacent" },
+        ],
+        recentIssues: [
+          {
+            code: "waiting",
+            message: "buffer stalled",
+            at: 1_100_000,
+            trackTitle: "Song 3",
+          },
+        ],
       },
       programSnapshot: expect.objectContaining({
         currentQueueIndex: 0,
@@ -602,6 +802,22 @@ describe("API Server", () => {
         startedGeneratedAt: 1,
         completedGeneratedAt: 1,
       },
+      listenEvidence: {
+        playbackIssueCount: 0,
+        fallbackCount: 0,
+        discoveryCount: 1,
+        feedbackCount: 1,
+        djLineCount: 2,
+        playedTrackCount: 4,
+        clientSignalSampleCount: 240,
+        clientLowSignalSampleCount: 0,
+        clientSilentMs: 0,
+        clientMaxSilentRunMs: 0,
+        discoveryTracks: [
+          { title: "Discovery Song", artist: "Discovery Artist", risk: "adjacent" },
+        ],
+        recentIssues: [],
+      },
       recordedAt: 1_200_002,
     }]);
 
@@ -610,9 +826,104 @@ describe("API Server", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ready).toBe(true);
-    expect(body.criteria).toHaveLength(3);
+    expect(body.criteria).toHaveLength(6);
     expect(body.criteria.every((criterion: { passed: boolean }) => criterion.passed)).toBe(true);
     expect(db.getListenCheckRecords).toHaveBeenCalledWith(20);
+  });
+
+  it("GET/POST /api/feedback 保存并返回用户音乐反馈", async () => {
+    const db = await import("./db.js");
+    const feedbackRecord = {
+      id: "feedback_test",
+      type: "more_like_this" as const,
+      trackId: "track-1",
+      title: "Signal Song",
+      artist: "Signal Artist",
+      source: "netease_legacy",
+      sourceTrackId: "track-1",
+      urlSource: "netease_legacy",
+      programSessionId: "program_1",
+      queueIndex: 0,
+      createdAt: 123,
+    };
+    vi.mocked(db.getState).mockResolvedValue({
+      status: "playing",
+      currentTrack: {
+        id: "track-1",
+        name: "Signal Song",
+        artist: "Signal Artist",
+        url: "url",
+        source: "netease_legacy",
+        sourceTrackId: "track-1",
+        urlSource: "netease_legacy",
+      },
+      radioQueue: [],
+      currentQueueIndex: 0,
+      currentProgram: { source: "startup", sessionId: "program_1", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: 1,
+    } as any);
+    vi.mocked(db.addUserFeedback).mockResolvedValue(feedbackRecord);
+    vi.mocked(db.getUserFeedback).mockResolvedValue([feedbackRecord]);
+
+    const postRes = await fetch(`http://localhost:${port}/api/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "more_like_this" }),
+    });
+
+    expect(postRes.status).toBe(201);
+    expect(await postRes.json()).toMatchObject({ id: "feedback_test" });
+    expect(db.addUserFeedback).toHaveBeenCalledWith(expect.objectContaining({
+      type: "more_like_this",
+      title: "Signal Song",
+      artist: "Signal Artist",
+      programSessionId: "program_1",
+      queueIndex: 0,
+    }));
+
+    const getRes = await fetch(`http://localhost:${port}/api/feedback?limit=5`);
+    expect(getRes.status).toBe(200);
+    expect(await getRes.json()).toHaveLength(1);
+    expect(db.getUserFeedback).toHaveBeenCalledWith(5);
+  });
+
+  it("GET /api/radio/discovery-candidates 返回最近已验证探索候选", async () => {
+    const db = await import("./db.js");
+    vi.mocked(db.getDiscoveryCandidates).mockResolvedValue([{
+      id: "discovery_test",
+      query: "dream pop adjacent",
+      direction: "dream pop adjacent",
+      title: "Discovery Song",
+      artist: "Discovery Artist",
+      reason: "Adjacent to taste.",
+      risk: "adjacent",
+      source: "netease_legacy",
+      sourceTrackId: "123",
+      urlSource: "netease_legacy",
+      health: "ready",
+      createdAt: 123,
+    }]);
+
+    const res = await fetch(`http://localhost:${port}/api/radio/discovery-candidates?limit=5`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual([
+      expect.objectContaining({
+        id: "discovery_test",
+        title: "Discovery Song",
+        health: "ready",
+      }),
+    ]);
+    expect(db.getDiscoveryCandidates).toHaveBeenCalledWith(5);
   });
 });
 
@@ -621,8 +932,31 @@ describe("WebSocket Server", () => {
   let port: number;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
+    const db = await import("./db.js");
+    const defaultState = {
+      status: "idle",
+      currentTrack: null,
+      radioQueue: [],
+      currentQueueIndex: 0,
+      currentProgram: null,
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      discoveryCandidates: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+    vi.mocked(db.getState).mockResolvedValue(defaultState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => ({
+      ...defaultState,
+      ...patch,
+    }));
     const { startServer } = await import("./server.js");
     server = startServer(0);
     await new Promise<void>((resolve) => server.on("listening", resolve));
@@ -651,6 +985,109 @@ describe("WebSocket Server", () => {
     });
 
     expect(message).toMatchObject({ type: "state" });
+    ws.close();
+  });
+
+  it("playback_issue 会记录浏览器端静音问题到当前曲目诊断", async () => {
+    const db = await import("./db.js");
+    const trackA = {
+      id: "1",
+      name: "Song A",
+      artist: "Artist A",
+      url: "url-a",
+      duration: 100,
+      source: "netease_legacy",
+      sourceTrackId: "1",
+      urlSource: "netease_legacy",
+      urlExpiresAt: Date.now() + 10 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    };
+    let currentState = {
+      status: "playing",
+      currentTrack: trackA,
+      radioQueue: [trackA],
+      currentQueueIndex: 0,
+      currentProgram: { source: "startup", sessionId: "program_1", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+      };
+      return currentState;
+    });
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for initial state")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "state")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+    vi.mocked(db.updateState).mockClear();
+    messages.length = 0;
+
+    ws.send(JSON.stringify({
+      type: "playback_issue",
+      data: {
+        code: "client_silent_audio",
+        trackId: "1",
+        message: "Playback position advanced while browser signal stayed too low",
+      },
+    }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for playback issue state")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "state" && m.data?.currentTrack?.lastPlaybackIssue?.code === "client_silent_audio")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(db.updateState).toHaveBeenCalledWith(expect.objectContaining({
+      currentTrack: expect.objectContaining({
+        playbackHealth: "failed",
+        lastPlaybackIssue: expect.objectContaining({
+          code: "client_silent_audio",
+        }),
+      }),
+      radioQueue: [
+        expect.objectContaining({
+          playbackHealth: "failed",
+          lastPlaybackIssue: expect.objectContaining({
+            code: "client_silent_audio",
+          }),
+        }),
+      ],
+    }));
+
     ws.close();
   });
 
@@ -1033,8 +1470,88 @@ describe("WebSocket Server", () => {
     });
 
     expect(db.advanceRadioQueue).toHaveBeenCalled();
+    expect(db.addUserFeedback).toHaveBeenCalledWith(expect.objectContaining({
+      type: "skip_track",
+      title: "Song A",
+      artist: "Artist A",
+      note: "implicit: chat_skip",
+    }));
     expect(messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("Song B"))).toBe(true);
     expect(messages.some((m) => m.type === "track" && m.data?.name === "Song B")).toBe(true);
+
+    ws.close();
+  });
+
+  it("queue_next 会按播放原因记录听完或跳过信号", async () => {
+    const db = await import("./db.js");
+    const netease = await import("./netease.js");
+
+    const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100 };
+    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100 };
+    let currentState = {
+      status: "playing",
+      currentTrack: trackA,
+      radioQueue: [trackA, trackB],
+      currentQueueIndex: 0,
+      currentProgram: { source: "startup", sessionId: "program_1", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.advanceRadioQueue).mockImplementation(async () => {
+      currentState = {
+        ...currentState,
+        currentQueueIndex: 1,
+        currentTrack: trackB,
+      };
+      return currentState;
+    });
+    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({
+      type: "queue_next",
+      data: {
+        reason: "track_complete",
+        positionSec: 100,
+        durationSec: 100,
+      },
+    }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for completed queue move")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "track" && m.data?.name === "Song B")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(db.addUserFeedback).toHaveBeenCalledWith(expect.objectContaining({
+      type: "complete_track",
+      title: "Song A",
+      artist: "Artist A",
+      programSessionId: "program_1",
+      queueIndex: 0,
+    }));
 
     ws.close();
   });
@@ -1141,6 +1658,94 @@ describe("WebSocket Server", () => {
     expect(claude.callJsonLLM).toHaveBeenCalledTimes(1);
     expect(tts.speak).toHaveBeenCalledTimes(1);
     expect(messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("Song B"))).toBe(true);
+
+    ws.close();
+  });
+
+  it("queue_next 会收敛过长的英文 DJ 串场", async () => {
+    const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    const tts = await import("./tts.js");
+    const netease = await import("./netease.js");
+
+    const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100, picUrl: "pic-a" };
+    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100, picUrl: "pic-b" };
+    let currentState = {
+      status: "playing",
+      currentTrack: trackA,
+      radioQueue: [trackA, trackB],
+      currentQueueIndex: 0,
+      currentProgram: {
+        source: "startup",
+        generatedAt: 1,
+        title: "Night Flow",
+        speechPlan: [{ beforeTrackIndex: 1, type: "short_say", note: "接到下一首" }],
+      },
+      chatHistory: [],
+      djProfile: { voice: "Dean", style: "emotional radio", name: "Claudio" },
+      lastInteraction: Date.now(),
+      playlists: [],
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+      };
+      return currentState;
+    });
+    vi.mocked(db.advanceRadioQueue).mockImplementation(async () => {
+      currentState = {
+        ...currentState,
+        currentQueueIndex: 1,
+        currentTrack: trackB,
+      };
+      return currentState;
+    });
+    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      say: "Song A leaves a steady pulse, and Song B keeps that rhythm moving with a cleaner vocal line before the set opens into a much wider emotional shape.",
+      ttsText: "Song A leaves a steady pulse, and Song B keeps that rhythm moving with a cleaner vocal line before the set opens into a much wider emotional shape.",
+    });
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/clamped-segue.wav",
+    });
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "queue_next" }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for clamped segue")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "dj_message")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    const djMessage = messages.find((m) => m.type === "dj_message")?.data?.text as string;
+    expect(djMessage.length).toBeLessThanOrEqual(94);
+    expect(djMessage).toBe("Song A leaves a steady pulse, and Song B keeps that rhythm moving with a cleaner vocal line.");
+    expect(tts.speak).toHaveBeenCalledWith(
+      djMessage,
+      expect.objectContaining({ scene: "segue" }),
+    );
 
     ws.close();
   });

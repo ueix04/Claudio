@@ -28,6 +28,22 @@ const makeRecord = (patch: Partial<ListenCheckRecord> = {}): ListenCheckRecord =
     startedGeneratedAt: 1,
     completedGeneratedAt: 1,
   },
+  listenEvidence: {
+    playbackIssueCount: 0,
+    fallbackCount: 0,
+    discoveryCount: 1,
+    feedbackCount: 1,
+    djLineCount: 2,
+    playedTrackCount: 4,
+    clientSignalSampleCount: 240,
+    clientLowSignalSampleCount: 0,
+    clientSilentMs: 0,
+    clientMaxSilentRunMs: 0,
+    discoveryTracks: [
+      { title: "Discovery Song", artist: "Discovery Artist", risk: "adjacent" },
+    ],
+    recentIssues: [],
+  },
   recordedAt: 1_200_002,
   ...patch,
 });
@@ -39,14 +55,20 @@ describe("listen acceptance summary", () => {
     expect(summary.ready).toBe(true);
     expect(summary.status).toBe("ready");
     expect(summary.targetMinutes).toBe(20);
-    expect(summary.criteria).toHaveLength(3);
+    expect(summary.criteria).toHaveLength(6);
     expect(summary.criteria.every((criterion) => criterion.passed)).toBe(true);
     expect(summary.criteria.map((criterion) => criterion.planText)).toEqual([
       "连续播放 20 分钟时，整体像一档节目，而不是一串推荐。",
       "DJ 话术不重复、不频繁问候、不每次提天气。",
       "用户能感觉 Claudio 在承接上下文和音乐情绪。",
+      "20 分钟内没有长时间静音，fallback 和播放错误都有记录。",
+      "20 分钟内至少出现一次可解释、可播放的探索。",
+      "20 分钟内至少有一次用户反馈或隐性反馈进入后续调整。",
     ]);
     expect(summary.criteria.map((criterion) => criterion.recordId)).toEqual([
+      "listen_ok",
+      "listen_ok",
+      "listen_ok",
       "listen_ok",
       "listen_ok",
       "listen_ok",
@@ -64,6 +86,12 @@ describe("listen acceptance summary", () => {
       programAuditOk: true,
       issueCount: 0,
       programContinuityOk: true,
+      playbackIssueCount: 0,
+      discoveryCount: 1,
+      feedbackCount: 1,
+      clientSignalSampleCount: 240,
+      clientSilentMs: 0,
+      clientMaxSilentRunMs: 0,
     });
   });
 
@@ -103,6 +131,9 @@ describe("listen acceptance summary", () => {
 
     expect(ready.ready).toBe(true);
     expect(ready.criteria.map((criterion) => criterion.recordId)).toEqual([
+      "listen_new_clean",
+      "listen_new_clean",
+      "listen_new_clean",
       "listen_new_clean",
       "listen_new_clean",
       "listen_new_clean",
@@ -164,5 +195,103 @@ describe("listen acceptance summary", () => {
     expect(summary.ready).toBe(false);
     expect(summary.latestRecord?.playbackMs).toBe(600_000);
     expect(summary.criteria[0].detail).toContain("actual playback");
+  });
+
+  it("requires discovery and feedback evidence for final acceptance", () => {
+    const noDiscovery = summarizeListenAcceptance([
+      makeRecord({
+        listenEvidence: {
+          playbackIssueCount: 0,
+          fallbackCount: 0,
+          discoveryCount: 0,
+          feedbackCount: 1,
+          djLineCount: 2,
+          playedTrackCount: 4,
+          clientSignalSampleCount: 240,
+          clientLowSignalSampleCount: 0,
+          clientSilentMs: 0,
+          clientMaxSilentRunMs: 0,
+          recentIssues: [],
+        },
+      }),
+    ]);
+
+    expect(noDiscovery.ready).toBe(false);
+    expect(noDiscovery.criteria.find((criterion) => criterion.id === "exploration")?.passed).toBe(false);
+    expect(noDiscovery.criteria.find((criterion) => criterion.id === "exploration")?.detail).toContain("no verified discovery");
+
+    const noFeedback = summarizeListenAcceptance([
+      makeRecord({
+        listenEvidence: {
+          playbackIssueCount: 0,
+          fallbackCount: 0,
+          discoveryCount: 1,
+          feedbackCount: 0,
+          djLineCount: 2,
+          playedTrackCount: 4,
+          clientSignalSampleCount: 240,
+          clientLowSignalSampleCount: 0,
+          clientSilentMs: 0,
+          clientMaxSilentRunMs: 0,
+          discoveryTracks: [
+            { title: "Discovery Song", artist: "Discovery Artist", risk: "adjacent" },
+          ],
+          recentIssues: [],
+        },
+      }),
+    ]);
+
+    expect(noFeedback.ready).toBe(false);
+    expect(noFeedback.criteria.find((criterion) => criterion.id === "feedback")?.passed).toBe(false);
+    expect(noFeedback.criteria.find((criterion) => criterion.id === "feedback")?.detail).toContain("no listener feedback");
+  });
+
+  it("requires browser audio signal evidence and blocks probable long silence", () => {
+    const noSignal = summarizeListenAcceptance([
+      makeRecord({
+        listenEvidence: {
+          playbackIssueCount: 0,
+          fallbackCount: 0,
+          discoveryCount: 1,
+          feedbackCount: 1,
+          djLineCount: 2,
+          playedTrackCount: 4,
+          discoveryTracks: [
+            { title: "Discovery Song", artist: "Discovery Artist", risk: "adjacent" },
+          ],
+          recentIssues: [],
+        },
+      }),
+    ]);
+
+    expect(noSignal.ready).toBe(false);
+    expect(noSignal.criteria.find((criterion) => criterion.id === "reliability")?.passed).toBe(false);
+    expect(noSignal.criteria.find((criterion) => criterion.id === "reliability")?.detail).toContain("no browser audio signal");
+
+    const longSilence = summarizeListenAcceptance([
+      makeRecord({
+        listenEvidence: {
+          playbackIssueCount: 0,
+          fallbackCount: 0,
+          discoveryCount: 1,
+          feedbackCount: 1,
+          djLineCount: 2,
+          playedTrackCount: 4,
+          clientSignalSampleCount: 240,
+          clientLowSignalSampleCount: 20,
+          clientSilentMs: 16_000,
+          clientMaxSilentRunMs: 12_000,
+          discoveryTracks: [
+            { title: "Discovery Song", artist: "Discovery Artist", risk: "adjacent" },
+          ],
+          recentIssues: [],
+        },
+      }),
+    ]);
+
+    expect(longSilence.ready).toBe(false);
+    expect(longSilence.latestRecord?.clientMaxSilentRunMs).toBe(12_000);
+    expect(longSilence.criteria.find((criterion) => criterion.id === "reliability")?.passed).toBe(false);
+    expect(longSilence.criteria.find((criterion) => criterion.id === "reliability")?.detail).toContain("silent run");
   });
 });
