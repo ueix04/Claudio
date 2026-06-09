@@ -935,6 +935,13 @@ describe("WebSocket Server", () => {
     vi.resetAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
     const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    vi.mocked(claude.getLlmTaskTimeoutMs).mockImplementation((task) => ({
+      semantic_router: 20_000,
+      startup: 120_000,
+      chat_switch: 90_000,
+      discovery: 45_000,
+    })[task]);
     const defaultState = {
       status: "idle",
       currentTrack: null,
@@ -2141,38 +2148,92 @@ describe("WebSocket Server", () => {
     const db = await import("./db.js");
     const pipeline = await import("./pipeline.js");
 
-    vi.mocked(db.getState).mockResolvedValue({
+    const currentTrack = {
+      id: "1",
+      name: "Song A",
+      artist: "Artist A",
+      url: "url-a",
+      urlExpiresAt: Date.now() + 10 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    };
+    const quietTrack = { id: "9", name: "Quiet Song", artist: "Artist Q", url: "url-q", picUrl: "pic-q", duration: 90 };
+    const oldUpcomingTrack = { id: "2", name: "Old Upcoming", artist: "Artist B", url: "url-b", duration: 100 };
+    let currentState = {
       status: "playing",
-      currentTrack: { id: "1", name: "Song A", artist: "Artist A", url: "url-a" },
-      radioQueue: [],
+      currentTrack,
+      radioQueue: [currentTrack, oldUpcomingTrack],
       currentQueueIndex: 0,
       currentProgram: null,
       chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      discoveryCandidates: [],
       djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      favorites: [],
       lastInteraction: Date.now(),
       playlists: [],
-    } as any);
-    vi.mocked(pipeline.runChatSwitchProgram).mockResolvedValue({
-      status: "success",
-      djMessage: "那我给你换一组更安静的。",
-      ttsAudioPath: "data/audio/switch.wav",
-      tracks: [{ id: 9, name: "Quiet Song", artist: "Artist Q", url: "url-q", picUrl: "pic-q", duration: 90 }],
-      reason: "test",
-      programTitle: "Quiet Set",
-      shouldStartTrack: false,
-      currentTrackPreserved: true,
+      neteaseSnapshot: null,
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.addChatMessage).mockImplementation(async (message: any) => {
+      currentState = {
+        ...currentState,
+        chatHistory: [
+          ...currentState.chatHistory,
+          { ...message, timestamp: message.timestamp ?? Date.now() },
+        ],
+      };
+      return currentState;
+    });
+    vi.mocked(pipeline.runChatSwitchProgram).mockImplementation(async () => {
+      currentState = {
+        ...currentState,
+        status: "playing",
+        radioQueue: [currentTrack, quietTrack],
+        currentQueueIndex: 0,
+        currentTrack,
+        currentProgram: {
+          source: "chat_switch",
+          sessionId: "program_switch",
+          title: "Quiet Set",
+          userRequest: "change",
+          generatedAt: Date.now(),
+          tracks: [currentTrack, quietTrack],
+        },
+      };
+      return {
+        status: "success",
+        djMessage: "那我给你换一组更安静的。",
+        ttsAudioPath: "data/audio/switch.wav",
+        tracks: [quietTrack],
+        reason: "test",
+        programTitle: "Quiet Set",
+        shouldStartTrack: false,
+        currentTrackPreserved: true,
+      };
     });
 
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
     await new Promise<void>((resolve) => ws.on("open", resolve));
 
-    ws.send(JSON.stringify({ type: "chat", data: { text: "来点安静一点的歌" } }));
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "chat", data: { text: "change" } }));
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("timeout waiting for switch program")), 3000);
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for switch queue state")), 3000);
       const check = setInterval(() => {
-        if (vi.mocked(pipeline.runChatSwitchProgram).mock.calls.length > 0) {
+        if (messages.some((m) => (
+          m.type === "state"
+          && Array.isArray(m.data?.radioQueue)
+          && m.data.radioQueue.some((track: any) => track?.name === "Quiet Song")
+        ))) {
           clearInterval(check);
           clearTimeout(timeout);
           resolve();
@@ -2180,9 +2241,242 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("来点安静一点的歌", {
+    const stateMessages = messages.filter((m) => m.type === "state");
+    const switchState = stateMessages.find((m) => (
+      Array.isArray(m.data?.radioQueue)
+      && m.data.radioQueue.some((track: any) => track?.name === "Quiet Song")
+    ));
+    expect(switchState?.data?.currentProgram).toEqual(expect.objectContaining({
+      source: "chat_switch",
+      userRequest: "change",
+    }));
+    expect(switchState?.data?.radioQueue?.[0]).toEqual(expect.objectContaining({ name: "Song A" }));
+    expect(switchState?.data?.radioQueue?.slice(1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Quiet Song" }),
+    ]));
+    expect(switchState?.data?.radioQueue?.slice(1)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Old Upcoming" }),
+    ]));
+    expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("change", {
       preserveCurrentTrack: true,
     });
+    expect(messages.some((m) => m.type === "dj_message" && m.data?.text === "那我给你换一组更安静的。")).toBe(true);
+
+    ws.close();
+  });
+
+  it("chat 里的低置信音乐表达会通过语义路由重编并广播新节目单", async () => {
+    const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    const pipeline = await import("./pipeline.js");
+
+    const currentTrack = {
+      id: "1",
+      name: "Song A",
+      artist: "Artist A",
+      url: "url-a",
+      urlExpiresAt: Date.now() + 10 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    };
+    const oldUpcomingTrack = { id: "2", name: "Noisy Old Song", artist: "Artist B", url: "url-b", duration: 100 };
+    const quietTrack = { id: "9", name: "Quiet Semantic Song", artist: "Artist Q", url: "url-q", picUrl: "pic-q", duration: 90 };
+    let currentState = {
+      status: "playing",
+      currentTrack,
+      radioQueue: [currentTrack, oldUpcomingTrack],
+      currentQueueIndex: 0,
+      currentProgram: { source: "startup", sessionId: "program_old", title: "Old Set", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      discoveryCandidates: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      favorites: [],
+      lastInteraction: Date.now(),
+      playlists: [],
+      neteaseSnapshot: null,
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.addChatMessage).mockImplementation(async (message: any) => {
+      currentState = {
+        ...currentState,
+        chatHistory: [
+          ...currentState.chatHistory,
+          { ...message, timestamp: message.timestamp ?? Date.now() },
+        ],
+      };
+      return currentState;
+    });
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      intent: "style_change",
+      action: "replan_queue",
+      confidence: 0.88,
+      reason: "listener wants less noisy music",
+    });
+    vi.mocked(pipeline.runChatSwitchProgram).mockImplementation(async (userText: string) => {
+      currentState = {
+        ...currentState,
+        status: "playing",
+        radioQueue: [currentTrack, quietTrack],
+        currentQueueIndex: 0,
+        currentTrack,
+        currentProgram: {
+          source: "chat_switch",
+          sessionId: "program_semantic",
+          title: "Quiet Set",
+          userRequest: userText,
+          generatedAt: Date.now(),
+          tracks: [currentTrack, quietTrack],
+        },
+      };
+      return {
+        status: "success",
+        djMessage: "我会把后面换得没那么吵。",
+        ttsAudioPath: "data/audio/semantic-switch.wav",
+        tracks: [quietTrack],
+        reason: "test",
+        programTitle: "Quiet Set",
+        shouldStartTrack: false,
+        currentTrackPreserved: true,
+      };
+    });
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "chat", data: { text: "来点没那么吵的" } }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for semantic switch queue state")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => (
+          m.type === "state"
+          && Array.isArray(m.data?.radioQueue)
+          && m.data.radioQueue.some((track: any) => track?.name === "Quiet Semantic Song")
+        ))) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    const switchState = messages.find((m) => (
+      m.type === "state"
+      && Array.isArray(m.data?.radioQueue)
+      && m.data.radioQueue.some((track: any) => track?.name === "Quiet Semantic Song")
+    ));
+    expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 20_000);
+    expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("来点没那么吵的", {
+      preserveCurrentTrack: true,
+    });
+    expect(switchState?.data?.currentProgram).toEqual(expect.objectContaining({
+      source: "chat_switch",
+      userRequest: "来点没那么吵的",
+    }));
+    expect(switchState?.data?.radioQueue?.[0]).toEqual(expect.objectContaining({ name: "Song A" }));
+    expect(switchState?.data?.radioQueue?.slice(1)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Quiet Semantic Song" }),
+    ]));
+    expect(switchState?.data?.radioQueue?.slice(1)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Noisy Old Song" }),
+    ]));
+
+    ws.close();
+  });
+
+  it("chat 里的语义路由失败时不会重编节目单且会正常回复", async () => {
+    const db = await import("./db.js");
+    const claude = await import("./claude.js");
+    const pipeline = await import("./pipeline.js");
+    const tts = await import("./tts.js");
+
+    const currentTrack = {
+      id: "1",
+      name: "Song A",
+      artist: "Artist A",
+      url: "url-a",
+      urlExpiresAt: Date.now() + 10 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    };
+    const oldUpcomingTrack = { id: "2", name: "Noisy Old Song", artist: "Artist B", url: "url-b", duration: 100 };
+    let currentState = {
+      status: "playing",
+      currentTrack,
+      radioQueue: [currentTrack, oldUpcomingTrack],
+      currentQueueIndex: 0,
+      currentProgram: { source: "startup", sessionId: "program_old", title: "Old Set", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      discoveryCandidates: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      favorites: [],
+      lastInteraction: Date.now(),
+      playlists: [],
+      neteaseSnapshot: null,
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.addChatMessage).mockImplementation(async (message: any) => {
+      currentState = {
+        ...currentState,
+        chatHistory: [
+          ...currentState.chatHistory,
+          { ...message, timestamp: message.timestamp ?? Date.now() },
+        ],
+      };
+      return currentState;
+    });
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("semantic timeout"));
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/fallback-chat.wav",
+    });
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "chat", data: { text: "来点没那么吵的" } }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for fallback chat reply")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "dj_message")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(pipeline.runChatSwitchProgram).not.toHaveBeenCalled();
+    expect(messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("我在听"))).toBe(true);
+    expect(currentState.radioQueue).toEqual([
+      expect.objectContaining({ name: "Song A" }),
+      expect.objectContaining({ name: "Noisy Old Song" }),
+    ]);
+    expect(currentState.currentProgram).toEqual(expect.objectContaining({
+      source: "startup",
+      title: "Old Set",
+    }));
 
     ws.close();
   });

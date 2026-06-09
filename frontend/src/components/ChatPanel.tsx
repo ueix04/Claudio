@@ -110,8 +110,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   });
 
   return (
-    <div className="flex flex-col h-full w-full claudio-theme-bg claudio-grid-bg relative claudio-theme-text">
-      <header className="flex items-center justify-between p-4 border-b claudio-theme-border flex-shrink-0 bg-[color:var(--claudio-surface)]/70 backdrop-blur-sm">
+    <div className="chat-panel-root flex flex-col h-full w-full claudio-theme-bg claudio-grid-bg relative claudio-theme-text">
+      <header className="chat-panel-header flex items-center justify-between p-4 border-b claudio-theme-border flex-shrink-0 bg-[color:var(--claudio-surface)]/70 backdrop-blur-sm">
         <div className="flex min-w-0 items-center gap-4">
           <div className="flex flex-shrink-0 items-center gap-2">
             <span className="pulse-dot h-2.5 w-2.5 rounded-full bg-[color:var(--claudio-accent)] shadow-[0_0_10px_var(--claudio-neon)]"></span>
@@ -143,11 +143,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="chat-header-actions flex items-center gap-3">
           {djStatus === 'live' && (
-            <div className="flex items-center gap-2">
-              <span className="text-sm claudio-theme-accent uppercase tracking-widest">LIVE</span>
-              <span className="text-sm claudio-theme-accent">·</span>
+            <div className="chat-live-meta flex items-center gap-2">
+              <span className="chat-live-label text-sm claudio-theme-accent uppercase tracking-widest">LIVE</span>
+              <span className="chat-live-separator text-sm claudio-theme-accent">·</span>
               <button
                 onClick={handleVoicePresetToggle}
                 disabled={isUpdatingVoicePreset}
@@ -160,6 +160,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           )}
           <button 
             onClick={toggleChatFullscreen}
+            aria-label={isFullscreen ? "Exit chat fullscreen" : "Open chat fullscreen"}
+            title={isFullscreen ? "Exit chat fullscreen" : "Open chat fullscreen"}
             className="claudio-theme-text-dim hover:text-[color:var(--claudio-text-strong)] transition-colors focus:outline-none"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -175,7 +177,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
       <div 
         ref={scrollRef}
-        className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 claudio-scrollbar relative"
+        className="chat-feed-scroll flex-1 overflow-y-auto p-4 md:p-6 space-y-6 claudio-scrollbar relative"
       >
         {feed.length === 0 ? (
           <div className="h-full flex items-center justify-center claudio-theme-text-muted text-sm">
@@ -266,12 +268,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       )}
 
-      <div className="claudio-bottom-bar flex h-[72px] flex-shrink-0 items-center justify-between border-t claudio-theme-border p-3 md:p-4 relative z-20">
-        <div className="text-[10px] claudio-theme-text-muted w-24 tracking-widest uppercase">
+      <div className="chat-bottom-bar claudio-bottom-bar flex h-[72px] flex-shrink-0 items-center justify-between border-t claudio-theme-border p-3 md:p-4 relative z-20">
+        <div className="chat-bottom-brand text-[10px] claudio-theme-text-muted w-24 tracking-widest uppercase">
           CLAUDIO FM
         </div>
         
-        <div className="flex-1 flex items-center max-w-2xl mx-auto space-x-3 px-2">
+        <div className="chat-input-row flex-1 flex items-center max-w-2xl mx-auto gap-3 px-2">
           <input 
             type="text"
             value={inputText}
@@ -302,7 +304,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center justify-end text-[10px] claudio-theme-text-muted w-24 tracking-widest uppercase">
+        <div className="chat-bottom-status flex items-center justify-end text-[10px] claudio-theme-text-muted w-24 tracking-widest uppercase">
           {isConnected ? (
             <span className="flex items-center">CONNECTED</span>
           ) : (

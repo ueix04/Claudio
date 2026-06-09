@@ -285,7 +285,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   statusText,
   status,
 }) => {
-  const { togglePlayerFullscreen, theme, setTheme, audioEffect, setAudioEffect } = useLayout();
+  const { togglePlayerFullscreen, theme, setTheme, audioEffect, setAudioEffect, isCompactLayout } = useLayout();
   const [activeView, setActiveView] = useState<PlayerView>("list");
   const [displayMode, setDisplayMode] = useState<PlayerDisplayMode>("playlist");
   const [isQueueExpanded, setIsQueueExpanded] = useState(false);
@@ -573,6 +573,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const librarySignalText = onlineSourceCount > 0
     ? `${onlineSourceCount} online source${onlineSourceCount === 1 ? "" : "s"} ready`
     : "Online sources standby";
+  const playlistClockDotSize = isCompactLayout ? 6 : 9;
+  const playlistClockGap = isCompactLayout ? 1 : 2;
+  const heroClockDotSize = isCompactLayout ? 7 : 11;
+  const heroClockGap = isCompactLayout ? 2 : 4;
   const formatSourceName = (source: string) =>
     source === "local_library" ? "LOCAL"
       : source === "netease_legacy" ? "NETEASE"
@@ -844,6 +848,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             return next;
           });
         }}
+        aria-label="Open player settings"
+        title="Open player settings"
         className="ctrl-btn utility-compact-btn text-[#a1a1aa] hover:text-white transition-colors"
       >
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -852,7 +858,12 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         </svg>
       </button>
       {renderSettingsMenu()}
-      <button onClick={togglePlayerFullscreen} className="ctrl-btn utility-compact-btn text-[#a1a1aa] hover:text-white transition-colors">
+      <button
+        onClick={togglePlayerFullscreen}
+        aria-label={isFullscreen ? "Exit player fullscreen" : "Open player fullscreen"}
+        title={isFullscreen ? "Exit player fullscreen" : "Open player fullscreen"}
+        className="ctrl-btn utility-compact-btn text-[#a1a1aa] hover:text-white transition-colors"
+      >
         {isFullscreen ? (
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
@@ -888,7 +899,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const renderPlayerDock = () => (
     <div className="player-dock-shell border-t claudio-theme-border claudio-bottom-bar">
       {renderDockProgress()}
-      <div className="mx-auto flex h-[72px] w-full max-w-5xl items-center px-6">
+      <div className="player-dock-inner mx-auto flex h-[72px] w-full max-w-5xl items-center px-6">
         <div className="player-dock-grid w-full">
           <div className="flex min-w-0 flex-1 basis-[220px] items-center gap-4">
             {renderVisualizer("compact")}
@@ -919,7 +930,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   );
 
   const renderEmptyState = () => (
-    <div className="relative w-full h-full flex flex-col claudio-grid-bg claudio-theme-bg claudio-theme-text p-8">
+    <div className="player-panel-root player-panel-empty-state relative w-full h-full flex flex-col claudio-grid-bg claudio-theme-bg claudio-theme-text p-8">
       {renderThemeToggle()}
       <div className="flex flex-col items-center justify-center pt-10 pb-8">
         <div className="pixel-clock flex flex-col items-center gap-4 mb-6">
@@ -929,8 +940,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
           </div>
           <PixelClock
             value={now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
-            dotSize={11}
-            gap={4}
+            dotSize={heroClockDotSize}
+            gap={heroClockGap}
             className="drop-shadow-[0_0_18px_rgba(255,255,255,0.08)]"
           />
           <div className="flex items-center gap-4 claudio-theme-text-dim font-medium text-lg uppercase tracking-wider">
@@ -1264,8 +1275,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
             </div>
             <PixelClock
               value={now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
-              dotSize={11}
-              gap={4}
+              dotSize={heroClockDotSize}
+              gap={heroClockGap}
               className="drop-shadow-[0_0_18px_rgba(255,255,255,0.08)]"
             />
             <div className="flex items-center gap-4 claudio-theme-text-dim font-medium text-lg uppercase tracking-wider">
@@ -2301,8 +2312,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   }
 
   return (
-    <div className="relative w-full h-full flex flex-col claudio-grid-bg claudio-theme-bg claudio-theme-text font-sans">
-      <div className="relative px-6 pt-5">
+    <div className="player-panel-root relative w-full h-full flex flex-col claudio-grid-bg claudio-theme-bg claudio-theme-text font-sans">
+      <div className="player-panel-topbar relative px-6 pt-5">
         <div className="max-w-4xl mx-auto w-full">
           <div className={`flex min-w-0 flex-col gap-2 ${displayMode === "playlist" ? "playlist-topbar" : ""}`}>
             <div className={`flex flex-wrap items-start gap-4 ${displayMode === "clock" ? "opacity-0 pointer-events-none h-0 overflow-hidden" : ""}`}>
@@ -2310,8 +2321,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 <div className="playlist-clock-stack">
                   <PixelClock
                     value={now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
-                    dotSize={9}
-                    gap={2}
+                    dotSize={playlistClockDotSize}
+                    gap={playlistClockGap}
                     className="drop-shadow-[0_0_10px_rgba(0,0,0,0.05)]"
                   />
                   <div className="playlist-clock-meta">
@@ -2338,7 +2349,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
         </div>
       </div>
 
-      <div className={`flex-1 p-6 ${displayMode === "playlist" ? "overflow-hidden" : ""}`}>
+      <div className={`player-panel-stage flex-1 p-6 ${displayMode === "playlist" ? "overflow-hidden" : ""}`}>
         <div className={`max-w-4xl mx-auto ${displayMode === "playlist" ? "h-full" : "pb-10"}`}>
           {displayMode === "playlist" ? renderPlaylistStage() : renderClockStage()}
         </div>

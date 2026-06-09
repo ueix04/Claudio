@@ -54,6 +54,51 @@ const DISCOVERY_FALLBACK_DIRECTIONS = [
   },
 ];
 
+const CHAT_SWITCH_FALLBACK_TRACK_GROUPS = {
+  electronic: [
+    { title: "Strobe", artist: "deadmau5" },
+    { title: "Shelter", artist: "Porter Robinson, Madeon" },
+    { title: "Midnight City", artist: "M83" },
+    { title: "Faded", artist: "Alan Walker" },
+    { title: "After Midnight", artist: "KLYMVX, Emily Zeck" },
+  ],
+  calm: [
+    { title: "The Scientist", artist: "Coldplay" },
+    { title: "Yellow", artist: "Coldplay" },
+    { title: "Fix You", artist: "Coldplay" },
+    { title: "Let Her Go", artist: "Passenger" },
+    { title: "夜空中最亮的星", artist: "逃跑计划" },
+  ],
+  rock: [
+    { title: "Numb", artist: "Linkin Park" },
+    { title: "Viva La Vida", artist: "Coldplay" },
+    { title: "Believer", artist: "Imagine Dragons" },
+    { title: "Radioactive", artist: "Imagine Dragons" },
+    { title: "夜空中最亮的星", artist: "逃跑计划" },
+  ],
+  jazz: [
+    { title: "Fly Me To The Moon", artist: "Frank Sinatra" },
+    { title: "What A Wonderful World", artist: "Louis Armstrong" },
+    { title: "Autumn Leaves", artist: "Bill Evans" },
+    { title: "Feeling Good", artist: "Nina Simone" },
+    { title: "Dream A Little Dream Of Me", artist: "Ella Fitzgerald" },
+  ],
+  hipHop: [
+    { title: "Lose Yourself", artist: "Eminem" },
+    { title: "See You Again", artist: "Wiz Khalifa, Charlie Puth" },
+    { title: "Sunflower", artist: "Post Malone, Swae Lee" },
+    { title: "God's Plan", artist: "Drake" },
+    { title: "Mockingbird", artist: "Eminem" },
+  ],
+  fresh: [
+    { title: "After Midnight", artist: "KLYMVX, Emily Zeck" },
+    { title: "Midnight City", artist: "M83" },
+    { title: "Sweet Disposition", artist: "The Temper Trap" },
+    { title: "Electric Feel", artist: "MGMT" },
+    { title: "Dog Days Are Over", artist: "Florence + The Machine" },
+  ],
+} satisfies Record<string, Array<{ title: string; artist: string }>>;
+
 async function buildNcmPlaylistContext(): Promise<string> {
   const indexedSummary = await tasteProfile.summarizeTasteProfile();
   if (indexedSummary) {
@@ -351,7 +396,7 @@ async function runDiscoveryScout(
   try {
     const response = await claude.callJsonLLM<DiscoveryScoutResponse>(
       buildDiscoveryScoutPrompt(context, purpose),
-      25_000,
+      claude.getLlmTaskTimeoutMs("discovery"),
     );
     if (Array.isArray(response.directions) && response.directions.length > 0) {
       return response;
@@ -886,6 +931,59 @@ function buildFallbackStartupProgramResponse(context: MusicContext): StationProg
   };
 }
 
+function selectChatSwitchFallbackLineup(userText: string, context: MusicContext): ProgramRequestedTrack[] {
+  const normalized = userText.trim().toLowerCase();
+  if (/电子|电音|edm|electronic|synth|techno|house/.test(normalized)) {
+    return CHAT_SWITCH_FALLBACK_TRACK_GROUPS.electronic;
+  }
+  if (/安静|轻松|舒缓|温柔|治愈|calm|quiet|soft|chill/.test(normalized)) {
+    return CHAT_SWITCH_FALLBACK_TRACK_GROUPS.calm;
+  }
+  if (/摇滚|更燃|燃一点|rock|energetic/.test(normalized)) {
+    return CHAT_SWITCH_FALLBACK_TRACK_GROUPS.rock;
+  }
+  if (/爵士|jazz/.test(normalized)) {
+    return CHAT_SWITCH_FALLBACK_TRACK_GROUPS.jazz;
+  }
+  if (/说唱|嘻哈|hip[- ]?hop|rap/.test(normalized)) {
+    return CHAT_SWITCH_FALLBACK_TRACK_GROUPS.hipHop;
+  }
+
+  const candidateLineup = context.recommendationCandidates.slice(0, 5).map((candidate) => ({
+    id: candidate.id,
+    title: candidate.title,
+    artist: candidate.artist,
+  }));
+  if (candidateLineup.length >= 3) {
+    return candidateLineup;
+  }
+
+  return CHAT_SWITCH_FALLBACK_TRACK_GROUPS.fresh;
+}
+
+function buildFallbackChatSwitchProgramResponse(userText: string, context: MusicContext): StationProgramResponse {
+  const language = djLanguage.resolveDjCopyLanguage(context.state.djProfile);
+  const useEnglish = language === "en";
+  const fallbackLineup = selectChatSwitchFallbackLineup(userText, context);
+
+  return {
+    title: useEnglish ? "Fresh Turn" : "Claudio 换歌续播",
+    mood: useEnglish ? "steady, refreshed continuity" : "稳定、换向、继续播放",
+    plannedMinutes: 18,
+    speechPlan: radioSession.buildDefaultSpeechPlan(fallbackLineup.length),
+    say: useEnglish
+      ? "Got it. I'll reshape the next stretch with a steadier fallback set and keep the handoff moving."
+      : "收到，我先把后面的节目单换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。",
+    ttsText: useEnglish
+      ? "Got it. I'll reshape the next stretch with a steadier fallback set and keep the handoff moving."
+      : "收到，我先把后面的节目单换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。",
+    lineup: fallbackLineup,
+    reason: useEnglish
+      ? `The model could not finish the custom switch, so Claudio used a keyword-based fallback set for: ${userText}`
+      : `模型暂时没能完成定制换歌，先用关键词候选承接这次请求：${userText}`,
+  };
+}
+
 async function speakDjText(
   text: string,
   profile: db.DjProfile,
@@ -985,7 +1083,10 @@ export async function runStartupRadioProgram(
     const prompt = buildStartupProgramPrompt(context);
     let response: StationProgramResponse;
     try {
-      response = await claude.callJsonLLM<StationProgramResponse>(prompt, 35_000);
+      response = await claude.callJsonLLM<StationProgramResponse>(
+        prompt,
+        claude.getLlmTaskTimeoutMs("startup"),
+      );
     } catch (error) {
       console.warn("[radio] startup LLM failed, using deterministic fallback program:", error);
       response = buildFallbackStartupProgramResponse(context);
@@ -1042,7 +1143,18 @@ export async function runChatSwitchProgram(
       candidateLimit: 24,
     });
     const prompt = buildChatSwitchProgramPrompt(userText, context);
-    const response = await claude.callJsonLLM<StationProgramResponse>(prompt, 30_000);
+    let response: StationProgramResponse;
+    let usedFallbackProgram = false;
+    try {
+      response = await claude.callJsonLLM<StationProgramResponse>(
+        prompt,
+        claude.getLlmTaskTimeoutMs("chat_switch"),
+      );
+    } catch (error) {
+      console.warn("[radio] chat switch LLM failed, using deterministic fallback program:", error);
+      response = buildFallbackChatSwitchProgramResponse(userText, context);
+      usedFallbackProgram = true;
+    }
 
     await db.setStatus("speaking");
     const [ttsAudioPath, stableTracks] = await Promise.all([
@@ -1060,7 +1172,9 @@ export async function runChatSwitchProgram(
         { minTracks: 3, maxTracks: 5 },
       ),
     ]);
-    const playableTracks = await addControlledDiscoveriesToProgram(stableTracks, context);
+    const playableTracks = usedFallbackProgram
+      ? stableTracks
+      : await addControlledDiscoveriesToProgram(stableTracks, context);
 
     const currentTrackPreserved = Boolean(options?.preserveCurrentTrack && context.state.currentTrack);
     await applyProgramQueue("chat_switch", response, playableTracks, context, userText, {

@@ -5,6 +5,19 @@ const DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_LLM_MODEL = "gpt-4o-mini";
 const LLM_PROVIDER_ENV_PREFIX = "LLM_";
 
+export type LlmTaskTimeoutName =
+  | "semantic_router"
+  | "startup"
+  | "chat_switch"
+  | "discovery";
+
+const LLM_TASK_TIMEOUT_DEFAULTS = {
+  semantic_router: 20_000,
+  startup: 120_000,
+  chat_switch: 90_000,
+  discovery: 45_000,
+} satisfies Record<LlmTaskTimeoutName, number>;
+
 type LlmProvider = {
   name: string;
   apiKey: string;
@@ -43,6 +56,15 @@ function parsePositiveInt(value: string | undefined, name: string): number | und
   }
 
   return parsed;
+}
+
+function getTaskTimeoutEnvName(task: LlmTaskTimeoutName): string {
+  return `${LLM_PROVIDER_ENV_PREFIX}${task.toUpperCase()}_TIMEOUT_MS`;
+}
+
+export function getLlmTaskTimeoutMs(task: LlmTaskTimeoutName): number {
+  const envName = getTaskTimeoutEnvName(task);
+  return parsePositiveInt(process.env[envName], envName) ?? LLM_TASK_TIMEOUT_DEFAULTS[task];
 }
 
 function normalizeProviderEnvName(name: string): string {

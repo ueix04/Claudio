@@ -18,7 +18,7 @@ import * as radioStyle from "./radio-style.js";
 import * as tasteProfile from "./taste-profile.js";
 import * as tts from "./tts.js";
 import * as weather from "./weather.js";
-import { routeChatIntent, type ChatRoute } from "./agent-router.js";
+import { routeChatIntentWithSemanticFallback, type ChatRoute, type ChatRouteContext } from "./agent-router.js";
 import { audioDir, frontendDistDir } from "./runtime.js";
 
 interface ChatReplyPayload {
@@ -2387,10 +2387,16 @@ wss.on("connection", async (ws) => {
         if (!text) return;
 
         const userTimestamp = Date.now();
-        await db.addChatMessage({ role: "user", text, timestamp: userTimestamp });
+        const stateAfterUserMessage = await db.addChatMessage({ role: "user", text, timestamp: userTimestamp });
         broadcast({ type: "chat", data: { role: "user", text, timestamp: userTimestamp } });
 
-        const chatRoute = routeChatIntent(text);
+        const routeSourceState = stateAfterUserMessage ?? await db.getState();
+        const routeContext: ChatRouteContext = {
+          currentTrack: routeSourceState.currentTrack,
+          currentProgram: routeSourceState.currentProgram,
+          chatHistory: routeSourceState.chatHistory,
+        };
+        const chatRoute = await routeChatIntentWithSemanticFallback(text, routeContext);
         if (chatRoute.action === "answer_weather") {
           await answerWeatherChat(text);
           return;

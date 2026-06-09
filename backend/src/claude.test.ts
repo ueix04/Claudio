@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { extractJson, callClaude, callJsonLLM, callTextLLM, buildContextPrompt } from "./claude";
+import { extractJson, callClaude, callJsonLLM, callTextLLM, buildContextPrompt, getLlmTaskTimeoutMs } from "./claude";
 
 describe("extractJson", () => {
   const validPayload = {
@@ -167,6 +167,10 @@ describe("callClaude", () => {
     delete process.env.LLM_BACKUP_BASE_URL;
     delete process.env.LLM_BACKUP_MODEL;
     delete process.env.LLM_BACKUP_TIMEOUT_MS;
+    delete process.env.LLM_SEMANTIC_ROUTER_TIMEOUT_MS;
+    delete process.env.LLM_CHAT_SWITCH_TIMEOUT_MS;
+    delete process.env.LLM_STARTUP_TIMEOUT_MS;
+    delete process.env.LLM_DISCOVERY_TIMEOUT_MS;
   };
 
   const configureMultiProviderEnv = () => {
@@ -193,6 +197,23 @@ describe("callClaude", () => {
   afterEach(() => {
     clearLlmEnv();
     vi.unstubAllGlobals();
+  });
+
+  it("task timeout defaults are separate from provider timeouts", () => {
+    configureMultiProviderEnv();
+
+    expect(getLlmTaskTimeoutMs("semantic_router")).toBe(20_000);
+    expect(getLlmTaskTimeoutMs("chat_switch")).toBe(90_000);
+    expect(getLlmTaskTimeoutMs("startup")).toBe(120_000);
+    expect(getLlmTaskTimeoutMs("discovery")).toBe(45_000);
+  });
+
+  it("task timeout can be overridden from env", () => {
+    process.env.LLM_CHAT_SWITCH_TIMEOUT_MS = "65000";
+    process.env.LLM_STARTUP_TIMEOUT_MS = "100000";
+
+    expect(getLlmTaskTimeoutMs("chat_switch")).toBe(65_000);
+    expect(getLlmTaskTimeoutMs("startup")).toBe(100_000);
   });
 
   it("成功调用并返回解析结果", async () => {

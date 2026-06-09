@@ -5,6 +5,7 @@ interface LayoutContextValue {
   mode: LayoutMode;
   theme: ThemeMode;
   audioEffect: AudioEffectMode;
+  isCompactLayout: boolean;
   setMode: (mode: LayoutMode) => void;
   setTheme: (theme: ThemeMode) => void;
   setAudioEffect: (effect: AudioEffectMode) => void;
@@ -25,8 +26,16 @@ interface LayoutManagerProps {
   children: ReactNode;
 }
 
+const COMPACT_LAYOUT_QUERY = "(max-width: 899px)";
+
+const getCompactLayoutState = () => {
+  if (typeof window === "undefined" || !("matchMedia" in window)) return false;
+  return window.matchMedia(COMPACT_LAYOUT_QUERY).matches;
+};
+
 export function LayoutManager({ children }: LayoutManagerProps) {
   const [mode, setMode] = useState<LayoutMode>("split");
+  const [isCompactLayout, setIsCompactLayout] = useState(getCompactLayoutState);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "dark";
     const stored = window.localStorage.getItem("claudio-theme");
@@ -51,6 +60,23 @@ export function LayoutManager({ children }: LayoutManagerProps) {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined" || !("matchMedia" in window)) return;
+
+    const mediaQuery = window.matchMedia(COMPACT_LAYOUT_QUERY);
+    const handleChange = () => setIsCompactLayout(mediaQuery.matches);
+
+    handleChange();
+
+    if (mediaQuery.addEventListener) {
+      mediaQuery.addEventListener("change", handleChange);
+      return () => mediaQuery.removeEventListener("change", handleChange);
+    }
+
+    mediaQuery.addListener(handleChange);
+    return () => mediaQuery.removeListener(handleChange);
+  }, []);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
     window.localStorage.setItem("claudio-theme", theme);
@@ -67,6 +93,7 @@ export function LayoutManager({ children }: LayoutManagerProps) {
         mode,
         theme,
         audioEffect,
+        isCompactLayout,
         setMode,
         setTheme,
         setAudioEffect,

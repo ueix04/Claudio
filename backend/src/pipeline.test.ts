@@ -69,6 +69,12 @@ describe("Pipeline Engine", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(claude.getLlmTaskTimeoutMs).mockImplementation((task) => ({
+      semantic_router: 20_000,
+      startup: 120_000,
+      chat_switch: 90_000,
+      discovery: 45_000,
+    })[task]);
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
     delete process.env.LOCAL_MUSIC_ENABLED;
     delete process.env.LOCAL_MUSIC_DIRS;
@@ -440,7 +446,7 @@ describe("Pipeline Engine", () => {
     const result = await pipeline.runPipeline("random_discover");
 
     expect(claude.callLLM).not.toHaveBeenCalled();
-    expect(claude.callJsonLLM).toHaveBeenCalled();
+    expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 45_000);
     expect(netease.searchSongs).toHaveBeenCalledWith("Discovery Lane", 5);
     expect(result.tracks.map((track) => track.name)).toEqual(["Stable Anchor", "Discovery Song"]);
     expect(db.addDiscoveryCandidates).toHaveBeenCalledWith([
@@ -809,6 +815,7 @@ describe("Pipeline Engine", () => {
     const prompt = String(vi.mocked(claude.callJsonLLM).mock.calls[0]?.[0] ?? "");
     expect(prompt).toContain("natural English");
     expect(prompt).not.toContain("中文 40-120 字");
+    expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 120_000);
   });
 
   it("should fall back to a deterministic startup program when LLM is rate limited", async () => {
@@ -970,6 +977,7 @@ describe("Pipeline Engine", () => {
     const result = await pipeline.runChatSwitchProgram("换一组安静一点的歌");
 
     expect(result.djMessage).toBe("那我给你换一组更安静的。");
+    expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 90_000);
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
     expect(String(vi.mocked(claude.callJsonLLM).mock.calls[0]?.[0] ?? "")).toContain("天气不是这次调整的依据。");
     expect(db.setRadioQueue).toHaveBeenCalledWith(
@@ -978,6 +986,89 @@ describe("Pipeline Engine", () => {
         program: expect.objectContaining({
           source: "chat_switch",
           userRequest: "换一组安静一点的歌",
+        }),
+      }),
+    );
+  });
+
+  it("should use deterministic fallback when chat switch LLM fails", async () => {
+    const currentTrack = {
+      id: "1",
+      name: "Old Song",
+      artist: "Old Artist",
+      url: "old-url",
+      picUrl: "old-pic",
+      duration: 100,
+    };
+
+    vi.mocked(db.getState).mockResolvedValue({
+      ...baseState,
+      status: "playing",
+      currentTrack,
+      radioQueue: [currentTrack],
+      currentQueueIndex: 0,
+    });
+    vi.mocked(db.getNeteaseSnapshot).mockResolvedValue(null);
+    vi.mocked(db.summarizePlaylists).mockReturnValue("【收藏】A - B");
+    vi.mocked(tasteProfile.getTasteProfile).mockResolvedValue(null);
+    vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
+    vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("LLM Error"));
+    vi.mocked(tts.speak).mockResolvedValue({
+      audioBuffer: new ArrayBuffer(0),
+      format: "wav",
+      cached: false,
+      cachePath: "data/audio/fallback-switch.wav",
+    });
+    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
+      const index = vi.mocked(netease.searchSongs).mock.calls.length;
+      const fallbackTrack = keyword.includes("Strobe")
+        ? { name: "Strobe", artist: "deadmau5" }
+        : keyword.includes("Shelter")
+          ? { name: "Shelter", artist: "Porter Robinson, Madeon" }
+          : keyword.includes("Midnight City")
+            ? { name: "Midnight City", artist: "M83" }
+            : keyword.includes("Faded")
+              ? { name: "Faded", artist: "Alan Walker" }
+              : { name: "After Midnight", artist: "KLYMVX, Emily Zeck" };
+      return mockNeteaseSearchTrack({
+        id: 2000 + index,
+        name: fallbackTrack.name,
+        artist: fallbackTrack.artist,
+        duration: 240_000,
+      });
+    });
+    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
+
+    const result = await pipeline.runChatSwitchProgram("我要听电子音乐", {
+      preserveCurrentTrack: true,
+    });
+
+    expect(result.status).toBe("success");
+    expect(result.currentTrackPreserved).toBe(true);
+    expect(result.shouldStartTrack).toBe(false);
+    expect(result.djMessage).toContain("收到");
+    expect(db.setStatus).toHaveBeenCalledWith("thinking");
+    expect(db.setStatus).toHaveBeenCalledWith("speaking");
+    expect(db.setStatus).toHaveBeenCalledWith("playing");
+    expect(db.setStatus).not.toHaveBeenCalledWith("error");
+    expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 90_000);
+    expect(claude.callJsonLLM).toHaveBeenCalledTimes(1);
+    const [queue, options] = vi.mocked(db.setRadioQueue).mock.calls[0] ?? [];
+    expect(queue).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "1", name: "Old Song", url: "old-url" }),
+      expect.objectContaining({ name: "Strobe", artist: "deadmau5", url: expect.stringMatching(/^fallback-url-/) }),
+      expect.objectContaining({ name: "Shelter", artist: "Porter Robinson, Madeon", url: expect.stringMatching(/^fallback-url-/) }),
+      expect.objectContaining({ name: "Midnight City", artist: "M83", url: expect.stringMatching(/^fallback-url-/) }),
+    ]));
+    expect(queue?.[0]).toEqual(expect.objectContaining({ id: "1", name: "Old Song", url: "old-url" }));
+    expect(queue?.length).toBeGreaterThanOrEqual(4);
+    expect(options).toEqual(
+      expect.objectContaining({
+        currentIndex: 0,
+        program: expect.objectContaining({
+          source: "chat_switch",
+          userRequest: "我要听电子音乐",
         }),
       }),
     );

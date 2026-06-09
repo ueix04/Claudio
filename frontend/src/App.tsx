@@ -1,11 +1,13 @@
+import type { CSSProperties } from "react";
 import { LayoutManager, useLayout } from "./components/LayoutManager";
 import { PlayerPanel } from "./components/PlayerPanel";
 import { ChatPanel } from "./components/ChatPanel";
+import { MobileRadioLayout } from "./components/MobileRadioLayout";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { resolveAppShellAudioEffectClass } from "./audio-effects";
 
 function AppLayout() {
-  const { mode, audioEffect } = useLayout();
+  const { mode, audioEffect, isCompactLayout } = useLayout();
   const {
     hasHydratedState,
     playerState,
@@ -65,6 +67,7 @@ function AppLayout() {
   const playerWidth = mode === "chat-fullscreen" ? "0%" : mode === "player-fullscreen" ? "100%" : "50%";
   const chatWidth = mode === "player-fullscreen" ? "0%" : mode === "chat-fullscreen" ? "100%" : "50%";
   const appShellEffectClass = resolveAppShellAudioEffectClass(status, audioEffect);
+  const panelStyle = (width: string) => ({ "--app-panel-width": width } as CSSProperties);
 
   return (
     <div className="app-frame h-screen h-dvh w-screen overflow-hidden p-3 md:p-4">
@@ -72,82 +75,122 @@ function AppLayout() {
         <div className="app-shell-vignette pointer-events-none absolute inset-0 z-0"></div>
         <div className="absolute inset-0 app-shell-grid pointer-events-none z-0"></div>
         <div className="app-shell-scaled">
-          <div className="relative z-10 h-full w-full flex">
+          <div className={`relative z-10 h-full w-full ${isCompactLayout ? "mobile-radio-host" : `app-panels app-panels-${mode}`}`}>
             <audio ref={audioRef} className="hidden" preload="auto" />
             <audio ref={nextAudioRef} className="hidden" preload="auto" />
             <audio ref={ttsAudioRef} className="hidden" preload="auto" />
 
-            <div
-              className={`app-panel-shell ${mode === "chat-fullscreen" ? "app-panel-shell-hidden" : ""}`}
-              style={{ width: playerWidth }}
-            >
-                <PlayerPanel
-                  playerState={playerState}
-                  favoriteTracks={favoriteTracks}
-                  playHistory={playHistory}
-                  userFeedback={userFeedback}
-                  discoveryCandidates={discoveryCandidates}
-                  tasteProfile={tasteProfile}
-                  isSyncingLibrary={isSyncingLibrary}
-                  lastSyncSummary={lastSyncSummary}
-                  musicSourceStatus={musicSourceStatus}
-                  playbackDiagnostics={playbackDiagnostics}
-                  localLibraryStatus={localLibraryStatus}
-                  localLibraryMatchStatus={localLibraryMatchStatus}
-                  programAudit={programAudit}
-                  listenCheckRecords={listenCheckRecords}
-                  listenAcceptance={listenAcceptance}
-                  isRescanningLocalLibrary={isRescanningLocalLibrary}
-                  utilityNotice={utilityNotice}
-                  visualizerBars={visualizerBars}
-                  onPlayPause={onPlayPause}
-                  onNext={onNext}
-                  onPrevious={onPrevious}
-                  onSeek={onSeek}
-                  onVolumeChange={onVolumeChange}
-                  onToggleFavorite={onToggleFavorite}
-                  onTrackFeedback={onTrackFeedback}
-                  onSelectTrack={onSelectTrack}
-                  onPlaySavedTrack={playSavedTrack}
-                  onUserAvatarUpload={setUserAvatarUrl}
-                  onFullscreenToggle={() => {}}
-                  isFullscreen={mode === "player-fullscreen"}
-                  onTrigger={sendTrigger}
-                  onSyncLibrary={syncNeteaseLibrary}
-                  onRetryFailedSync={retryFailedLibrarySync}
-                  onRescanLocalLibrary={rescanLocalLibrary}
-                  onListenCheckSaved={refreshLibraryData}
-                  isTriggerBusy={isTriggerBusy}
-                  statusText={statusText}
-                  status={status}
-                />
-            </div>
-            <div
-              className={`app-panel-shell ${mode === "player-fullscreen" ? "app-panel-shell-hidden" : ""}`}
-              style={{ width: chatWidth }}
-            >
-                <ChatPanel
-                  messages={messages}
-                  djMessages={djMessages}
-                  status={status}
-                  currentTrack={playerState.currentTrack}
-                  isConnected={isConnected}
-                  djName="Claudio"
-                  djStatus="live"
-                  voicePreset={voicePreset}
-                  isUpdatingVoicePreset={isUpdatingVoicePreset}
-                  userAvatarUrl={userAvatarUrl}
-                  onSendMessage={sendMessage}
-                  onReplayAudio={onReplayAudio}
-                  onVoicePresetChange={updateVoicePreset}
-                  onVoiceAction={() => showUtilityNotice("Voice input coming soon")}
-                  onFullscreenToggle={() => {}}
-                  isFullscreen={mode === "chat-fullscreen"}
-                  subtitle={subtitle}
-                  subtitleFading={subtitleFading}
-                  statusText={statusText}
-                />
-            </div>
+            {isCompactLayout ? (
+              <MobileRadioLayout
+                playerState={playerState}
+                messages={messages}
+                djMessages={djMessages}
+                favoriteTracks={favoriteTracks}
+                playHistory={playHistory}
+                userFeedback={userFeedback}
+                discoveryCandidates={discoveryCandidates}
+                status={status}
+                statusText={statusText}
+                isConnected={isConnected}
+                utilityNotice={utilityNotice}
+                visualizerBars={visualizerBars}
+                voicePreset={voicePreset}
+                isUpdatingVoicePreset={isUpdatingVoicePreset}
+                userAvatarUrl={userAvatarUrl}
+                isTriggerBusy={isTriggerBusy}
+                subtitle={subtitle}
+                subtitleFading={subtitleFading}
+                onSendMessage={sendMessage}
+                onReplayAudio={onReplayAudio}
+                onVoicePresetChange={updateVoicePreset}
+                onVoiceAction={() => showUtilityNotice("Voice input coming soon")}
+                onPlayPause={onPlayPause}
+                onNext={onNext}
+                onPrevious={onPrevious}
+                onSeek={onSeek}
+                onVolumeChange={onVolumeChange}
+                onToggleFavorite={onToggleFavorite}
+                onTrackFeedback={onTrackFeedback}
+                onSelectTrack={onSelectTrack}
+                onTrigger={sendTrigger}
+                onUserAvatarUpload={setUserAvatarUrl}
+                onUtilityNotice={showUtilityNotice}
+              />
+            ) : (
+              <>
+                <div
+                  className={`app-panel-shell app-panel-player ${mode === "chat-fullscreen" ? "app-panel-shell-hidden" : ""}`}
+                  style={panelStyle(playerWidth)}
+                >
+                  <PlayerPanel
+                    playerState={playerState}
+                    favoriteTracks={favoriteTracks}
+                    playHistory={playHistory}
+                    userFeedback={userFeedback}
+                    discoveryCandidates={discoveryCandidates}
+                    tasteProfile={tasteProfile}
+                    isSyncingLibrary={isSyncingLibrary}
+                    lastSyncSummary={lastSyncSummary}
+                    musicSourceStatus={musicSourceStatus}
+                    playbackDiagnostics={playbackDiagnostics}
+                    localLibraryStatus={localLibraryStatus}
+                    localLibraryMatchStatus={localLibraryMatchStatus}
+                    programAudit={programAudit}
+                    listenCheckRecords={listenCheckRecords}
+                    listenAcceptance={listenAcceptance}
+                    isRescanningLocalLibrary={isRescanningLocalLibrary}
+                    utilityNotice={utilityNotice}
+                    visualizerBars={visualizerBars}
+                    onPlayPause={onPlayPause}
+                    onNext={onNext}
+                    onPrevious={onPrevious}
+                    onSeek={onSeek}
+                    onVolumeChange={onVolumeChange}
+                    onToggleFavorite={onToggleFavorite}
+                    onTrackFeedback={onTrackFeedback}
+                    onSelectTrack={onSelectTrack}
+                    onPlaySavedTrack={playSavedTrack}
+                    onUserAvatarUpload={setUserAvatarUrl}
+                    onFullscreenToggle={() => {}}
+                    isFullscreen={mode === "player-fullscreen"}
+                    onTrigger={sendTrigger}
+                    onSyncLibrary={syncNeteaseLibrary}
+                    onRetryFailedSync={retryFailedLibrarySync}
+                    onRescanLocalLibrary={rescanLocalLibrary}
+                    onListenCheckSaved={refreshLibraryData}
+                    isTriggerBusy={isTriggerBusy}
+                    statusText={statusText}
+                    status={status}
+                  />
+                </div>
+                <div
+                  className={`app-panel-shell app-panel-chat ${mode === "player-fullscreen" ? "app-panel-shell-hidden" : ""}`}
+                  style={panelStyle(chatWidth)}
+                >
+                  <ChatPanel
+                    messages={messages}
+                    djMessages={djMessages}
+                    status={status}
+                    currentTrack={playerState.currentTrack}
+                    isConnected={isConnected}
+                    djName="Claudio"
+                    djStatus="live"
+                    voicePreset={voicePreset}
+                    isUpdatingVoicePreset={isUpdatingVoicePreset}
+                    userAvatarUrl={userAvatarUrl}
+                    onSendMessage={sendMessage}
+                    onReplayAudio={onReplayAudio}
+                    onVoicePresetChange={updateVoicePreset}
+                    onVoiceAction={() => showUtilityNotice("Voice input coming soon")}
+                    onFullscreenToggle={() => {}}
+                    isFullscreen={mode === "chat-fullscreen"}
+                    subtitle={subtitle}
+                    subtitleFading={subtitleFading}
+                    statusText={statusText}
+                  />
+                </div>
+              </>
+            )}
 
             {reconnecting && (
               <div className="absolute inset-0 z-50 flex items-center justify-center bg-[color:var(--claudio-overlay)] backdrop-blur-sm">
