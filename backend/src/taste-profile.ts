@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { dataDir } from "./runtime.js";
+import { DEFAULT_PROFILE_ID } from "./db.js";
 import type { NeteaseSnapshot, NeteaseSnapshotPlaylist } from "./db.js";
 import type { PlayRecord } from "./db.js";
 import type { UserFeedbackRecord } from "./db.js";
@@ -102,7 +103,7 @@ export interface RecommendationCandidate {
   reasons: string[];
 }
 
-const tasteProfilePath = path.join(dataDir, "taste-profile.json");
+const legacyTasteProfilePath = path.join(dataDir, "taste-profile.json");
 const STOPWORDS = new Set([
   "feat", "featuring", "with", "the", "and", "from", "for", "version",
   "edit", "demo", "live", "remix", "ost", "ep", "lp", "deluxe", "album",
@@ -167,6 +168,16 @@ const MOOD_DIRECTIONS = [
 ] as const;
 
 type RuntimeDirection = typeof ENERGY_DIRECTIONS[number] | typeof MOOD_DIRECTIONS[number];
+
+function resolveTasteProfilePath(profileId?: string): string {
+  const id = profileId?.trim() || DEFAULT_PROFILE_ID;
+  if (id === DEFAULT_PROFILE_ID) {
+    return legacyTasteProfilePath;
+  }
+
+  const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return path.join(dataDir, "profiles", safeId, "taste-profile.json");
+}
 
 function normalizeToken(token: string): string {
   return token.trim().toLowerCase();
@@ -383,13 +394,15 @@ export function buildTasteProfile(snapshot: NeteaseSnapshot): TasteProfile {
   return profile;
 }
 
-export async function writeTasteProfile(profile: TasteProfile): Promise<void> {
-  await fs.mkdir(dataDir, { recursive: true });
+export async function writeTasteProfile(profile: TasteProfile, profileId?: string): Promise<void> {
+  const tasteProfilePath = resolveTasteProfilePath(profileId);
+  await fs.mkdir(path.dirname(tasteProfilePath), { recursive: true });
   await fs.writeFile(tasteProfilePath, JSON.stringify(profile, null, 2), "utf-8");
 }
 
-export async function getTasteProfile(): Promise<TasteProfile | null> {
+export async function getTasteProfile(profileId?: string): Promise<TasteProfile | null> {
   try {
+    const tasteProfilePath = resolveTasteProfilePath(profileId);
     const raw = await fs.readFile(tasteProfilePath, "utf-8");
     return normalizeTasteProfile(JSON.parse(raw) as TasteProfile);
   } catch {
@@ -406,14 +419,17 @@ function normalizeTasteProfile(profile: TasteProfile): TasteProfile {
   };
 }
 
-export async function rebuildTasteProfileFromSnapshot(snapshot: NeteaseSnapshot): Promise<TasteProfile> {
+export async function rebuildTasteProfileFromSnapshot(
+  snapshot: NeteaseSnapshot,
+  profileId?: string,
+): Promise<TasteProfile> {
   const profile = buildTasteProfile(snapshot);
-  await writeTasteProfile(profile);
+  await writeTasteProfile(profile, profileId);
   return profile;
 }
 
-export async function summarizeTasteProfile(): Promise<string> {
-  const profile = await getTasteProfile();
+export async function summarizeTasteProfile(profileId?: string): Promise<string> {
+  const profile = await getTasteProfile(profileId);
   return profile?.summary ?? "";
 }
 

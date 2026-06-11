@@ -18,6 +18,14 @@ const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
 const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
 let tempDirs: string[] = [];
 
+const FETCH_FORBIDDEN_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,
+  101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161,
+  179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563,
+  587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061,
+  6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080,
+]);
+
 async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "claudio-server-local-music-"));
   tempDirs.push(dir);
@@ -27,8 +35,24 @@ async function createTempMusicFile(filename: string, contents = "fake audio"): P
   return filePath;
 }
 
+async function startFetchSafeTestServer(
+  startServer: (port?: number | string) => http.Server,
+): Promise<{ server: http.Server; port: number }> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = startServer(0);
+    await new Promise<void>((resolve) => candidate.on("listening", resolve));
+    const candidatePort = (candidate.address() as AddressInfo).port;
+    if (!FETCH_FORBIDDEN_PORTS.has(candidatePort)) {
+      return { server: candidate, port: candidatePort };
+    }
+    await new Promise<void>((resolve) => candidate.close(() => resolve()));
+  }
+
+  throw new Error("Could not start test server on a fetch-safe port");
+}
+
 describe("API Server", () => {
-  let server: http.Server;
+  let server: http.Server | undefined;
   let port: number;
 
   beforeEach(async () => {
@@ -36,16 +60,28 @@ describe("API Server", () => {
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
     delete process.env.LOCAL_MUSIC_ENABLED;
     delete process.env.LOCAL_MUSIC_DIRS;
+    const db = await import("./db.js");
+    vi.mocked(db.hasProfile).mockReturnValue(true);
+    vi.mocked(db.getProfiles).mockResolvedValue([{
+      id: "default",
+      displayName: "xian",
+      createdAt: 1,
+      updatedAt: 1,
+      lastUsedAt: 1,
+    }]);
     const musicSources = await import("./music-sources/index.js");
     musicSources.clearLocalLibraryCacheForTests();
     const { startServer } = await import("./server.js");
-    server = startServer(0);
-    await new Promise<void>((resolve) => server.on("listening", resolve));
-    port = (server.address() as AddressInfo).port;
+    const started = await startFetchSafeTestServer(startServer);
+    server = started.server;
+    port = started.port;
   });
 
   afterEach(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server?.listening) {
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+    }
+    server = undefined;
     if (originalUnblockEnabled === undefined) {
       delete process.env.UNBLOCK_NETEASE_ENABLED;
     } else {
@@ -125,7 +161,7 @@ describe("API Server", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("success");
-    expect(pipeline.runPipeline).toHaveBeenCalledWith("morning_brief");
+    expect(pipeline.runPipeline).toHaveBeenCalledWith("morning_brief", { profileId: "default" });
   });
 
   it("POST /api/pipeline/trigger 拒绝无效 mode", async () => {
@@ -765,13 +801,13 @@ describe("API Server", () => {
         currentQueueIndex: 0,
         tracks: expect.any(Array),
       }),
-    }));
+    }), "default");
 
     const getRes = await fetch(`http://localhost:${port}/api/radio/listen-checks?limit=5`);
 
     expect(getRes.status).toBe(200);
     expect(await getRes.json()).toHaveLength(1);
-    expect(db.getListenCheckRecords).toHaveBeenCalledWith(5);
+    expect(db.getListenCheckRecords).toHaveBeenCalledWith(5, "default");
   });
 
   it("GET /api/radio/listen-acceptance 汇总最终实听验收证据", async () => {
@@ -828,7 +864,7 @@ describe("API Server", () => {
     expect(body.ready).toBe(true);
     expect(body.criteria).toHaveLength(6);
     expect(body.criteria.every((criterion: { passed: boolean }) => criterion.passed)).toBe(true);
-    expect(db.getListenCheckRecords).toHaveBeenCalledWith(20);
+    expect(db.getListenCheckRecords).toHaveBeenCalledWith(20, "default");
   });
 
   it("GET/POST /api/feedback 保存并返回用户音乐反馈", async () => {
@@ -887,12 +923,25 @@ describe("API Server", () => {
       artist: "Signal Artist",
       programSessionId: "program_1",
       queueIndex: 0,
-    }));
+    }), "default");
 
     const getRes = await fetch(`http://localhost:${port}/api/feedback?limit=5`);
     expect(getRes.status).toBe(200);
     expect(await getRes.json()).toHaveLength(1);
-    expect(db.getUserFeedback).toHaveBeenCalledWith(5);
+    expect(db.getUserFeedback).toHaveBeenCalledWith(5, "default");
+  });
+
+  it("GET /api/feedback 会按请求档案读取反馈", async () => {
+    const db = await import("./db.js");
+    vi.mocked(db.getUserFeedback).mockResolvedValue([]);
+
+    const res = await fetch(`http://localhost:${port}/api/feedback?limit=5`, {
+      headers: { "X-Claudio-Profile-Id": "profile_sleep" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(db.hasProfile).toHaveBeenCalledWith("profile_sleep");
+    expect(db.getUserFeedback).toHaveBeenCalledWith(5, "profile_sleep");
   });
 
   it("GET /api/radio/discovery-candidates 返回最近已验证探索候选", async () => {
@@ -923,7 +972,7 @@ describe("API Server", () => {
         health: "ready",
       }),
     ]);
-    expect(db.getDiscoveryCandidates).toHaveBeenCalledWith(5);
+    expect(db.getDiscoveryCandidates).toHaveBeenCalledWith(5, "default");
   });
 });
 
@@ -936,6 +985,14 @@ describe("WebSocket Server", () => {
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
     const db = await import("./db.js");
     const claude = await import("./claude.js");
+    vi.mocked(db.hasProfile).mockReturnValue(true);
+    vi.mocked(db.getProfiles).mockResolvedValue([{
+      id: "default",
+      displayName: "xian",
+      createdAt: 1,
+      updatedAt: 1,
+      lastUsedAt: 1,
+    }]);
     vi.mocked(claude.getLlmTaskTimeoutMs).mockImplementation((task) => ({
       semantic_router: 20_000,
       startup: 120_000,
@@ -1093,7 +1150,7 @@ describe("WebSocket Server", () => {
           }),
         }),
       ],
-    }));
+    }), "default");
 
     ws.close();
   });
@@ -1405,7 +1462,7 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(pipeline.runPipeline).toHaveBeenCalledWith("random_discover");
+    expect(pipeline.runPipeline).toHaveBeenCalledWith("random_discover", { profileId: "default" });
 
     ws.close();
   });
@@ -1482,7 +1539,7 @@ describe("WebSocket Server", () => {
       title: "Song A",
       artist: "Artist A",
       note: "implicit: chat_skip",
-    }));
+    }), "default");
     expect(messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("Song B"))).toBe(true);
     expect(messages.some((m) => m.type === "track" && m.data?.name === "Song B")).toBe(true);
 
@@ -1539,7 +1596,7 @@ describe("WebSocket Server", () => {
         positionSec: 100,
         durationSec: 100,
       },
-    }));
+    }), "default");
 
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("timeout waiting for completed queue move")), 3000);
@@ -1558,7 +1615,7 @@ describe("WebSocket Server", () => {
       artist: "Artist A",
       programSessionId: "program_1",
       queueIndex: 0,
-    }));
+    }), "default");
 
     ws.close();
   });
@@ -2259,6 +2316,7 @@ describe("WebSocket Server", () => {
     ]));
     expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("change", {
       preserveCurrentTrack: true,
+      profileId: "default",
     });
     expect(messages.some((m) => m.type === "dj_message" && m.data?.text === "那我给你换一组更安静的。")).toBe(true);
 
@@ -2377,6 +2435,7 @@ describe("WebSocket Server", () => {
     expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 20_000);
     expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("来点没那么吵的", {
       preserveCurrentTrack: true,
+      profileId: "default",
     });
     expect(switchState?.data?.currentProgram).toEqual(expect.objectContaining({
       source: "chat_switch",

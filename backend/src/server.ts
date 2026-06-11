@@ -57,6 +57,7 @@ const PLAYBACK_LEASE_MAINTENANCE_INTERVAL_MS = 45 * 1000;
 const preparedQueueTransitions = new Map<string, PreparedQueueTransition>();
 const preparedQueueTransitionInFlight = new Map<string, Promise<PreparedQueueTransition | null>>();
 let playbackLeaseMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
+const wsProfiles = new WeakMap<WebSocket, string>();
 
 type PlaybackLeaseStatus = "ready" | "expiring" | "expired" | "unknown" | "missing" | "failed";
 type PlaybackHealth = NonNullable<db.Track["playbackHealth"]>;
@@ -100,6 +101,8 @@ const CLIENT_PLAYBACK_ISSUE_CODES = new Set([
   "audio_waiting",
   "audio_stalled",
 ]);
+
+const PROFILE_HEADER = "x-claudio-profile-id";
 
 app.use(cors());
 app.use(express.json());
@@ -180,6 +183,27 @@ function getFirstQueryValue(value: unknown): string | undefined {
   return undefined;
 }
 
+function getRequestedProfileId(req: express.Request): string {
+  const rawHeader = req.header(PROFILE_HEADER);
+  const headerProfileId = typeof rawHeader === "string" ? rawHeader.trim() : "";
+  const queryProfileId = getFirstQueryValue(req.query.profileId)?.trim() || "";
+  return headerProfileId || queryProfileId || db.DEFAULT_PROFILE_ID;
+}
+
+function getRequestedWsProfileId(request: http.IncomingMessage): string {
+  const url = new URL(request.url || "", `http://${request.headers.host}`);
+  return url.searchParams.get("profileId")?.trim() || db.DEFAULT_PROFILE_ID;
+}
+
+function requireRequestProfileId(req: express.Request, res: express.Response): string | null {
+  const profileId = getRequestedProfileId(req);
+  if (!db.hasProfile(profileId)) {
+    res.status(404).json({ error: "Profile not found" });
+    return null;
+  }
+  return profileId;
+}
+
 function parseQueryNumber(value: unknown): number | undefined | null {
   const raw = getFirstQueryValue(value)?.trim();
   if (!raw) {
@@ -221,6 +245,35 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: Date.now() });
 });
 
+app.get("/api/profiles", async (_req, res) => {
+  const profiles = await db.getProfiles();
+  res.json({
+    profiles,
+    defaultProfileId: db.DEFAULT_PROFILE_ID,
+  });
+});
+
+app.post("/api/profiles", async (req, res) => {
+  const displayName = getBoundedString(req.body?.displayName, 80);
+  const profile = await db.createProfile({ displayName });
+  res.status(201).json(profile);
+});
+
+app.patch("/api/profiles/:profileId", async (req, res) => {
+  try {
+    const profile = await db.updateProfile(req.params.profileId, {
+      displayName: getBoundedString(req.body?.displayName, 80),
+    });
+    res.json(profile);
+  } catch (error) {
+    if (error instanceof db.ProfileNotFoundError) {
+      res.status(404).json({ error: "Profile not found" });
+      return;
+    }
+    res.status(500).json({ error: getErrorMessage(error) });
+  }
+});
+
 app.get("/api/weather/current", async (req, res) => {
   const city = getFirstQueryValue(req.query.city)?.trim() || undefined;
   const country = getFirstQueryValue(req.query.country)?.trim() || undefined;
@@ -255,18 +308,22 @@ app.get("/api/weather/current", async (req, res) => {
 });
 
 app.get("/api/state", async (req, res) => {
-  const state = await ensurePlayableQueueState({ refreshCurrentTrack: true });
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const state = await ensurePlayableQueueState({ refreshCurrentTrack: true }, profileId);
   res.json(state);
 });
 
 app.post("/api/pipeline/trigger", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const mode = parseTriggerMode(req.body?.mode);
   if (!mode) {
     return res.status(400).json({ error: "Invalid mode" });
   }
 
   try {
-    const result = await pipeline.runPipeline(mode);
+    const result = await pipeline.runPipeline(mode, { profileId });
     res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: getErrorMessage(error) });
@@ -355,20 +412,26 @@ app.get("/api/audio/music", (req, res) => {
 });
 
 // Playlist management
-app.get("/api/playlists", async (_req, res) => {
-  const playlists = await db.getPlaylists();
+app.get("/api/playlists", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const playlists = await db.getPlaylists(profileId);
   res.json(playlists);
 });
 
-app.get("/api/netease/snapshot", async (_req, res) => {
-  const snapshot = await db.getNeteaseSnapshot();
+app.get("/api/netease/snapshot", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const snapshot = await db.getNeteaseSnapshot(profileId);
   res.json(snapshot);
 });
 
-app.get("/api/taste-profile", async (_req, res) => {
+app.get("/api/taste-profile", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const [profile, state] = await Promise.all([
-    tasteProfile.getTasteProfile(),
-    db.getState(),
+    tasteProfile.getTasteProfile(profileId),
+    db.getState(profileId),
   ]);
   res.json(profile
     ? {
@@ -400,7 +463,9 @@ app.get("/api/music-sources/local-library", async (_req, res) => {
 
 app.get("/api/music-sources/local-library/matches", async (_req, res) => {
   try {
-    const profile = await tasteProfile.getTasteProfile();
+    const profileId = requireRequestProfileId(_req, res);
+    if (!profileId) return;
+    const profile = await tasteProfile.getTasteProfile(profileId);
     const summary = await musicSources.getLocalLibraryTasteMatchSummary(profile);
     res.json(summary);
   } catch (error) {
@@ -419,7 +484,9 @@ app.post("/api/music-sources/local-library/rescan", async (_req, res) => {
   }
 });
 
-app.post("/api/netease/sync", async (_req, res) => {
+app.post("/api/netease/sync", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   try {
     const account = await netease.getUserAccount();
     const playlists = await netease.getUserPlaylists(account.userId);
@@ -449,8 +516,8 @@ app.post("/api/netease/sync", async (_req, res) => {
       syncedAt: Date.now(),
     };
 
-    await db.setNeteaseSnapshot(snapshot);
-    const profile = await tasteProfile.rebuildTasteProfileFromSnapshot(snapshot);
+    await db.setNeteaseSnapshot(snapshot, profileId);
+    const profile = await tasteProfile.rebuildTasteProfileFromSnapshot(snapshot, profileId);
     res.json({
       ok: true,
       playlistCount: playlistsWithTracks.length,
@@ -474,9 +541,11 @@ app.post("/api/netease/sync", async (_req, res) => {
   }
 });
 
-app.post("/api/netease/retry-failed", async (_req, res) => {
+app.post("/api/netease/retry-failed", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   try {
-    const snapshot = await db.getNeteaseSnapshot();
+    const snapshot = await db.getNeteaseSnapshot(profileId);
     if (!snapshot) {
       return res.status(404).json({ error: "No Netease snapshot found" });
     }
@@ -519,8 +588,8 @@ app.post("/api/netease/retry-failed", async (_req, res) => {
       syncedAt: Date.now(),
     };
 
-    await db.setNeteaseSnapshot(nextSnapshot);
-    const profile = await tasteProfile.rebuildTasteProfileFromSnapshot(nextSnapshot);
+    await db.setNeteaseSnapshot(nextSnapshot, profileId);
+    const profile = await tasteProfile.rebuildTasteProfileFromSnapshot(nextSnapshot, profileId);
     res.json({
       ok: true,
       retriedCount: failedPlaylists.length,
@@ -538,14 +607,16 @@ app.post("/api/netease/retry-failed", async (_req, res) => {
   }
 });
 
-app.post("/api/taste-profile/rebuild", async (_req, res) => {
+app.post("/api/taste-profile/rebuild", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   try {
-    const snapshot = await db.getNeteaseSnapshot();
+    const snapshot = await db.getNeteaseSnapshot(profileId);
     if (!snapshot) {
       return res.status(404).json({ error: "No Netease snapshot found" });
     }
 
-    const profile = await tasteProfile.rebuildTasteProfileFromSnapshot(snapshot);
+    const profile = await tasteProfile.rebuildTasteProfileFromSnapshot(snapshot, profileId);
     res.json({
       ok: true,
       generatedAt: profile.generatedAt,
@@ -559,6 +630,8 @@ app.post("/api/taste-profile/rebuild", async (_req, res) => {
 });
 
 app.post("/api/playlists", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const { name, tracks } = req.body as { name?: string; tracks?: Array<{ name: string; artist: string; album?: string }> };
   if (!name || typeof name !== "string" || name.trim().length === 0) {
     res.status(400).json({ error: "歌单名称不能为空" });
@@ -575,13 +648,15 @@ app.post("/api/playlists", async (req, res) => {
     album: t.album,
   }));
 
-  const playlist = await db.addPlaylist(name.trim(), items);
+  const playlist = await db.addPlaylist(name.trim(), items, profileId);
   res.status(201).json(playlist);
 });
 
 app.delete("/api/playlists/:id", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const { id } = req.params;
-  const removed = await db.removePlaylist(id);
+  const removed = await db.removePlaylist(id, profileId);
   if (!removed) {
     res.status(404).json({ error: "歌单不存在" });
     return;
@@ -589,21 +664,25 @@ app.delete("/api/playlists/:id", async (req, res) => {
   res.json({ success: true });
 });
 
-app.get("/api/favorites", async (_req, res) => {
-  const favorites = await db.getFavorites();
+app.get("/api/favorites", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const favorites = await db.getFavorites(profileId);
   res.json(favorites);
 });
 
 app.post("/api/favorites/:trackId", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const { trackId } = req.params;
-  const state = await db.getState();
-  const result = await db.toggleFavorite(trackId);
+  const state = await db.getState(profileId);
+  const result = await db.toggleFavorite(trackId, profileId);
   if (result.favorited) {
     const title = getBoundedString(req.body?.title, 160);
     const artist = getBoundedString(req.body?.artist, 160);
     const fallbackTrack = findFeedbackTrack(state, trackId, title, artist);
     if (fallbackTrack) {
-      await addTrackFeedbackFromState(state, fallbackTrack, "favorite_track", "implicit: favorite");
+      await addTrackFeedbackFromState(state, fallbackTrack, "favorite_track", "implicit: favorite", profileId);
     }
   }
   res.json(result);
@@ -652,6 +731,7 @@ async function addTrackFeedbackFromState(
   track: db.Track,
   type: db.UserFeedbackType,
   note?: string,
+  profileId?: string,
 ): Promise<void> {
   await db.addUserFeedback({
     type,
@@ -664,25 +744,29 @@ async function addTrackFeedbackFromState(
     programSessionId: state.currentProgram?.sessionId,
     queueIndex: state.currentQueueIndex,
     note,
-  });
+  }, profileId);
 }
 
 app.get("/api/feedback", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const parsedLimit = parseQueryNumber(req.query.limit);
   const limit = parsedLimit && parsedLimit > 0
     ? Math.min(Math.round(parsedLimit), 100)
     : 50;
-  res.json(await db.getUserFeedback(limit));
+  res.json(await db.getUserFeedback(limit, profileId));
 });
 
 app.post("/api/feedback", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const feedbackType = parseUserFeedbackType(req.body?.type);
   if (!feedbackType) {
     res.status(400).json({ error: "Invalid feedback type" });
     return;
   }
 
-  const state = await db.getState();
+  const state = await db.getState(profileId);
   const currentTrack = state.currentTrack;
   const title = getBoundedString(req.body?.title, 160) ?? currentTrack?.name;
   const artist = getBoundedString(req.body?.artist, 160) ?? currentTrack?.artist;
@@ -702,12 +786,14 @@ app.post("/api/feedback", async (req, res) => {
     programSessionId: state.currentProgram?.sessionId,
     queueIndex: state.currentQueueIndex,
     note: getBoundedString(req.body?.note, 240),
-  });
+  }, profileId);
   res.status(201).json(record);
 });
 
-app.get("/api/plan/today", async (_req, res) => {
-  const state = await db.getState();
+app.get("/api/plan/today", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const state = await db.getState(profileId);
   res.json({
     date: new Date().toISOString().slice(0, 10),
     status: state.status,
@@ -717,27 +803,35 @@ app.get("/api/plan/today", async (_req, res) => {
   });
 });
 
-app.get("/api/radio/program-audit", async (_req, res) => {
-  const state = await db.getState();
+app.get("/api/radio/program-audit", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const state = await db.getState(profileId);
   res.json(auditProgramExperience(state));
 });
 
 app.get("/api/radio/listen-checks", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const parsedLimit = parseQueryNumber(req.query.limit);
   const limit = parsedLimit && parsedLimit > 0
     ? Math.min(Math.round(parsedLimit), 20)
     : 10;
-  res.json(await db.getListenCheckRecords(limit));
+  res.json(await db.getListenCheckRecords(limit, profileId));
 });
 
-app.get("/api/radio/listen-acceptance", async (_req, res) => {
-  const records = await db.getListenCheckRecords(20);
+app.get("/api/radio/listen-acceptance", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const records = await db.getListenCheckRecords(20, profileId);
   res.json(summarizeListenAcceptance(records));
 });
 
-app.get("/api/radio/playback-diagnostics", async (_req, res) => {
+app.get("/api/radio/playback-diagnostics", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   try {
-    const state = await db.getState();
+    const state = await db.getState(profileId);
     res.json(await buildPlaybackDiagnostics(state));
   } catch (error) {
     res.status(500).json({ error: getErrorMessage(error) });
@@ -745,11 +839,13 @@ app.get("/api/radio/playback-diagnostics", async (_req, res) => {
 });
 
 app.get("/api/radio/discovery-candidates", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const parsedLimit = parseQueryNumber(req.query.limit);
   const limit = parsedLimit && parsedLimit > 0
     ? Math.min(Math.round(parsedLimit), 100)
     : 30;
-  res.json(await db.getDiscoveryCandidates(limit));
+  res.json(await db.getDiscoveryCandidates(limit, profileId));
 });
 
 function buildListenProgramSnapshot(state: db.AppState): db.ListenCheckRecord["programSnapshot"] {
@@ -823,14 +919,14 @@ function normalizeClientPlaybackIssueCode(value: unknown): string {
   return CLIENT_PLAYBACK_ISSUE_CODES.has(normalized) ? normalized : "client_playback_issue";
 }
 
-async function recordClientPlaybackIssue(payload: unknown): Promise<db.AppState> {
+async function recordClientPlaybackIssue(payload: unknown, profileId?: string): Promise<db.AppState> {
   const raw = payload && typeof payload === "object"
     ? payload as Record<string, unknown>
     : {};
   const data = raw.data && typeof raw.data === "object"
     ? raw.data as Record<string, unknown>
     : raw;
-  const state = await db.getState();
+  const state = await db.getState(profileId);
   const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
   const currentIndex = clampQueueIndex(queue.length, state.currentQueueIndex);
   const currentTrack = state.currentTrack ?? queue[currentIndex] ?? null;
@@ -880,7 +976,7 @@ async function recordClientPlaybackIssue(payload: unknown): Promise<db.AppState>
     radioQueue: updatedQueue,
     currentTrack: updatedCurrentTrack,
     lastInteraction: Date.now(),
-  }, state);
+  }, state, profileId);
 }
 
 function buildListenEvidence(
@@ -1035,6 +1131,8 @@ function normalizeListenPlaybackSegments(
 }
 
 app.post("/api/radio/listen-checks", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const body = req.body as Record<string, any>;
   const startedAt = Number(body?.startedAt);
   const completedAt = Number(body?.completedAt);
@@ -1060,7 +1158,7 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     context: checks?.context === true,
   };
 
-  const state = await db.getState();
+  const state = await db.getState(profileId);
   const audit = auditProgramExperience(state);
   const programAudit = {
     ok: audit.ok,
@@ -1085,35 +1183,43 @@ app.post("/api/radio/listen-checks", async (req, res) => {
     programContinuity: buildListenProgramContinuity(state, body?.startedProgram),
     listenEvidence: buildListenEvidence(state, startedAt, completedAt, playbackSegments, clientAudioEvidence),
     programSnapshot: buildListenProgramSnapshot(state),
-  });
+  }, profileId);
   res.status(201).json(record);
 });
 
-app.get("/api/taste", async (_req, res) => {
-  const state = await db.getState();
+app.get("/api/taste", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const state = await db.getState(profileId);
   res.json(state.djProfile);
 });
 
 app.put("/api/taste", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const { voice, style, name } = req.body || {};
   const patch: Record<string, string> = {};
   if (typeof voice === "string") patch.voice = voice;
   if (typeof style === "string") patch.style = style;
   if (typeof name === "string") patch.name = name;
   if (Object.keys(patch).length === 0) return res.status(400).json({ error: "No valid fields" });
-  const updated = await db.updateState({ djProfile: { ...(await db.getState()).djProfile, ...patch } as any });
+  const updated = await db.updateState({ djProfile: { ...(await db.getState(profileId)).djProfile, ...patch } as any }, profileId);
   res.json(updated.djProfile);
 });
 
 app.post("/api/history", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
   const { title, artist } = req.body || {};
   if (!title) return res.status(400).json({ error: "title required" });
-  await db.recordPlay(title, artist || "");
+  await db.recordPlay(title, artist || "", profileId);
   res.json({ ok: true });
 });
 
-app.get("/api/history", async (_req, res) => {
-  const history = await db.getPlayHistory();
+app.get("/api/history", async (req, res) => {
+  const profileId = requireRequestProfileId(req, res);
+  if (!profileId) return;
+  const history = await db.getPlayHistory(20, profileId);
   res.json(history);
 });
 
@@ -1121,10 +1227,13 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(frontendDistDir, "index.html"));
 });
 
-export function broadcast(data: object) {
+export function broadcast(data: object, profileId?: string) {
   const message = JSON.stringify(data);
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    if (
+      client.readyState === WebSocket.OPEN
+      && (!profileId || wsProfiles.get(client) === profileId)
+    ) {
       client.send(message);
     }
   });
@@ -1160,13 +1269,14 @@ function getQueueStepContext(state: db.AppState, step = 1) {
   };
 }
 
-function buildPreparedQueueTransitionKey(state: db.AppState, step = 1): string | null {
+function buildPreparedQueueTransitionKey(state: db.AppState, step = 1, profileId = db.DEFAULT_PROFILE_ID): string | null {
   const context = getQueueStepContext(state, step);
   if (!context) {
     return null;
   }
 
   return [
+    profileId,
     step,
     context.currentIndex,
     context.currentTrack.id,
@@ -1342,8 +1452,9 @@ async function ensurePlayableQueueState(
   options?: {
     refreshCurrentTrack?: boolean;
   },
+  profileId?: string,
 ): Promise<db.AppState> {
-  const state = await db.getState();
+  const state = await db.getState(profileId);
   if (!options?.refreshCurrentTrack) {
     return state;
   }
@@ -1381,7 +1492,7 @@ async function ensurePlayableQueueState(
   return updatePlaybackState({
     radioQueue: refreshedQueue,
     currentTrack: refreshedTrack,
-  }, state);
+  }, state, profileId);
 }
 
 function hasPlaybackResolutionChanged(next: db.Track, previous: db.Track | undefined): boolean {
@@ -1403,8 +1514,9 @@ function hasPlaybackResolutionChanged(next: db.Track, previous: db.Track | undef
 async function updatePlaybackState(
   patch: Partial<db.AppState>,
   fallbackState: db.AppState,
+  profileId?: string,
 ): Promise<db.AppState> {
-  const updated = await db.updateState(patch);
+  const updated = await db.updateState(patch, profileId);
   return updated ?? {
     ...fallbackState,
     ...patch,
@@ -1429,9 +1541,9 @@ async function refreshTrackUrl(
   return refreshedTrack;
 }
 
-async function primeUpcomingQueueTransition(step = 1): Promise<PreparedQueueTransition | null> {
-  const state = await db.getState();
-  const key = buildPreparedQueueTransitionKey(state, step);
+async function primeUpcomingQueueTransition(step = 1, profileId?: string): Promise<PreparedQueueTransition | null> {
+  const state = await db.getState(profileId);
+  const key = buildPreparedQueueTransitionKey(state, step, profileId);
   const context = getQueueStepContext(state, step);
   if (!key || !context) {
     invalidatePreparedQueueTransition();
@@ -1458,12 +1570,12 @@ async function primeUpcomingQueueTransition(step = 1): Promise<PreparedQueueTran
       );
       await db.updateState({
         radioQueue: updatedQueue,
-      });
+      }, profileId);
     }
 
     const speechSlot = resolveSpeechSlotForTransition(state, context.nextIndex, step);
     const transition: { text?: string; ttsAudioPath?: string } = speechSlot
-      ? await buildTransitionReply(context.currentTrack, nextTrack, speechSlot)
+      ? await buildTransitionReply(context.currentTrack, nextTrack, speechSlot, profileId)
       : {};
     const prepared: PreparedQueueTransition = {
       key,
@@ -1496,8 +1608,9 @@ async function primeUpcomingQueueTransition(step = 1): Promise<PreparedQueueTran
 async function getPreparedQueueTransitionForAdvance(
   previousState: db.AppState,
   step: number,
+  profileId?: string,
 ): Promise<PreparedQueueTransition | null> {
-  const key = buildPreparedQueueTransitionKey(previousState, step);
+  const key = buildPreparedQueueTransitionKey(previousState, step, profileId);
   if (!key) {
     return null;
   }
@@ -1515,8 +1628,8 @@ async function getPreparedQueueTransitionForAdvance(
   return null;
 }
 
-async function refreshUpcomingQueueUrls(startStep: number, count: number): Promise<number[]> {
-  const state = await db.getState();
+async function refreshUpcomingQueueUrls(startStep: number, count: number, profileId?: string): Promise<number[]> {
+  const state = await db.getState(profileId);
   const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
   if (!state.currentTrack || queue.length <= 1) {
     return [];
@@ -1558,18 +1671,18 @@ async function refreshUpcomingQueueUrls(startStep: number, count: number): Promi
   const updatedQueue = queue.map((track, index) => refreshedByIndex.get(index) ?? track);
   const changed = updatedQueue.some((track, index) => hasPlaybackResolutionChanged(track, queue[index]));
   if (changed) {
-    await db.updateState({ radioQueue: updatedQueue });
+    await db.updateState({ radioQueue: updatedQueue }, profileId);
   }
 
   return Array.from(refreshedByIndex.keys()).sort((a, b) => a - b);
 }
 
-async function markPreparedUntilIndex(preparedIndexes: number[]): Promise<void> {
+async function markPreparedUntilIndex(preparedIndexes: number[], profileId?: string): Promise<void> {
   if (preparedIndexes.length === 0) {
     return;
   }
 
-  const state = await db.getState();
+  const state = await db.getState(profileId);
   if (!state.currentProgram) {
     return;
   }
@@ -1579,30 +1692,31 @@ async function markPreparedUntilIndex(preparedIndexes: number[]): Promise<void> 
       ...state.currentProgram,
       preparedUntilIndex: Math.max(...preparedIndexes),
     },
-  });
+  }, profileId);
 }
 
-async function primeUpcomingQueueWindow(count = PREFETCH_LOOKAHEAD_COUNT): Promise<void> {
+async function primeUpcomingQueueWindow(count = PREFETCH_LOOKAHEAD_COUNT, profileId?: string): Promise<void> {
   const preparedIndexes: number[] = [];
-  const firstTransition = await primeUpcomingQueueTransition(1);
+  const firstTransition = await primeUpcomingQueueTransition(1, profileId);
   if (firstTransition) {
     preparedIndexes.push(firstTransition.nextQueueIndex);
   }
 
-  const refreshedIndexes = await refreshUpcomingQueueUrls(2, count);
+  const refreshedIndexes = await refreshUpcomingQueueUrls(2, count, profileId);
   preparedIndexes.push(...refreshedIndexes);
-  await markPreparedUntilIndex(preparedIndexes);
+  await markPreparedUntilIndex(preparedIndexes, profileId);
 }
 
 async function broadcastStateSnapshot(
   options?: {
     refreshCurrentTrack?: boolean;
   },
+  profileId?: string,
 ) {
   const state = await ensurePlayableQueueState({
     refreshCurrentTrack: options?.refreshCurrentTrack ?? false,
-  });
-  broadcast({ type: "state", data: state });
+  }, profileId);
+  broadcast({ type: "state", data: state }, profileId);
 }
 
 async function maintainPlaybackQueueLeases(): Promise<void> {
@@ -1610,14 +1724,24 @@ async function maintainPlaybackQueueLeases(): Promise<void> {
     return;
   }
 
-  const before = await db.getState();
-  const nextState = await ensurePlayableQueueState({ refreshCurrentTrack: true });
-  const currentChanged = nextState.currentTrack && before.currentTrack
-    ? hasPlaybackResolutionChanged(nextState.currentTrack, before.currentTrack)
-    : nextState.currentTrack !== before.currentTrack;
-  const refreshedIndexes = await refreshUpcomingQueueUrls(1, PREFETCH_LOOKAHEAD_COUNT);
-  if (currentChanged || refreshedIndexes.length > 0) {
-    await broadcastStateSnapshot();
+  const profileIds = new Set<string>();
+  wss.clients.forEach((client) => {
+    const profileId = wsProfiles.get(client);
+    if (profileId) {
+      profileIds.add(profileId);
+    }
+  });
+
+  for (const profileId of profileIds) {
+    const before = await db.getState(profileId);
+    const nextState = await ensurePlayableQueueState({ refreshCurrentTrack: true }, profileId);
+    const currentChanged = nextState.currentTrack && before.currentTrack
+      ? hasPlaybackResolutionChanged(nextState.currentTrack, before.currentTrack)
+      : nextState.currentTrack !== before.currentTrack;
+    const refreshedIndexes = await refreshUpcomingQueueUrls(1, PREFETCH_LOOKAHEAD_COUNT, profileId);
+    if (currentChanged || refreshedIndexes.length > 0) {
+      await broadcastStateSnapshot(undefined, profileId);
+    }
   }
 }
 
@@ -1643,11 +1767,11 @@ function stopPlaybackLeaseMaintenanceLoop(): void {
   playbackLeaseMaintenanceTimer = null;
 }
 
-async function broadcastPipelineResult(result: pipeline.PipelineResult) {
+async function broadcastPipelineResult(result: pipeline.PipelineResult, profileId?: string) {
   invalidatePreparedQueueTransition();
   const timestamp = Date.now();
-  await broadcastStateSnapshot();
-  broadcast({ type: "status", data: "speaking" });
+  await broadcastStateSnapshot(undefined, profileId);
+  broadcast({ type: "status", data: "speaking" }, profileId);
   broadcast({
     type: "dj_message",
     data: {
@@ -1655,13 +1779,13 @@ async function broadcastPipelineResult(result: pipeline.PipelineResult) {
       ttsAudioPath: result.ttsAudioPath,
       timestamp,
     },
-  });
+  }, profileId);
 
   if (result.shouldStartTrack !== false && result.tracks && result.tracks.length > 0) {
-    broadcast({ type: "track", data: toClientTrack(result.tracks[0]) });
+    broadcast({ type: "track", data: toClientTrack(result.tracks[0]) }, profileId);
   }
 
-  broadcast({ type: "status", data: "playing" });
+  broadcast({ type: "status", data: "playing" }, profileId);
 }
 
 async function speakChatText(
@@ -1682,14 +1806,14 @@ async function speakChatText(
   }
 }
 
-async function broadcastDjChatReply(replyText: string, ttsAudioPath?: string): Promise<void> {
+async function broadcastDjChatReply(replyText: string, ttsAudioPath?: string, profileId?: string): Promise<void> {
   if (ttsAudioPath) {
-    broadcast({ type: "status", data: "speaking" });
+    broadcast({ type: "status", data: "speaking" }, profileId);
   }
 
   const djTimestamp = Date.now();
-  broadcast({ type: "dj_message", data: { text: replyText, ttsAudioPath, timestamp: djTimestamp } });
-  await db.addChatMessage({ role: "dj", text: replyText, timestamp: djTimestamp });
+  broadcast({ type: "dj_message", data: { text: replyText, ttsAudioPath, timestamp: djTimestamp } }, profileId);
+  await db.addChatMessage({ role: "dj", text: replyText, timestamp: djTimestamp }, profileId);
 }
 
 function buildCurrentTrackReply(state: db.AppState): string {
@@ -1834,8 +1958,8 @@ ${recentHistory || "无"}
 `;
 }
 
-async function answerWeatherChat(text: string): Promise<void> {
-  const state = await db.getState();
+async function answerWeatherChat(text: string, profileId?: string): Promise<void> {
+  const state = await db.getState(profileId);
   const useEnglish = djLanguage.usesEnglishDjCopy(state.djProfile);
   let weatherContext: string | undefined;
   try {
@@ -1870,11 +1994,11 @@ async function answerWeatherChat(text: string): Promise<void> {
     replyTtsText,
     [weatherContext, text].filter(Boolean).join("；"),
   );
-  await broadcastDjChatReply(replyText, ttsAudioPath);
+  await broadcastDjChatReply(replyText, ttsAudioPath, profileId);
 }
 
-async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
-  const state = await db.getState();
+async function replyOnlyChat(text: string, route: ChatRoute, profileId?: string): Promise<void> {
+  const state = await db.getState(profileId);
 
   if (route.intent === "current_track_query") {
     const replyText = buildCurrentTrackReply(state);
@@ -1883,7 +2007,7 @@ async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
       replyText,
       [state.currentTrack?.name, state.currentTrack?.artist].filter(Boolean).join(" - "),
     );
-    await broadcastDjChatReply(replyText, ttsAudioPath);
+    await broadcastDjChatReply(replyText, ttsAudioPath, profileId);
     return;
   }
 
@@ -1908,7 +2032,7 @@ async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
     text,
   ].filter(Boolean).join("；");
   const ttsAudioPath = await speakChatText(state, replyTtsText, atmosphere);
-  await broadcastDjChatReply(replyText, ttsAudioPath);
+  await broadcastDjChatReply(replyText, ttsAudioPath, profileId);
 }
 
 function splitTransitionSentences(text: string): string[] {
@@ -1962,8 +2086,9 @@ async function buildTransitionReply(
   previousTrack: db.Track | null,
   nextTrack: db.Track,
   speechSlot: db.RadioSpeechSlot,
+  profileId?: string,
 ): Promise<{ text: string; ttsAudioPath?: string }> {
-  const state = await db.getState();
+  const state = await db.getState(profileId);
   const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
   const useEnglish = language === "en";
   const weatherContext: string | undefined = undefined;
@@ -2127,16 +2252,17 @@ async function advanceQueueWithSegue(
   options?: {
     feedback?: { type: db.UserFeedbackType; note: string } | null;
   },
+  profileId?: string,
 ) {
-  const previousState = await db.getState();
+  const previousState = await db.getState(profileId);
   const previousTrack = previousState.currentTrack;
   if (step === 1 && previousTrack && options?.feedback) {
-    await addTrackFeedbackFromState(previousState, previousTrack, options.feedback.type, options.feedback.note);
+    await addTrackFeedbackFromState(previousState, previousTrack, options.feedback.type, options.feedback.note, profileId);
   }
   const preparedTransition = step === 1
-    ? await getPreparedQueueTransitionForAdvance(previousState, step)
+    ? await getPreparedQueueTransitionForAdvance(previousState, step, profileId)
     : null;
-  const nextState = await db.advanceRadioQueue(step);
+  const nextState = await db.advanceRadioQueue(step, profileId);
   if (!nextState?.currentTrack) {
     return null;
   }
@@ -2158,7 +2284,7 @@ async function advanceQueueWithSegue(
     playableState = await updatePlaybackState({
       radioQueue: updatedQueue,
       currentTrack: preparedTransition.nextTrack,
-    }, nextState);
+    }, nextState, profileId);
     transition = {
       text: preparedTransition.text,
       ttsAudioPath: preparedTransition.ttsAudioPath,
@@ -2174,22 +2300,22 @@ async function advanceQueueWithSegue(
       playableState = await updatePlaybackState({
         radioQueue: updatedQueue,
         currentTrack: refreshedTrack,
-      }, nextState);
+      }, nextState, profileId);
     }
     const speechSlot = resolveSpeechSlotForTransition(playableState, playableState.currentQueueIndex, step);
     transition = speechSlot
-      ? await buildTransitionReply(previousTrack, playableState.currentTrack!, speechSlot)
+      ? await buildTransitionReply(previousTrack, playableState.currentTrack!, speechSlot, profileId)
       : {};
   }
 
   invalidatePreparedQueueTransition();
 
-  await db.recordPlay(playableState.currentTrack!.name, playableState.currentTrack!.artist);
+  await db.recordPlay(playableState.currentTrack!.name, playableState.currentTrack!.artist, profileId);
   const timestamp = Date.now();
 
-  await broadcastStateSnapshot();
+  await broadcastStateSnapshot(undefined, profileId);
   if (transition.ttsAudioPath) {
-    broadcast({ type: "status", data: "speaking" });
+    broadcast({ type: "status", data: "speaking" }, profileId);
   }
   if (transition.text) {
     broadcast({
@@ -2199,20 +2325,20 @@ async function advanceQueueWithSegue(
         ttsAudioPath: transition.ttsAudioPath,
         timestamp,
       },
-    });
+    }, profileId);
   }
   broadcast({
     type: "track",
     data: toClientStoredTrack(playableState.currentTrack!),
-  });
-  broadcast({ type: "status", data: "playing" });
+  }, profileId);
+  broadcast({ type: "status", data: "playing" }, profileId);
 
   if (transition.text) {
     await db.addChatMessage({
       role: "dj",
       text: transition.text,
       timestamp,
-    });
+    }, profileId);
   }
 
   return playableState;
@@ -2223,9 +2349,10 @@ async function playSelectedQueueTrack(
   options?: {
     forceRefresh?: boolean;
   },
+  profileId?: string,
 ) {
   invalidatePreparedQueueTransition();
-  const selectedState = await db.selectRadioQueueTrack(trackId);
+  const selectedState = await db.selectRadioQueueTrack(trackId, profileId);
   if (!selectedState?.currentTrack) {
     return null;
   }
@@ -2243,16 +2370,16 @@ async function playSelectedQueueTrack(
     playableState = await updatePlaybackState({
       radioQueue: updatedQueue,
       currentTrack: refreshedTrack,
-    }, selectedState);
+    }, selectedState, profileId);
   }
 
-  await db.recordPlay(playableState.currentTrack!.name, playableState.currentTrack!.artist);
-  await broadcastStateSnapshot();
+  await db.recordPlay(playableState.currentTrack!.name, playableState.currentTrack!.artist, profileId);
+  await broadcastStateSnapshot(undefined, profileId);
   broadcast({
     type: "track",
     data: toClientStoredTrack(playableState.currentTrack!),
-  });
-  broadcast({ type: "status", data: "playing" });
+  }, profileId);
+  broadcast({ type: "status", data: "playing" }, profileId);
   return playableState;
 }
 
@@ -2262,8 +2389,9 @@ async function initializeStartupRadioProgram() {
   }
 
   try {
-    const state = await db.getState();
-    const snapshot = await db.getNeteaseSnapshot();
+    const profileId = db.DEFAULT_PROFILE_ID;
+    const state = await db.getState(profileId);
+    const snapshot = await db.getNeteaseSnapshot(profileId);
     const localLibraryStatus = await musicSources.getLocalLibraryStatus({ sampleLimit: 0 });
     const hasUserMusicContext =
       state.playlists.length > 0
@@ -2276,18 +2404,26 @@ async function initializeStartupRadioProgram() {
     }
 
     console.log("[radio] generating startup program from weather + playlist context");
-    const result = await pipeline.runStartupRadioProgram({ background: true });
+    const result = await pipeline.runStartupRadioProgram({ background: true, profileId });
     console.log(`[radio] startup program ready${result.programTitle ? `: ${result.programTitle}` : ""}`);
     if (wss.clients.size > 0) {
-      await broadcastPipelineResult(result);
+      await broadcastPipelineResult(result, profileId);
     }
   } catch (error) {
     console.error("[radio] startup program failed:", error);
   }
 }
 
-wss.on("connection", async (ws) => {
-  const state = await ensurePlayableQueueState({ refreshCurrentTrack: true });
+wss.on("connection", async (ws, request) => {
+  const profileId = getRequestedWsProfileId(request);
+  if (profileId !== db.DEFAULT_PROFILE_ID && !db.hasProfile(profileId)) {
+    ws.send(JSON.stringify({ type: "error", data: { message: "Profile not found" } }));
+    ws.close();
+    return;
+  }
+  wsProfiles.set(ws, profileId);
+
+  const state = await ensurePlayableQueueState({ refreshCurrentTrack: true }, profileId);
   ws.send(JSON.stringify({ type: "state", data: state }));
 
   ws.on("message", async (message) => {
@@ -2300,11 +2436,11 @@ wss.on("connection", async (ws) => {
           return;
         }
 
-        broadcast({ type: "status", data: "thinking" });
+        broadcast({ type: "status", data: "thinking" }, profileId);
 
         try {
-          const result = await pipeline.runPipeline(mode);
-          await broadcastPipelineResult(result);
+          const result = await pipeline.runPipeline(mode, { profileId });
+          await broadcastPipelineResult(result, profileId);
         } catch (error) {
           ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
         }
@@ -2315,7 +2451,7 @@ wss.on("connection", async (ws) => {
         try {
           const nextState = await advanceQueueWithSegue(1, {
             feedback: parseQueueAdvanceFeedback(payload),
-          });
+          }, profileId);
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可切换的歌曲队列" } }));
           }
@@ -2327,8 +2463,8 @@ wss.on("connection", async (ws) => {
 
       if (payload.type === "queue_prefetch") {
         try {
-          await primeUpcomingQueueWindow(PREFETCH_LOOKAHEAD_COUNT);
-          await broadcastStateSnapshot();
+          await primeUpcomingQueueWindow(PREFETCH_LOOKAHEAD_COUNT, profileId);
+          await broadcastStateSnapshot(undefined, profileId);
         } catch (error) {
           ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
         }
@@ -2337,7 +2473,7 @@ wss.on("connection", async (ws) => {
 
       if (payload.type === "queue_previous") {
         try {
-          const nextState = await advanceQueueWithSegue(-1);
+          const nextState = await advanceQueueWithSegue(-1, undefined, profileId);
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可切换的歌曲队列" } }));
           }
@@ -2358,7 +2494,7 @@ wss.on("connection", async (ws) => {
         const forceRefresh = (payload.data?.forceRefresh ?? payload.forceRefresh) === true;
 
         try {
-          const nextState = await playSelectedQueueTrack(trackId, { forceRefresh });
+          const nextState = await playSelectedQueueTrack(trackId, { forceRefresh }, profileId);
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "未找到对应的队列歌曲" } }));
           }
@@ -2370,8 +2506,8 @@ wss.on("connection", async (ws) => {
 
       if (payload.type === "playback_issue") {
         try {
-          await recordClientPlaybackIssue(payload);
-          await broadcastStateSnapshot();
+          await recordClientPlaybackIssue(payload, profileId);
+          await broadcastStateSnapshot(undefined, profileId);
         } catch (error) {
           ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
         }
@@ -2385,10 +2521,10 @@ wss.on("connection", async (ws) => {
         if (!text) return;
 
         const userTimestamp = Date.now();
-        const stateAfterUserMessage = await db.addChatMessage({ role: "user", text, timestamp: userTimestamp });
-        broadcast({ type: "chat", data: { role: "user", text, timestamp: userTimestamp } });
+        const stateAfterUserMessage = await db.addChatMessage({ role: "user", text, timestamp: userTimestamp }, profileId);
+        broadcast({ type: "chat", data: { role: "user", text, timestamp: userTimestamp } }, profileId);
 
-        const routeSourceState = stateAfterUserMessage ?? await db.getState();
+        const routeSourceState = stateAfterUserMessage ?? await db.getState(profileId);
         const routeContext: ChatRouteContext = {
           currentTrack: routeSourceState.currentTrack,
           currentProgram: routeSourceState.currentProgram,
@@ -2396,14 +2532,14 @@ wss.on("connection", async (ws) => {
         };
         const chatRoute = await routeChatIntentWithSemanticFallback(text, routeContext);
         if (chatRoute.action === "answer_weather") {
-          await answerWeatherChat(text);
+          await answerWeatherChat(text, profileId);
           return;
         }
 
         if (chatRoute.action === "skip_track") {
           const nextState = await advanceQueueWithSegue(1, {
             feedback: { type: "skip_track", note: "implicit: chat_skip" },
-          });
+          }, profileId);
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可切换的歌曲队列" } }));
           }
@@ -2411,7 +2547,7 @@ wss.on("connection", async (ws) => {
         }
 
         if (chatRoute.action === "resume_queue") {
-          const state = await ensurePlayableQueueState();
+          const state = await ensurePlayableQueueState(undefined, profileId);
           if (!state.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可播放的歌曲队列" } }));
             return;
@@ -2426,23 +2562,24 @@ wss.on("connection", async (ws) => {
           broadcast({
             type: "dj_message",
             data: { text: replyText, timestamp: djTimestamp },
-          });
-          await db.addChatMessage({ role: "dj", text: replyText, timestamp: djTimestamp });
+          }, profileId);
+          await db.addChatMessage({ role: "dj", text: replyText, timestamp: djTimestamp }, profileId);
           broadcast({
             type: "track",
             data: toClientStoredTrack(state.currentTrack),
-          });
-          broadcast({ type: "status", data: "playing" });
+          }, profileId);
+          broadcast({ type: "status", data: "playing" }, profileId);
           return;
         }
 
         if (chatRoute.action === "replan_queue") {
-          broadcast({ type: "status", data: "thinking" });
+          broadcast({ type: "status", data: "thinking" }, profileId);
           try {
             const result = await pipeline.runChatSwitchProgram(text, {
               preserveCurrentTrack: chatRoute.preserveCurrentTrack ?? true,
+              profileId,
             });
-            await broadcastPipelineResult(result);
+            await broadcastPipelineResult(result, profileId);
           } catch (error) {
             ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
           }
@@ -2450,10 +2587,10 @@ wss.on("connection", async (ws) => {
         }
 
         if (chatRoute.action === "trigger_pipeline" && chatRoute.mode) {
-          broadcast({ type: "status", data: "thinking" });
+          broadcast({ type: "status", data: "thinking" }, profileId);
           try {
-            const result = await pipeline.runPipeline(chatRoute.mode);
-            await broadcastPipelineResult(result);
+            const result = await pipeline.runPipeline(chatRoute.mode, { profileId });
+            await broadcastPipelineResult(result, profileId);
           } catch (error) {
             ws.send(JSON.stringify({ type: "error", data: { message: getErrorMessage(error) } }));
           }
@@ -2461,13 +2598,13 @@ wss.on("connection", async (ws) => {
         }
 
         if (chatRoute.intent === "recommendation_reason") {
-          const state = await db.getState();
+          const state = await db.getState(profileId);
           if (state.currentTrack) {
-            await addTrackFeedbackFromState(state, state.currentTrack, "ask_about_track", "implicit: recommendation reason question");
+            await addTrackFeedbackFromState(state, state.currentTrack, "ask_about_track", "implicit: recommendation reason question", profileId);
           }
         }
 
-        await replyOnlyChat(text, chatRoute);
+        await replyOnlyChat(text, chatRoute, profileId);
       }
     } catch (e) {}
   });

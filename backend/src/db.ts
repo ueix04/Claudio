@@ -251,6 +251,30 @@ export interface AppState {
   lastInteraction: number;
 }
 
+export const DEFAULT_PROFILE_ID = "default";
+
+export interface UserProfile {
+  id: string;
+  displayName: string;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number;
+}
+
+export interface RootState {
+  schemaVersion: 2;
+  profiles: UserProfile[];
+  activeProfileId: string;
+  profileStates: Record<string, AppState>;
+}
+
+export class ProfileNotFoundError extends Error {
+  constructor(profileId: string) {
+    super(`Profile not found: ${profileId}`);
+    this.name = "ProfileNotFoundError";
+  }
+}
+
 const defaultState = (): AppState => ({
   status: "idle",
   currentTrack: null,
@@ -275,73 +299,212 @@ const defaultState = (): AppState => ({
 
 const stateFilePath = resolve(dataDir, "state.json");
 
-let db: Low<AppState> | null = null;
+let db: Low<RootState> | null = null;
+let shouldPersistInitialState = false;
+
+function defaultProfile(now = Date.now()): UserProfile {
+  return {
+    id: DEFAULT_PROFILE_ID,
+    displayName: "xian",
+    createdAt: now,
+    updatedAt: now,
+    lastUsedAt: now,
+  };
+}
+
+function defaultRootState(): RootState {
+  const profile = defaultProfile();
+  return {
+    schemaVersion: 2,
+    profiles: [profile],
+    activeProfileId: profile.id,
+    profileStates: {
+      [profile.id]: defaultState(),
+    },
+  };
+}
+
+function normalizeAppState(parsed?: Partial<AppState>): AppState {
+  const fallback = defaultState();
+  if (!parsed || typeof parsed !== "object") {
+    return fallback;
+  }
+
+  return {
+    ...fallback,
+    ...parsed,
+    djProfile: {
+      ...fallback.djProfile,
+      ...(parsed.djProfile ?? {}),
+    },
+    radioQueue: Array.isArray(parsed.radioQueue) ? parsed.radioQueue : fallback.radioQueue,
+    currentQueueIndex: typeof parsed.currentQueueIndex === "number"
+      ? parsed.currentQueueIndex
+      : fallback.currentQueueIndex,
+    currentProgram: parsed.currentProgram ?? fallback.currentProgram,
+    chatHistory: Array.isArray(parsed.chatHistory) ? parsed.chatHistory : fallback.chatHistory,
+    playHistory: Array.isArray(parsed.playHistory) ? parsed.playHistory : fallback.playHistory,
+    userFeedback: Array.isArray(parsed.userFeedback) ? parsed.userFeedback : fallback.userFeedback,
+    discoveryCandidates: Array.isArray(parsed.discoveryCandidates)
+      ? parsed.discoveryCandidates
+      : fallback.discoveryCandidates,
+    listenChecks: Array.isArray(parsed.listenChecks) ? parsed.listenChecks : fallback.listenChecks,
+    playlists: Array.isArray(parsed.playlists) ? parsed.playlists : fallback.playlists,
+    neteaseSnapshot: parsed.neteaseSnapshot ?? fallback.neteaseSnapshot,
+    favorites: Array.isArray(parsed.favorites) ? parsed.favorites : fallback.favorites,
+  };
+}
+
+function isRootState(value: unknown): value is Partial<RootState> {
+  return Boolean(
+    value
+      && typeof value === "object"
+      && "profileStates" in value
+      && "profiles" in value,
+  );
+}
+
+function normalizeRootState(parsed: Partial<RootState>): RootState {
+  const fallback = defaultRootState();
+  const rawProfiles = Array.isArray(parsed.profiles) ? parsed.profiles : fallback.profiles;
+  const profileStates = parsed.profileStates && typeof parsed.profileStates === "object"
+    ? parsed.profileStates
+    : {};
+
+  const profiles = rawProfiles.flatMap((profile) => {
+    if (!profile || typeof profile.id !== "string" || !profile.id.trim()) {
+      return [];
+    }
+    const now = Date.now();
+    return [{
+      id: profile.id.trim(),
+      displayName: typeof profile.displayName === "string" && profile.displayName.trim()
+        ? profile.displayName.trim()
+        : profile.id.trim(),
+      createdAt: typeof profile.createdAt === "number" ? profile.createdAt : now,
+      updatedAt: typeof profile.updatedAt === "number" ? profile.updatedAt : now,
+      lastUsedAt: typeof profile.lastUsedAt === "number" ? profile.lastUsedAt : now,
+    } satisfies UserProfile];
+  });
+
+  const dedupedProfiles = profiles.filter((profile, index) =>
+    profiles.findIndex((candidate) => candidate.id === profile.id) === index,
+  );
+  const normalizedProfiles = dedupedProfiles.length > 0 ? dedupedProfiles : fallback.profiles;
+  const normalizedStates = Object.fromEntries(
+    normalizedProfiles.map((profile) => [
+      profile.id,
+      normalizeAppState(profileStates[profile.id]),
+    ]),
+  );
+  const activeProfileId = typeof parsed.activeProfileId === "string"
+    && normalizedStates[parsed.activeProfileId]
+    ? parsed.activeProfileId
+    : normalizedProfiles[0]?.id ?? DEFAULT_PROFILE_ID;
+
+  return {
+    schemaVersion: 2,
+    profiles: normalizedProfiles,
+    activeProfileId,
+    profileStates: normalizedStates,
+  };
+}
+
+function migrateLegacyState(parsed: Partial<AppState>): RootState {
+  const profile = defaultProfile();
+  const state = normalizeAppState(parsed);
+  profile.lastUsedAt = state.lastInteraction;
+  profile.updatedAt = state.lastInteraction;
+
+  return {
+    schemaVersion: 2,
+    profiles: [profile],
+    activeProfileId: profile.id,
+    profileStates: {
+      [profile.id]: state,
+    },
+  };
+}
 
 function ensureStateFile(): void {
   const directory = dirname(stateFilePath);
   mkdirSync(directory, { recursive: true });
 
   if (!existsSync(stateFilePath)) {
-    writeFileSync(stateFilePath, JSON.stringify(defaultState(), null, 2), "utf-8");
+    writeFileSync(stateFilePath, JSON.stringify(defaultRootState(), null, 2), "utf-8");
   }
 }
 
-function loadInitialState(): AppState {
+function loadInitialState(): RootState {
   try {
     const raw = readFileSync(stateFilePath, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<AppState>;
-    return {
-      ...defaultState(),
-      ...parsed,
-      djProfile: {
-        ...defaultState().djProfile,
-        ...(parsed.djProfile ?? {}),
-      },
-      radioQueue: Array.isArray(parsed.radioQueue)
-        ? parsed.radioQueue
-        : defaultState().radioQueue,
-      currentQueueIndex: typeof parsed.currentQueueIndex === "number"
-        ? parsed.currentQueueIndex
-        : defaultState().currentQueueIndex,
-      currentProgram: parsed.currentProgram ?? defaultState().currentProgram,
-      neteaseSnapshot: parsed.neteaseSnapshot ?? defaultState().neteaseSnapshot,
-      chatHistory: Array.isArray(parsed.chatHistory)
-        ? parsed.chatHistory
-        : defaultState().chatHistory,
-      listenChecks: Array.isArray(parsed.listenChecks)
-        ? parsed.listenChecks
-        : defaultState().listenChecks,
-      userFeedback: Array.isArray(parsed.userFeedback)
-        ? parsed.userFeedback
-        : defaultState().userFeedback,
-      discoveryCandidates: Array.isArray(parsed.discoveryCandidates)
-        ? parsed.discoveryCandidates
-        : defaultState().discoveryCandidates,
-    };
+    const parsed = JSON.parse(raw) as Partial<RootState> | Partial<AppState>;
+    if (isRootState(parsed)) {
+      return normalizeRootState(parsed);
+    }
+    shouldPersistInitialState = true;
+    return migrateLegacyState(parsed as Partial<AppState>);
   } catch {
-    return defaultState();
+    shouldPersistInitialState = true;
+    return defaultRootState();
   }
 }
 
-function createDb(): Low<AppState> {
+function createDb(): Low<RootState> {
   ensureStateFile();
-  const adapter = new JSONFile<AppState>(stateFilePath);
-  const instance = new Low<AppState>(adapter, defaultState());
+  const adapter = new JSONFile<RootState>(stateFilePath);
+  const instance = new Low<RootState>(adapter, defaultRootState());
   instance.data = loadInitialState();
   return instance;
 }
 
-function getMutableState(): AppState {
+function getMutableRootState(): RootState {
   const current = getDb().data;
   if (!current) {
-    const initial = defaultState();
+    const initial = defaultRootState();
     getDb().data = initial;
     return initial;
   }
   return current;
 }
 
-export function getDb(): Low<AppState> {
+function resolveProfileId(profileId?: string): string {
+  const normalized = profileId?.trim();
+  return normalized || DEFAULT_PROFILE_ID;
+}
+
+function getMutableState(profileId?: string): AppState {
+  const id = resolveProfileId(profileId);
+  const root = getMutableRootState();
+  const state = root.profileStates[id];
+  if (!state) {
+    throw new ProfileNotFoundError(id);
+  }
+  return state;
+}
+
+function touchProfile(root: RootState, profileId: string): void {
+  const profile = root.profiles.find((item) => item.id === profileId);
+  if (!profile) {
+    return;
+  }
+  const now = Date.now();
+  profile.lastUsedAt = now;
+  profile.updatedAt = now;
+  root.activeProfileId = profileId;
+}
+
+function createProfileId(displayName: string): string {
+  const base = displayName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32) || "profile";
+  return `profile_${base}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export function getDb(): Low<RootState> {
   if (!db) {
     db = createDb();
   }
@@ -349,8 +512,83 @@ export function getDb(): Low<AppState> {
   return db;
 }
 
-export async function updateState(patch: Partial<AppState>): Promise<AppState> {
-  const current = getMutableState();
+export async function getProfiles(): Promise<UserProfile[]> {
+  return [...getMutableRootState().profiles].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+}
+
+export async function getProfile(profileId: string): Promise<UserProfile | null> {
+  const id = resolveProfileId(profileId);
+  return getMutableRootState().profiles.find((profile) => profile.id === id) ?? null;
+}
+
+export function hasProfile(profileId: string): boolean {
+  const id = resolveProfileId(profileId);
+  return Boolean(getMutableRootState().profileStates[id]);
+}
+
+export async function createProfile(input?: { displayName?: string }): Promise<UserProfile> {
+  const root = getMutableRootState();
+  const displayName = input?.displayName?.trim() || `Profile ${root.profiles.length + 1}`;
+  let id = createProfileId(displayName);
+  while (root.profileStates[id]) {
+    id = createProfileId(displayName);
+  }
+
+  const now = Date.now();
+  const profile: UserProfile = {
+    id,
+    displayName,
+    createdAt: now,
+    updatedAt: now,
+    lastUsedAt: now,
+  };
+  root.profiles.push(profile);
+  root.profileStates[id] = defaultState();
+  root.activeProfileId = id;
+  getDb().data = root;
+  await getDb().write();
+  return profile;
+}
+
+export async function updateProfile(
+  profileId: string,
+  patch: { displayName?: string },
+): Promise<UserProfile> {
+  const id = resolveProfileId(profileId);
+  const root = getMutableRootState();
+  const profile = root.profiles.find((item) => item.id === id);
+  if (!profile) {
+    throw new ProfileNotFoundError(id);
+  }
+
+  if (typeof patch.displayName === "string" && patch.displayName.trim()) {
+    profile.displayName = patch.displayName.trim().slice(0, 80);
+  }
+  profile.updatedAt = Date.now();
+  profile.lastUsedAt = profile.updatedAt;
+  root.activeProfileId = id;
+  getDb().data = root;
+  await getDb().write();
+  return profile;
+}
+
+export async function touchUserProfile(profileId?: string): Promise<UserProfile> {
+  const id = resolveProfileId(profileId);
+  const root = getMutableRootState();
+  const profile = root.profiles.find((item) => item.id === id);
+  if (!profile) {
+    throw new ProfileNotFoundError(id);
+  }
+  touchProfile(root, id);
+  getDb().data = root;
+  await getDb().write();
+  return profile;
+}
+
+export async function updateState(patch: Partial<AppState>, profileId?: string): Promise<AppState> {
+  const id = resolveProfileId(profileId);
+  const root = getMutableRootState();
+  const current = getMutableState(id);
   const next: AppState = {
     ...current,
     ...patch,
@@ -360,23 +598,28 @@ export async function updateState(patch: Partial<AppState>): Promise<AppState> {
     chatHistory: patch.chatHistory ?? current.chatHistory,
   };
 
-  getDb().data = next;
+  root.profileStates[id] = next;
+  touchProfile(root, id);
+  getDb().data = root;
   await getDb().write();
   return next;
 }
 
-export async function getState(): Promise<AppState> {
-  const state = getMutableState();
-  if (!existsSync(stateFilePath)) {
+export async function getState(profileId?: string): Promise<AppState> {
+  const state = getMutableState(profileId);
+  if (!existsSync(stateFilePath) || shouldPersistInitialState) {
     await getDb().write();
+    shouldPersistInitialState = false;
   }
   return state;
 }
 
-export async function addChatMessage(msg: Omit<ChatMessage, "timestamp"> & { timestamp?: number }): Promise<AppState> {
-  const current = getMutableState();
-  const next: AppState = {
-    ...current,
+export async function addChatMessage(
+  msg: Omit<ChatMessage, "timestamp"> & { timestamp?: number },
+  profileId?: string,
+): Promise<AppState> {
+  const current = getMutableState(profileId);
+  return updateState({
     chatHistory: [
       ...current.chatHistory,
       {
@@ -386,19 +629,15 @@ export async function addChatMessage(msg: Omit<ChatMessage, "timestamp"> & { tim
       },
     ],
     lastInteraction: Date.now(),
-  };
-
-  getDb().data = next;
-  await getDb().write();
-  return next;
+  }, profileId);
 }
 
-export async function setStatus(status: AppStatus): Promise<AppState> {
-  return updateState({ status, lastInteraction: Date.now() });
+export async function setStatus(status: AppStatus, profileId?: string): Promise<AppState> {
+  return updateState({ status, lastInteraction: Date.now() }, profileId);
 }
 
-export async function setCurrentTrack(track: Track | null): Promise<AppState> {
-  return updateState({ currentTrack: track, lastInteraction: Date.now() });
+export async function setCurrentTrack(track: Track | null, profileId?: string): Promise<AppState> {
+  return updateState({ currentTrack: track, lastInteraction: Date.now() }, profileId);
 }
 
 export async function setRadioQueue(
@@ -407,6 +646,7 @@ export async function setRadioQueue(
     currentIndex?: number;
     program?: RadioProgram | null;
   },
+  profileId?: string,
 ): Promise<AppState> {
   const normalizedQueue = queue.map((track) => ({
     id: track.id,
@@ -436,11 +676,11 @@ export async function setRadioQueue(
     currentTrack: normalizedQueue[boundedIndex] ?? null,
     currentProgram: options?.program ?? null,
     lastInteraction: Date.now(),
-  });
+  }, profileId);
 }
 
-export async function advanceRadioQueue(step = 1): Promise<AppState | null> {
-  const current = getMutableState();
+export async function advanceRadioQueue(step = 1, profileId?: string): Promise<AppState | null> {
+  const current = getMutableState(profileId);
   if (current.radioQueue.length === 0) {
     return null;
   }
@@ -455,15 +695,15 @@ export async function advanceRadioQueue(step = 1): Promise<AppState | null> {
     currentQueueIndex: nextIndex,
     currentTrack: current.radioQueue[nextIndex] ?? null,
     lastInteraction: Date.now(),
-  });
+  }, profileId);
 }
 
-export async function getRadioQueue(): Promise<Track[]> {
-  return getMutableState().radioQueue;
+export async function getRadioQueue(profileId?: string): Promise<Track[]> {
+  return getMutableState(profileId).radioQueue;
 }
 
-export async function selectRadioQueueTrack(trackId: string): Promise<AppState | null> {
-  const current = getMutableState();
+export async function selectRadioQueueTrack(trackId: string, profileId?: string): Promise<AppState | null> {
+  const current = getMutableState(profileId);
   if (current.radioQueue.length === 0) {
     return null;
   }
@@ -477,10 +717,10 @@ export async function selectRadioQueueTrack(trackId: string): Promise<AppState |
     currentQueueIndex: nextIndex,
     currentTrack: current.radioQueue[nextIndex] ?? null,
     lastInteraction: Date.now(),
-  });
+  }, profileId);
 }
 
-export async function addPlaylist(name: string, tracks: PlaylistItem[]): Promise<Playlist> {
+export async function addPlaylist(name: string, tracks: PlaylistItem[], profileId?: string): Promise<Playlist> {
   const playlist: Playlist = {
     id: `pl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name,
@@ -488,40 +728,32 @@ export async function addPlaylist(name: string, tracks: PlaylistItem[]): Promise
     createdAt: Date.now(),
   };
 
-  const current = getMutableState();
-  const next: AppState = {
-    ...current,
+  const current = getMutableState(profileId);
+  await updateState({
     playlists: [...current.playlists, playlist],
     lastInteraction: Date.now(),
-  };
-
-  getDb().data = next;
-  await getDb().write();
+  }, profileId);
   return playlist;
 }
 
-export async function getPlaylists(): Promise<Playlist[]> {
-  return getMutableState().playlists;
+export async function getPlaylists(profileId?: string): Promise<Playlist[]> {
+  return getMutableState(profileId).playlists;
 }
 
-export async function removePlaylist(id: string): Promise<boolean> {
-  const current = getMutableState();
+export async function removePlaylist(id: string, profileId?: string): Promise<boolean> {
+  const current = getMutableState(profileId);
   const idx = current.playlists.findIndex((p) => p.id === id);
   if (idx === -1) return false;
 
-  const next: AppState = {
-    ...current,
+  await updateState({
     playlists: current.playlists.filter((p) => p.id !== id),
     lastInteraction: Date.now(),
-  };
-
-  getDb().data = next;
-  await getDb().write();
+  }, profileId);
   return true;
 }
 
-export function summarizePlaylists(): string {
-  const playlists = getMutableState().playlists;
+export function summarizePlaylists(profileId?: string): string {
+  const playlists = getMutableState(profileId).playlists;
   if (playlists.length === 0) return "";
 
   return playlists
@@ -536,19 +768,19 @@ export function summarizePlaylists(): string {
     .join("\n");
 }
 
-export async function getNeteaseSnapshot(): Promise<NeteaseSnapshot | null> {
-  return getMutableState().neteaseSnapshot;
+export async function getNeteaseSnapshot(profileId?: string): Promise<NeteaseSnapshot | null> {
+  return getMutableState(profileId).neteaseSnapshot;
 }
 
-export async function setNeteaseSnapshot(snapshot: NeteaseSnapshot): Promise<AppState> {
+export async function setNeteaseSnapshot(snapshot: NeteaseSnapshot, profileId?: string): Promise<AppState> {
   return updateState({
     neteaseSnapshot: snapshot,
     lastInteraction: Date.now(),
-  });
+  }, profileId);
 }
 
-export function summarizeNeteaseSnapshot(limit = 5): string {
-  const snapshot = getMutableState().neteaseSnapshot;
+export function summarizeNeteaseSnapshot(limit = 5, profileId?: string): string {
+  const snapshot = getMutableState(profileId).neteaseSnapshot;
   if (!snapshot || snapshot.playlists.length === 0) return "";
 
   const topPlaylists = [...snapshot.playlists]
@@ -569,68 +801,69 @@ export function summarizeNeteaseSnapshot(limit = 5): string {
     .join("\n")}\n\n请根据这些歌单推测用户的音乐口味（年代、风格、语种、情绪），在此基础上做推荐。`;
 }
 
-export async function getFavorites(): Promise<string[]> {
-  return getMutableState().favorites;
+export async function getFavorites(profileId?: string): Promise<string[]> {
+  return getMutableState(profileId).favorites;
 }
 
-export async function addFavorite(trackId: string): Promise<AppState> {
-  const current = getMutableState();
+export async function addFavorite(trackId: string, profileId?: string): Promise<AppState> {
+  const current = getMutableState(profileId);
   if (current.favorites.includes(trackId)) return current;
   return updateState({
     favorites: [...current.favorites, trackId],
     lastInteraction: Date.now(),
-  });
+  }, profileId);
 }
 
-export async function removeFavorite(trackId: string): Promise<AppState> {
-  const current = getMutableState();
+export async function removeFavorite(trackId: string, profileId?: string): Promise<AppState> {
+  const current = getMutableState(profileId);
   return updateState({
     favorites: current.favorites.filter((id) => id !== trackId),
     lastInteraction: Date.now(),
-  });
+  }, profileId);
 }
 
-export async function toggleFavorite(trackId: string): Promise<{ favorited: boolean }> {
-  const current = getMutableState();
+export async function toggleFavorite(trackId: string, profileId?: string): Promise<{ favorited: boolean }> {
+  const current = getMutableState(profileId);
   if (current.favorites.includes(trackId)) {
-    await removeFavorite(trackId);
+    await removeFavorite(trackId, profileId);
     return { favorited: false };
   }
-  await addFavorite(trackId);
+  await addFavorite(trackId, profileId);
   return { favorited: true };
 }
 
-export async function recordPlay(title: string, artist: string): Promise<AppState> {
-  const current = getMutableState();
+export async function recordPlay(title: string, artist: string, profileId?: string): Promise<AppState> {
+  const current = getMutableState(profileId);
   const record: PlayRecord = { title, artist, playedAt: Date.now() };
   const history = [record, ...current.playHistory];
-  return updateState({ playHistory: history, lastInteraction: Date.now() });
+  return updateState({ playHistory: history, lastInteraction: Date.now() }, profileId);
 }
 
-export async function getPlayHistory(limit = 20): Promise<PlayRecord[]> {
-  return getMutableState().playHistory.slice(0, limit);
+export async function getPlayHistory(limit = 20, profileId?: string): Promise<PlayRecord[]> {
+  return getMutableState(profileId).playHistory.slice(0, limit);
 }
 
 export async function addUserFeedback(
   feedback: Omit<UserFeedbackRecord, "id" | "createdAt">,
+  profileId?: string,
 ): Promise<UserFeedbackRecord> {
   const record: UserFeedbackRecord = {
     ...feedback,
     id: `feedback_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     createdAt: Date.now(),
   };
-  const current = getMutableState();
+  const current = getMutableState(profileId);
   const userFeedback = [record, ...current.userFeedback].slice(0, 200);
-  await updateState({ userFeedback, lastInteraction: Date.now() });
+  await updateState({ userFeedback, lastInteraction: Date.now() }, profileId);
   return record;
 }
 
-export async function getUserFeedback(limit = 50): Promise<UserFeedbackRecord[]> {
-  return getMutableState().userFeedback.slice(0, limit);
+export async function getUserFeedback(limit = 50, profileId?: string): Promise<UserFeedbackRecord[]> {
+  return getMutableState(profileId).userFeedback.slice(0, limit);
 }
 
-export function summarizeUserFeedback(limit = 20): string {
-  const feedback = getMutableState().userFeedback.slice(0, limit);
+export function summarizeUserFeedback(limit = 20, profileId?: string): string {
+  const feedback = getMutableState(profileId).userFeedback.slice(0, limit);
   if (feedback.length === 0) return "";
 
   const labels: Record<UserFeedbackType, string> = {
@@ -655,6 +888,7 @@ export function summarizeUserFeedback(limit = 20): string {
 
 export async function addDiscoveryCandidates(
   candidates: Array<Omit<DiscoveryCandidateRecord, "id" | "createdAt">>,
+  profileId?: string,
 ): Promise<DiscoveryCandidateRecord[]> {
   if (candidates.length === 0) return [];
 
@@ -664,18 +898,18 @@ export async function addDiscoveryCandidates(
     id: `discovery_${createdAt}_${index}_${Math.random().toString(36).slice(2, 8)}`,
     createdAt,
   }));
-  const current = getMutableState();
+  const current = getMutableState(profileId);
   const discoveryCandidates = [...records, ...current.discoveryCandidates].slice(0, 120);
-  await updateState({ discoveryCandidates, lastInteraction: Date.now() });
+  await updateState({ discoveryCandidates, lastInteraction: Date.now() }, profileId);
   return records;
 }
 
-export async function getDiscoveryCandidates(limit = 30): Promise<DiscoveryCandidateRecord[]> {
-  return getMutableState().discoveryCandidates.slice(0, limit);
+export async function getDiscoveryCandidates(limit = 30, profileId?: string): Promise<DiscoveryCandidateRecord[]> {
+  return getMutableState(profileId).discoveryCandidates.slice(0, limit);
 }
 
-export function summarizeDiscoveryCandidates(limit = 12): string {
-  const candidates = getMutableState().discoveryCandidates.slice(0, limit);
+export function summarizeDiscoveryCandidates(limit = 12, profileId?: string): string {
+  const candidates = getMutableState(profileId).discoveryCandidates.slice(0, limit);
   if (candidates.length === 0) return "";
 
   return `最近已验证探索候选：\n${candidates
@@ -687,18 +921,19 @@ export function summarizeDiscoveryCandidates(limit = 12): string {
 
 export async function addListenCheckRecord(
   record: Omit<ListenCheckRecord, "id" | "recordedAt">,
+  profileId?: string,
 ): Promise<ListenCheckRecord> {
   const nextRecord: ListenCheckRecord = {
     ...record,
     id: `listen_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     recordedAt: Date.now(),
   };
-  const current = getMutableState();
+  const current = getMutableState(profileId);
   const listenChecks = [nextRecord, ...current.listenChecks].slice(0, 20);
-  await updateState({ listenChecks, lastInteraction: Date.now() });
+  await updateState({ listenChecks, lastInteraction: Date.now() }, profileId);
   return nextRecord;
 }
 
-export async function getListenCheckRecords(limit = 10): Promise<ListenCheckRecord[]> {
-  return getMutableState().listenChecks.slice(0, limit);
+export async function getListenCheckRecords(limit = 10, profileId?: string): Promise<ListenCheckRecord[]> {
+  return getMutableState(profileId).listenChecks.slice(0, limit);
 }

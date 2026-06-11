@@ -8,6 +8,14 @@ export type ThemeMode = "dark" | "light";
 export type AudioEffectMode = "wave" | "border-pulse";
 export type TtsPreset = "冰糖" | "Dean";
 
+export type UserProfile = {
+  id: string;
+  displayName: string;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number;
+};
+
 export type DjProfile = {
   voice: string;
   style: string;

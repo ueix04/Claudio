@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -78,6 +78,62 @@ describe("db.ts", () => {
     const state = await getState();
 
     expect(state.status).toBe("thinking");
+  });
+
+  it("migrates legacy single-user state into the default profile", async () => {
+    mkdirSync(stateDirPath, { recursive: true });
+    writeFileSync(stateFilePath, JSON.stringify({
+      status: "playing",
+      chatHistory: [{ role: "user", text: "legacy hello", timestamp: 1 }],
+      favorites: ["legacy-track"],
+      lastInteraction: 1_700_000_000_000,
+    }), "utf-8");
+
+    const { getDb, getProfiles, getState } = await loadModule();
+
+    const state = await getState();
+    const profiles = await getProfiles();
+    const rootState = getDb().data;
+
+    expect(state.status).toBe("playing");
+    expect(state.chatHistory[0]).toMatchObject({ text: "legacy hello" });
+    expect(state.favorites).toEqual(["legacy-track"]);
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0]).toMatchObject({ id: "default", displayName: "xian" });
+    expect(rootState.schemaVersion).toBe(2);
+    expect(rootState.profileStates.default.favorites).toEqual(["legacy-track"]);
+  });
+
+  it("keeps profile state isolated", async () => {
+    const {
+      addFavorite,
+      addUserFeedback,
+      createProfile,
+      getFavorites,
+      getState,
+      getUserFeedback,
+      updateState,
+    } = await loadModule();
+
+    const sleepProfile = await createProfile({ displayName: "Sleep" });
+
+    await updateState({ status: "playing" });
+    await updateState({ status: "thinking" }, sleepProfile.id);
+    await addFavorite("default-track");
+    await addFavorite("sleep-track", sleepProfile.id);
+    await addUserFeedback({
+      type: "less_like_this",
+      trackId: "sleep-track",
+      title: "Sleep Track",
+      artist: "Night Artist",
+    }, sleepProfile.id);
+
+    expect((await getState()).status).toBe("playing");
+    expect((await getState(sleepProfile.id)).status).toBe("thinking");
+    expect(await getFavorites()).toEqual(["default-track"]);
+    expect(await getFavorites(sleepProfile.id)).toEqual(["sleep-track"]);
+    expect(await getUserFeedback()).toHaveLength(0);
+    expect(await getUserFeedback(50, sleepProfile.id)).toHaveLength(1);
   });
 
   it("appends chat messages without overwriting history", async () => {

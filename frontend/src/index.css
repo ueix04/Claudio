@@ -124,6 +124,74 @@ body {
   transform-origin: top left;
 }
 
+.profile-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(360px, calc(100% - 36px));
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--claudio-border) 82%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--claudio-surface-strong) 84%, transparent);
+  box-shadow: 0 12px 36px var(--claudio-soft-shadow);
+  backdrop-filter: blur(16px);
+}
+
+.profile-switcher-floating {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 80;
+}
+
+.profile-switcher-inline {
+  position: static;
+  width: fit-content;
+  max-width: 100%;
+  box-shadow: none;
+}
+
+.profile-switcher select,
+.profile-switcher input,
+.profile-switcher button {
+  height: 28px;
+  border: 1px solid color-mix(in srgb, var(--claudio-border) 88%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--claudio-bg-soft) 88%, transparent);
+  color: var(--claudio-text);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.profile-switcher select {
+  max-width: 148px;
+  padding: 0 24px 0 9px;
+}
+
+.profile-switcher input {
+  width: 138px;
+  padding: 0 9px;
+}
+
+.profile-switcher button {
+  padding: 0 9px;
+  color: var(--claudio-text-dim);
+}
+
+.profile-switcher button:hover,
+.profile-switcher select:hover,
+.profile-switcher input:focus {
+  border-color: var(--claudio-accent);
+  color: var(--claudio-text-strong);
+  outline: none;
+}
+
+.profile-switcher-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .app-panels {
   display: flex;
 }
@@ -1310,6 +1378,13 @@ body {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--claudio-surface) 88%, transparent), color-mix(in srgb, var(--claudio-bg) 84%, transparent));
   backdrop-filter: blur(14px);
+}
+
+.mobile-profile-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px 0;
+  flex-shrink: 0;
 }
 
 .mobile-avatar-button {

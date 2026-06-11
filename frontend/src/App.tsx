@@ -1,4 +1,5 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties, type FormEvent } from "react";
+import type { UserProfile } from "./types";
 import { LayoutManager, useLayout } from "./components/LayoutManager";
 import { PlayerPanel } from "./components/PlayerPanel";
 import { ChatPanel } from "./components/ChatPanel";
@@ -9,6 +10,10 @@ import { resolveAppShellAudioEffectClass } from "./audio-effects";
 function AppLayout() {
   const { mode, audioEffect, isCompactLayout } = useLayout();
   const {
+    profiles,
+    currentProfileId,
+    switchProfile,
+    createProfile,
     hasHydratedState,
     playerState,
     messages,
@@ -68,12 +73,29 @@ function AppLayout() {
   const chatWidth = mode === "player-fullscreen" ? "0%" : mode === "chat-fullscreen" ? "100%" : "50%";
   const appShellEffectClass = resolveAppShellAudioEffectClass(status, audioEffect);
   const panelStyle = (width: string) => ({ "--app-panel-width": width } as CSSProperties);
+  const renderProfileSwitcher = (variant: "floating" | "inline") => (
+    <ProfileSwitcher
+      profiles={profiles}
+      currentProfileId={currentProfileId}
+      onSwitchProfile={switchProfile}
+      onCreateProfile={async (displayName) => {
+        try {
+          const profile = await createProfile(displayName);
+          showUtilityNotice(`Profile: ${profile.displayName}`);
+        } catch (error) {
+          showUtilityNotice(error instanceof Error ? error.message : "Create profile failed");
+        }
+      }}
+      variant={variant}
+    />
+  );
 
   return (
     <div className="app-frame h-screen h-dvh w-screen overflow-hidden p-3 md:p-4">
       <div className={`app-shell h-full w-full overflow-hidden rounded-[28px] border relative ${appShellEffectClass}`}>
         <div className="app-shell-vignette pointer-events-none absolute inset-0 z-0"></div>
         <div className="absolute inset-0 app-shell-grid pointer-events-none z-0"></div>
+        {!isCompactLayout && renderProfileSwitcher("floating")}
         <div className="app-shell-scaled">
           <div className={`relative z-10 h-full w-full ${isCompactLayout ? "mobile-radio-host" : `app-panels app-panels-${mode}`}`}>
             <audio ref={audioRef} className="hidden" preload="auto" />
@@ -100,6 +122,7 @@ function AppLayout() {
                 isTriggerBusy={isTriggerBusy}
                 subtitle={subtitle}
                 subtitleFading={subtitleFading}
+                profileSwitcher={renderProfileSwitcher("inline")}
                 onSendMessage={sendMessage}
                 onReplayAudio={onReplayAudio}
                 onVoicePresetChange={updateVoicePreset}
@@ -211,6 +234,68 @@ function AppLayout() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface ProfileSwitcherProps {
+  profiles: UserProfile[];
+  currentProfileId: string;
+  onSwitchProfile: (profileId: string) => void;
+  onCreateProfile: (displayName?: string) => Promise<void>;
+  variant?: "floating" | "inline";
+}
+
+function ProfileSwitcher({
+  profiles,
+  currentProfileId,
+  onSwitchProfile,
+  onCreateProfile,
+  variant = "floating",
+}: ProfileSwitcherProps) {
+  const [isCreating, setIsCreating] = useState(false);
+  const [draftName, setDraftName] = useState("");
+
+  const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await onCreateProfile(draftName.trim() || undefined);
+    setDraftName("");
+    setIsCreating(false);
+  };
+
+  return (
+    <div className={`profile-switcher profile-switcher-${variant}`}>
+      {isCreating ? (
+        <form className="profile-switcher-create" onSubmit={handleCreate}>
+          <input
+            value={draftName}
+            onChange={(event) => setDraftName(event.target.value)}
+            placeholder="Profile name"
+            maxLength={80}
+            autoFocus
+          />
+          <button type="submit" title="Create profile">Create</button>
+          <button type="button" title="Cancel" onClick={() => setIsCreating(false)}>Cancel</button>
+        </form>
+      ) : (
+        <>
+          <select
+            value={currentProfileId}
+            onChange={(event) => onSwitchProfile(event.target.value)}
+            title="Profile"
+            aria-label="Profile"
+          >
+            {profiles.length === 0 ? (
+              <option value={currentProfileId}>xian</option>
+            ) : profiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.displayName}
+              </option>
+            ))}
+          </select>
+          <button type="button" title="Create profile" onClick={() => setIsCreating(true)}>+</button>
+        </>
+      )}
     </div>
   );
 }

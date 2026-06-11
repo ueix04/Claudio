@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AppStatus,
   ChatEntry,
@@ -36,6 +36,7 @@ interface MobileRadioLayoutProps {
   isTriggerBusy: boolean;
   subtitle: string;
   subtitleFading: boolean;
+  profileSwitcher?: ReactNode;
   onSendMessage: (text: string) => void;
   onReplayAudio: (messageId: string) => void;
   onVoicePresetChange: (preset: TtsPreset) => void;
@@ -99,6 +100,7 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
   isTriggerBusy,
   subtitle,
   subtitleFading,
+  profileSwitcher,
   onSendMessage,
   onReplayAudio,
   onVoicePresetChange,
@@ -444,6 +446,12 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
           </div>
         </div>
       </header>
+
+      {profileSwitcher && (
+        <div className="mobile-profile-row">
+          {profileSwitcher}
+        </div>
+      )}
 
       <section className="mobile-clock-stage">
         <PixelClock

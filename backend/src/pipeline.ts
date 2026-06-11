@@ -119,13 +119,13 @@ const CHAT_SWITCH_FALLBACK_TRACK_GROUPS = {
   ],
 } satisfies Record<string, Array<{ title: string; artist: string }>>;
 
-async function buildNcmPlaylistContext(): Promise<string> {
-  const indexedSummary = await tasteProfile.summarizeTasteProfile();
+async function buildNcmPlaylistContext(profileId?: string): Promise<string> {
+  const indexedSummary = await tasteProfile.summarizeTasteProfile(profileId);
   if (indexedSummary) {
     return indexedSummary;
   }
 
-  return db.summarizeNeteaseSnapshot();
+  return db.summarizeNeteaseSnapshot(5, profileId);
 }
 
 export interface PipelineResult {
@@ -191,6 +191,7 @@ interface DiscoveredPlayableTrack {
 }
 
 interface MusicContext {
+  profileId?: string;
   state: Awaited<ReturnType<typeof db.getState>>;
   timeOfDay: string;
   recentHistory: string;
@@ -200,6 +201,40 @@ interface MusicContext {
   recommendationCandidates: tasteProfile.RecommendationCandidate[];
   localCandidateMap: Map<number, tasteProfile.RecommendationCandidate>;
   weatherContext?: string;
+}
+
+function getProfileState(profileId?: string) {
+  return profileId ? db.getState(profileId) : db.getState();
+}
+
+function setProfileStatus(status: db.AppStatus, profileId?: string) {
+  return profileId ? db.setStatus(status, profileId) : db.setStatus(status);
+}
+
+function setProfileRadioQueue(
+  queue: db.Track[],
+  options: Parameters<typeof db.setRadioQueue>[1],
+  profileId?: string,
+) {
+  return profileId ? db.setRadioQueue(queue, options, profileId) : db.setRadioQueue(queue, options);
+}
+
+function addProfileChatMessage(
+  msg: Parameters<typeof db.addChatMessage>[0],
+  profileId?: string,
+) {
+  return profileId ? db.addChatMessage(msg, profileId) : db.addChatMessage(msg);
+}
+
+function recordProfilePlay(title: string, artist: string, profileId?: string) {
+  return profileId ? db.recordPlay(title, artist, profileId) : db.recordPlay(title, artist);
+}
+
+function addProfileDiscoveryCandidates(
+  candidates: Parameters<typeof db.addDiscoveryCandidates>[0],
+  profileId?: string,
+) {
+  return profileId ? db.addDiscoveryCandidates(candidates, profileId) : db.addDiscoveryCandidates(candidates);
 }
 
 async function buildWeatherContext(
@@ -228,17 +263,19 @@ async function buildOptionalWeatherContext(): Promise<string | undefined> {
 
 async function gatherMusicContext(
   options?: {
+    profileId?: string;
     weatherMode?: "morning_brief" | "mood_pick" | "random_discover";
     includeOptionalWeather?: boolean;
     candidateLimit?: number;
   },
 ): Promise<MusicContext> {
-  const state = await db.getState();
+  const profileId = options?.profileId;
+  const state = await getProfileState(profileId);
   const recentHistory = state.chatHistory
     .slice(-10)
     .map((msg) => `${msg.role}: ${msg.text}`)
     .join("\n");
-  const feedbackSummary = db.summarizeUserFeedback(20);
+  const feedbackSummary = db.summarizeUserFeedback(20, profileId);
   const runtimeTasteContext = tasteProfile.summarizeRuntimeTasteProfile(
     Array.isArray(state.userFeedback) ? state.userFeedback : [],
   );
@@ -246,11 +283,11 @@ async function gatherMusicContext(
 
   const timeOfDay = formatStationTimeOfDay();
 
-  const playlistContext = db.summarizePlaylists();
+  const playlistContext = db.summarizePlaylists(profileId);
   const [ncmPlaylistContext, snapshot, profile, localLibraryContext, weatherContext] = await Promise.all([
-    buildNcmPlaylistContext(),
-    db.getNeteaseSnapshot(),
-    tasteProfile.getTasteProfile(),
+    buildNcmPlaylistContext(profileId),
+    db.getNeteaseSnapshot(profileId),
+    tasteProfile.getTasteProfile(profileId),
     musicSources.summarizeLocalLibraryForPrompt(options?.candidateLimit ?? 20),
     options?.weatherMode
       ? buildWeatherContext(options.weatherMode)
@@ -278,6 +315,7 @@ async function gatherMusicContext(
     .join("\n\n");
 
   return {
+    profileId,
     state,
     timeOfDay,
     recentHistory,
@@ -328,7 +366,7 @@ function buildDiscoveryScoutPrompt(
   const language = djLanguage.resolveDjCopyLanguage(state.djProfile);
   const useEnglish = language === "en";
   const recentNegative = hasRecentNegativeFeedback(context);
-  const verifiedContext = db.summarizeDiscoveryCandidates(8);
+  const verifiedContext = db.summarizeDiscoveryCandidates(8, context.profileId);
 
   if (useEnglish) {
     return `You are Claudio's Discovery Scout.
@@ -492,7 +530,7 @@ async function resolveDiscoveryDirections(
   }
 
   if (discoveries.length > 0) {
-    await db.addDiscoveryCandidates(discoveries.map((discovery) => ({
+    await addProfileDiscoveryCandidates(discoveries.map((discovery) => ({
       query: discovery.query,
       direction: discovery.direction,
       title: discovery.track.name,
@@ -503,7 +541,7 @@ async function resolveDiscoveryDirections(
       sourceTrackId: discovery.track.sourceTrackId,
       urlSource: discovery.track.urlSource,
       health: "ready",
-    })));
+    })), context.profileId);
   }
 
   return discoveries;
@@ -1205,7 +1243,7 @@ async function applyProgramQueue(
     ]
     : upcomingQueue;
   const generatedAt = Date.now();
-  await db.setRadioQueue(queue, {
+  await setProfileRadioQueue(queue, {
     currentIndex: 0,
     program: radioSession.createRadioProgramMetadata({
       source,
@@ -1219,30 +1257,33 @@ async function applyProgramQueue(
       userRequest,
       tracks: queue,
     }),
-  });
-  await db.addChatMessage({
+  }, context.profileId);
+  await addProfileChatMessage({
     role: "dj",
     text: response.say,
-  });
+  }, context.profileId);
   if (!preserveCurrentTrack && playableTracks[0]) {
-    await db.recordPlay(playableTracks[0].name, playableTracks[0].artist);
+    await recordProfilePlay(playableTracks[0].name, playableTracks[0].artist, context.profileId);
   }
 }
 
 export async function runStartupRadioProgram(
   options?: {
     background?: boolean;
+    profileId?: string;
   },
 ): Promise<PipelineResult> {
   const background = options?.background ?? false;
+  const profileId = options?.profileId;
 
   try {
     await ensureDataDirs();
     if (!background) {
-      await db.setStatus("thinking");
+      await setProfileStatus("thinking", profileId);
     }
 
     const context = await gatherMusicContext({
+      profileId,
       includeOptionalWeather: true,
       candidateLimit: 28,
     });
@@ -1262,7 +1303,7 @@ export async function runStartupRadioProgram(
     const ttsText = clampDjLine(response.ttsText, say, 140);
 
     if (!background) {
-      await db.setStatus("speaking");
+      await setProfileStatus("speaking", profileId);
     }
     const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
@@ -1288,7 +1329,7 @@ export async function runStartupRadioProgram(
       speechPlan: radioSession.buildDefaultSpeechPlan(playableTracks.length),
     };
     await applyProgramQueue("startup", programResponse, playableTracks, context);
-    await db.setStatus("playing");
+    await setProfileStatus("playing", profileId);
 
     return {
       status: "success",
@@ -1299,7 +1340,7 @@ export async function runStartupRadioProgram(
       programTitle: response.title,
     };
   } catch (error) {
-    await db.setStatus(background ? "idle" : "error");
+    await setProfileStatus(background ? "idle" : "error", profileId);
     throw error;
   }
 }
@@ -1308,13 +1349,16 @@ export async function runChatSwitchProgram(
   userText: string,
   options?: {
     preserveCurrentTrack?: boolean;
+    profileId?: string;
   },
 ): Promise<PipelineResult> {
+  const profileId = options?.profileId;
   try {
     await ensureDataDirs();
-    await db.setStatus("thinking");
+    await setProfileStatus("thinking", profileId);
 
     const context = await gatherMusicContext({
+      profileId,
       candidateLimit: 24,
     });
     const prompt = buildChatSwitchProgramPrompt(userText, context);
@@ -1334,7 +1378,7 @@ export async function runChatSwitchProgram(
     const say = clampDjLine(response.say, "收到，我把后面的节目换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。");
     const ttsText = clampDjLine(response.ttsText, say, 140);
 
-    await db.setStatus("speaking");
+    await setProfileStatus("speaking", profileId);
     const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
         ttsText,
@@ -1364,7 +1408,7 @@ export async function runChatSwitchProgram(
     await applyProgramQueue("chat_switch", programResponse, playableTracks, context, userText, {
       preserveCurrentTrack: options?.preserveCurrentTrack,
     });
-    await db.setStatus("playing");
+    await setProfileStatus("playing", profileId);
 
     return {
       status: "success",
@@ -1377,19 +1421,21 @@ export async function runChatSwitchProgram(
       currentTrackPreserved,
     };
   } catch (error) {
-    await db.setStatus("error");
+    await setProfileStatus("error", profileId);
     throw error;
   }
 }
 
 async function runManualRadioProgram(
   mode: "morning_brief" | "mood_pick",
+  profileId?: string,
 ): Promise<PipelineResult> {
   try {
     await ensureDataDirs();
-    await db.setStatus("thinking");
+    await setProfileStatus("thinking", profileId);
 
     const context = await gatherMusicContext({
+      profileId,
       weatherMode: mode,
       candidateLimit: 24,
     });
@@ -1413,7 +1459,7 @@ async function runManualRadioProgram(
     );
     const ttsText = response.ttsText?.trim() || say;
 
-    await db.setStatus("speaking");
+    await setProfileStatus("speaking", profileId);
     const [ttsAudioPath, stableTracks] = await Promise.all([
       speakDjText(
         ttsText,
@@ -1441,7 +1487,7 @@ async function runManualRadioProgram(
     };
 
     await applyProgramQueue("manual", programResponse, playableTracks, context, mode);
-    await db.setStatus("playing");
+    await setProfileStatus("playing", profileId);
 
     return {
       status: "success",
@@ -1452,30 +1498,35 @@ async function runManualRadioProgram(
       programTitle: response.title,
     };
   } catch (error) {
-    await db.setStatus("error");
+    await setProfileStatus("error", profileId);
     throw error;
   }
 }
 
 export async function runPipeline(
-  mode: "morning_brief" | "mood_pick" | "random_discover"
+  mode: "morning_brief" | "mood_pick" | "random_discover",
+  options?: {
+    profileId?: string;
+  },
 ): Promise<PipelineResult> {
+  const profileId = options?.profileId;
   if (mode === "morning_brief" || mode === "mood_pick") {
-    return runManualRadioProgram(mode);
+    return runManualRadioProgram(mode, profileId);
   }
 
   try {
     await ensureDataDirs();
-    await db.setStatus("thinking");
+    await setProfileStatus("thinking", profileId);
 
     const context = await gatherMusicContext({
+      profileId,
       weatherMode: mode,
       candidateLimit: mode === "random_discover" ? 20 : 12,
     });
 
     if (mode === "random_discover") {
       const scoutResponse = await runDiscoveryScout(context, "random_discover");
-      await db.setStatus("speaking");
+      await setProfileStatus("speaking", profileId);
 
       const say = clampDjLine(
         scoutResponse.say,
@@ -1520,7 +1571,7 @@ export async function runPipeline(
         reason,
       }, playableTracks, context, "random_discover");
 
-      await db.setStatus("playing");
+      await setProfileStatus("playing", profileId);
 
       return {
         status: "success",
@@ -1533,7 +1584,7 @@ export async function runPipeline(
 
     throw new Error(`Unsupported pipeline mode: ${mode}`);
   } catch (error) {
-    await db.setStatus("error");
+    await setProfileStatus("error", profileId);
     throw error;
   }
 }

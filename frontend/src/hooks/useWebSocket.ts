@@ -18,6 +18,7 @@ import type {
   TrackFeedbackType,
   TtsPreset,
   UserFeedbackRecord,
+  UserProfile,
   WSMessage,
   TrackInfo,
   PlayerState,
@@ -31,6 +32,8 @@ import type {
 } from "../types";
 
 const normalizeVoicePreset = (value?: string): TtsPreset => value === "Dean" ? "Dean" : "冰糖";
+const DEFAULT_PROFILE_ID = "default";
+const PROFILE_STORAGE_KEY = "claudio-profile-id";
 const USER_DISPLAY_NAME = "xian";
 const DJ_DISPLAY_NAME = "CLAUDIO";
 const USER_AVATAR_STORAGE_KEY = "claudio-user-avatar";
@@ -65,6 +68,19 @@ type QueueStepPayload = {
 
 type ClientPlaybackIssueCode = "client_silent_audio" | "audio_error";
 
+const createDefaultPlayerState = (): PlayerState => ({
+  currentTrack: null,
+  isPlaying: false,
+  currentTime: 0,
+  duration: 0,
+  volume: 0.8,
+  audioSignalLevel: null,
+  playlist: [],
+  queueCount: 0,
+  status: "idle",
+  isOnAir: false,
+});
+
 const getTrackPlaybackKey = (track?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null) =>
   track?.id || track?.url || "";
 
@@ -81,6 +97,11 @@ const isSamePlaybackTrack = (
 );
 
 export function useWebSocket() {
+  const [currentProfileId, setCurrentProfileId] = useState<string>(() => {
+    if (typeof window === "undefined") return DEFAULT_PROFILE_ID;
+    return window.localStorage.getItem(PROFILE_STORAGE_KEY) || DEFAULT_PROFILE_ID;
+  });
+  const [profiles, setProfiles] = useState<UserProfile[]>([]);
   const [hasHydratedState, setHasHydratedState] = useState(false);
   const [status, setStatus] = useState<AppStatus>("idle");
   const [messages, setMessages] = useState<ChatEntry[]>([]);
@@ -108,22 +129,8 @@ export function useWebSocket() {
   const [isRescanningLocalLibrary, setIsRescanningLocalLibrary] = useState(false);
   const [utilityNotice, setUtilityNotice] = useState<string | null>(null);
   const [djProfile, setDjProfile] = useState<DjProfile | null>(null);
-  const [userAvatarUrl, setUserAvatarUrl] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return window.localStorage.getItem(USER_AVATAR_STORAGE_KEY);
-  });
-  const [playerState, setPlayerState] = useState<PlayerState>({
-    currentTrack: null,
-    isPlaying: false,
-    currentTime: 0,
-    duration: 0,
-    volume: 0.8,
-    audioSignalLevel: null,
-    playlist: [],
-    queueCount: 0,
-    status: "idle",
-    isOnAir: false,
-  });
+  const [userAvatarUrl, setUserAvatarUrlState] = useState<string | null>(null);
+  const [playerState, setPlayerState] = useState<PlayerState>(createDefaultPlayerState);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const nextAudioRef = useRef<HTMLAudioElement>(null);
@@ -160,12 +167,124 @@ export function useWebSocket() {
   const visualizerFrameRef = useRef<number | null>(null);
   const lastAudioSignalStateAtRef = useRef(0);
   const [, setCatalogVersion] = useState(0);
+  const currentProfile = profiles.find((profile) => profile.id === currentProfileId) ?? null;
+  const currentUserDisplayName = currentProfile?.displayName || USER_DISPLAY_NAME;
+
+  const withProfileHeaders = useCallback((init?: RequestInit): RequestInit => {
+    const headers = new Headers(init?.headers);
+    headers.set("X-Claudio-Profile-Id", currentProfileId);
+    return {
+      ...init,
+      headers,
+    };
+  }, [currentProfileId]);
+
+  const profileFetch = useCallback((input: RequestInfo | URL, init?: RequestInit) => (
+    fetch(input, withProfileHeaders(init))
+  ), [withProfileHeaders]);
+
+  const resetSessionState = useCallback(() => {
+    for (const audio of [audioRef.current, nextAudioRef.current, ttsAudioRef.current]) {
+      if (!audio) continue;
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    ttsPlayingRef.current = false;
+    prefetchedTrackKeyRef.current = null;
+    preloadedTrackRef.current = null;
+    audioRecoveryRef.current = { attempts: 0 };
+    silentAudioRecoveryRef.current = {
+      lastPositionSec: null,
+      silentRunMs: 0,
+      lastActionAt: 0,
+    };
+    trackCatalogRef.current.clear();
+    setCatalogVersion((version) => version + 1);
+    setHasHydratedState(false);
+    setStatus("idle");
+    setMessages([]);
+    setDjMessages([]);
+    setSubtitle("");
+    setSubtitleFading(false);
+    setFavoriteIds([]);
+    setPlayHistory([]);
+    setUserFeedback([]);
+    setDiscoveryCandidates([]);
+    setTasteProfile(null);
+    setLastSyncSummary(null);
+    setPlaybackDiagnostics(null);
+    setLocalLibraryMatchStatus(null);
+    setProgramAudit(null);
+    setListenCheckRecords([]);
+    setListenAcceptance(null);
+    setDjProfile(null);
+    setPlayerState(createDefaultPlayerState());
+  }, []);
+
+  const switchProfile = useCallback((profileId: string) => {
+    if (!profileId || profileId === currentProfileId) return;
+    window.localStorage.setItem(PROFILE_STORAGE_KEY, profileId);
+    resetSessionState();
+    setCurrentProfileId(profileId);
+  }, [currentProfileId, resetSessionState]);
+
+  const loadProfiles = useCallback(async () => {
+    try {
+      const res = await fetch("/api/profiles");
+      if (!res.ok) return;
+      const body = await res.json() as {
+        profiles: UserProfile[];
+        defaultProfileId: string;
+      };
+      const nextProfiles = Array.isArray(body.profiles) ? body.profiles : [];
+      setProfiles(nextProfiles);
+      if (!nextProfiles.some((profile) => profile.id === currentProfileId)) {
+        const fallbackProfileId = body.defaultProfileId || nextProfiles[0]?.id || DEFAULT_PROFILE_ID;
+        window.localStorage.setItem(PROFILE_STORAGE_KEY, fallbackProfileId);
+        resetSessionState();
+        setCurrentProfileId(fallbackProfileId);
+      }
+    } catch {
+      // keep current profile selection
+    }
+  }, [currentProfileId, resetSessionState]);
+
+  const createProfile = useCallback(async (displayName?: string) => {
+    const res = await fetch("/api/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName }),
+    });
+    if (!res.ok) {
+      throw new Error(`Create profile failed: ${res.status}`);
+    }
+    const profile = await res.json() as UserProfile;
+    setProfiles((current) => [profile, ...current.filter((item) => item.id !== profile.id)]);
+    window.localStorage.setItem(PROFILE_STORAGE_KEY, profile.id);
+    resetSessionState();
+    setCurrentProfileId(profile.id);
+    return profile;
+  }, [resetSessionState]);
 
   const todayTime = () =>
     new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const formatClockTime = (timestamp: number) =>
     new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  useEffect(() => {
+    void loadProfiles();
+  }, [loadProfiles]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const scopedAvatar = window.localStorage.getItem(`${USER_AVATAR_STORAGE_KEY}:${currentProfileId}`);
+    const legacyAvatar = currentProfileId === DEFAULT_PROFILE_ID
+      ? window.localStorage.getItem(USER_AVATAR_STORAGE_KEY)
+      : null;
+    setUserAvatarUrlState(scopedAvatar ?? legacyAvatar);
+  }, [currentProfileId]);
 
   const toPlayableUrl = useCallback((url: string) => {
     if (url.startsWith("/api/audio/")) return url;
@@ -656,7 +775,7 @@ export function useWebSocket() {
         : p.currentTrack,
     }));
     try {
-      await fetch(`/api/favorites/${encodeURIComponent(trackId)}`, {
+      await profileFetch(`/api/favorites/${encodeURIComponent(trackId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -667,15 +786,15 @@ export function useWebSocket() {
     } catch {
       setFavoriteIds((prev) => !nextFavorited ? [...prev, trackId] : prev.filter((id) => id !== trackId));
     }
-  }, []);
+  }, [profileFetch]);
 
   const fetchPlaylists = useCallback(async () => {
     try {
-      const res = await fetch("/api/playlists");
+      const res = await profileFetch("/api/playlists");
       if (res.ok) return await res.json();
     } catch {}
     return [];
-  }, []);
+  }, [profileFetch]);
 
   const onSelectTrack = useCallback((trackId: string) => {
     const pl = playerStateRef.current.playlist;
@@ -741,7 +860,7 @@ export function useWebSocket() {
       ttsAudioRef.current.play().catch(console.error);
       const currentTrack = playerStateRef.current.currentTrack;
       if (currentTrack) {
-        void fetch("/api/feedback", {
+        void profileFetch("/api/feedback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -754,7 +873,7 @@ export function useWebSocket() {
         }).catch(() => {});
       }
     }
-  }, [applyActiveMusicVolume, messages, showSubtitle]);
+  }, [applyActiveMusicVolume, messages, profileFetch, showSubtitle]);
 
   const sendTrigger = useCallback((mode: TriggerMode) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -766,12 +885,12 @@ export function useWebSocket() {
       text: `Triggered: ${labels[mode]}`,
       time: formatClockTime(timestamp),
       timestamp,
-      sender: USER_DISPLAY_NAME,
+      sender: currentUserDisplayName,
     }]);
     setStatus("thinking");
     setPlayerState((p) => ({ ...p, status: "thinking" }));
     wsRef.current.send(JSON.stringify({ type: "trigger", data: { mode } }));
-  }, []);
+  }, [currentUserDisplayName]);
 
   const sendMessage = useCallback((text: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -796,19 +915,19 @@ export function useWebSocket() {
         listenChecksRes,
         listenAcceptanceRes,
       ] = await Promise.all([
-        fetch("/api/favorites"),
-        fetch("/api/history"),
-        fetch("/api/feedback?limit=6"),
-        fetch("/api/radio/discovery-candidates?limit=6"),
-        fetch("/api/taste-profile"),
-        fetch("/api/taste"),
-        fetch("/api/music-sources"),
-        fetch("/api/radio/playback-diagnostics"),
-        fetch("/api/music-sources/local-library"),
-        fetch("/api/music-sources/local-library/matches"),
-        fetch("/api/radio/program-audit"),
-        fetch("/api/radio/listen-checks?limit=3"),
-        fetch("/api/radio/listen-acceptance"),
+        profileFetch("/api/favorites"),
+        profileFetch("/api/history"),
+        profileFetch("/api/feedback?limit=6"),
+        profileFetch("/api/radio/discovery-candidates?limit=6"),
+        profileFetch("/api/taste-profile"),
+        profileFetch("/api/taste"),
+        profileFetch("/api/music-sources"),
+        profileFetch("/api/radio/playback-diagnostics"),
+        profileFetch("/api/music-sources/local-library"),
+        profileFetch("/api/music-sources/local-library/matches"),
+        profileFetch("/api/radio/program-audit"),
+        profileFetch("/api/radio/listen-checks?limit=3"),
+        profileFetch("/api/radio/listen-acceptance"),
       ]);
 
       if (favoritesRes.ok) {
@@ -866,7 +985,7 @@ export function useWebSocket() {
     } catch {
       // keep best-effort behavior
     }
-  }, []);
+  }, [profileFetch]);
 
   const onTrackFeedback = useCallback(async (type: TrackFeedbackType) => {
     const currentTrack = playerStateRef.current.currentTrack;
@@ -895,7 +1014,7 @@ export function useWebSocket() {
     showUtilityNotice(labels[type]);
 
     try {
-      const res = await fetch("/api/feedback", {
+      const res = await profileFetch("/api/feedback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -926,7 +1045,7 @@ export function useWebSocket() {
     } catch (error) {
       showUtilityNotice(error instanceof Error ? error.message : "Feedback failed");
     }
-  }, [refreshLibraryData, showUtilityNotice]);
+  }, [profileFetch, refreshLibraryData, showUtilityNotice]);
 
   const updateVoicePreset = useCallback(async (preset: TtsPreset) => {
     setIsUpdatingVoicePreset(true);
@@ -936,7 +1055,7 @@ export function useWebSocket() {
       : { voice: preset, style: "情感电台", name: "Claudio" });
 
     try {
-      const res = await fetch("/api/taste", {
+      const res = await profileFetch("/api/taste", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ voice: preset }),
@@ -953,12 +1072,12 @@ export function useWebSocket() {
     } finally {
       setIsUpdatingVoicePreset(false);
     }
-  }, [djProfile, showUtilityNotice]);
+  }, [djProfile, profileFetch, showUtilityNotice]);
 
   const syncNeteaseLibrary = useCallback(async () => {
     setIsSyncingLibrary(true);
     try {
-      const res = await fetch("/api/netease/sync", { method: "POST" });
+      const res = await profileFetch("/api/netease/sync", { method: "POST" });
       if (!res.ok) {
         throw new Error(`Sync failed: ${res.status}`);
       }
@@ -975,12 +1094,12 @@ export function useWebSocket() {
     } finally {
       setIsSyncingLibrary(false);
     }
-  }, [refreshLibraryData, showUtilityNotice]);
+  }, [profileFetch, refreshLibraryData, showUtilityNotice]);
 
   const retryFailedLibrarySync = useCallback(async () => {
     setIsSyncingLibrary(true);
     try {
-      const res = await fetch("/api/netease/retry-failed", { method: "POST" });
+      const res = await profileFetch("/api/netease/retry-failed", { method: "POST" });
       if (!res.ok) {
         throw new Error(`Retry failed: ${res.status}`);
       }
@@ -992,12 +1111,12 @@ export function useWebSocket() {
     } finally {
       setIsSyncingLibrary(false);
     }
-  }, [refreshLibraryData, showUtilityNotice]);
+  }, [profileFetch, refreshLibraryData, showUtilityNotice]);
 
   const rescanLocalLibrary = useCallback(async () => {
     setIsRescanningLocalLibrary(true);
     try {
-      const res = await fetch("/api/music-sources/local-library/rescan", { method: "POST" });
+      const res = await profileFetch("/api/music-sources/local-library/rescan", { method: "POST" });
       if (!res.ok) {
         throw new Error(`Local rescan failed: ${res.status}`);
       }
@@ -1014,7 +1133,7 @@ export function useWebSocket() {
     } finally {
       setIsRescanningLocalLibrary(false);
     }
-  }, [refreshLibraryData, showUtilityNotice]);
+  }, [profileFetch, refreshLibraryData, showUtilityNotice]);
 
   useEffect(() => {
     playerStateRef.current = playerState;
@@ -1453,12 +1572,13 @@ export function useWebSocket() {
     let pingTimer: number | null = null;
 
     const buildWsUrl = () => {
+      const profileQuery = `profileId=${encodeURIComponent(currentProfileId)}`;
       if (import.meta.env.DEV) {
-        return "ws://localhost:3000/ws";
+        return `ws://localhost:3000/ws?${profileQuery}`;
       }
 
       const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      return `${proto}//${window.location.host}/ws`;
+      return `${proto}//${window.location.host}/ws?${profileQuery}`;
     };
 
     const clearPingTimer = () => {
@@ -1495,7 +1615,7 @@ export function useWebSocket() {
                   text: entry.text,
                   time: formatClockTime(entry.timestamp),
                   timestamp: entry.timestamp,
-                  sender: entry.role === "dj" ? DJ_DISPLAY_NAME : USER_DISPLAY_NAME,
+                  sender: entry.role === "dj" ? DJ_DISPLAY_NAME : currentUserDisplayName,
                 }));
               setMessages(historyMessages);
             }
@@ -1608,7 +1728,7 @@ export function useWebSocket() {
               text: d.text,
               time: formatClockTime(timestamp),
               timestamp,
-              sender: d.role === "dj" ? DJ_DISPLAY_NAME : USER_DISPLAY_NAME,
+              sender: d.role === "dj" ? DJ_DISPLAY_NAME : currentUserDisplayName,
             }]);
             break;
           }
@@ -1689,6 +1809,8 @@ export function useWebSocket() {
     };
   }, [
     applyActiveMusicVolume,
+    currentProfileId,
+    currentUserDisplayName,
     fadeAudioVolume,
     getActiveMusicAudio,
     getEffectiveMusicVolume,
@@ -1721,6 +1843,11 @@ export function useWebSocket() {
   });
 
   return {
+    profiles,
+    currentProfileId,
+    currentProfile,
+    switchProfile,
+    createProfile,
     hasHydratedState,
     voicePreset: normalizeVoicePreset(djProfile?.voice),
     isUpdatingVoicePreset,
@@ -1743,8 +1870,11 @@ export function useWebSocket() {
         reader.onerror = () => reject(reader.error ?? new Error("Avatar read failed"));
         reader.readAsDataURL(file);
       });
-      window.localStorage.setItem(USER_AVATAR_STORAGE_KEY, dataUrl);
-      setUserAvatarUrl(dataUrl);
+      window.localStorage.setItem(`${USER_AVATAR_STORAGE_KEY}:${currentProfileId}`, dataUrl);
+      if (currentProfileId === DEFAULT_PROFILE_ID) {
+        window.localStorage.setItem(USER_AVATAR_STORAGE_KEY, dataUrl);
+      }
+      setUserAvatarUrlState(dataUrl);
     },
     fetchPlaylists, syncNeteaseLibrary, retryFailedLibrarySync, rescanLocalLibrary, showUtilityNotice, playSavedTrack,
     refreshLibraryData,
