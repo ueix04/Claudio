@@ -12,6 +12,12 @@ import {
   unblockNeteaseAdapter,
 } from "./unblock-netease.js";
 import {
+  YOUTUBE_SOURCE_ID,
+  isYouTubeEnabled,
+  setYouTubeClientForTests,
+  youtubeAdapter,
+} from "./youtube.js";
+import {
   MusicSourceAdapter,
   MusicSourceError,
   MusicSourceHealth,
@@ -42,11 +48,18 @@ export {
   setUnblockNeteaseMatcherForTests,
   unblockNeteaseAdapter,
 } from "./unblock-netease.js";
+export {
+  YOUTUBE_SOURCE_ID,
+  isYouTubeEnabled,
+  setYouTubeClientForTests,
+  youtubeAdapter,
+} from "./youtube.js";
 
 const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
   [localLibraryAdapter.id, localLibraryAdapter],
   [neteaseLegacyAdapter.id, neteaseLegacyAdapter],
   [unblockNeteaseAdapter.id, unblockNeteaseAdapter],
+  [youtubeAdapter.id, youtubeAdapter],
 ]);
 
 const PLAYABLE_URL_FALLBACKS: Partial<Record<MusicSourceId, MusicSourceId[]>> = {
@@ -118,6 +131,7 @@ function getPlayableUrlFallbacks(source: MusicSourceId): MusicSourceId[] {
 function getRuntimeSearchOrder(): MusicSourceId[] {
   return [
     ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
+    ...(isYouTubeEnabled() ? [YOUTUBE_SOURCE_ID] : []),
     NETEASE_LEGACY_SOURCE_ID,
   ];
 }
@@ -131,6 +145,7 @@ function getSourceRole(source: MusicSourceId): "library" | "primary" | "fallback
 function isSourceEnabled(source: MusicSourceId): boolean {
   if (source === LOCAL_LIBRARY_SOURCE_ID) return isLocalLibraryEnabled();
   if (source === UNBLOCK_NETEASE_SOURCE_ID) return isUnblockNeteaseEnabled();
+  if (source === YOUTUBE_SOURCE_ID) return isYouTubeEnabled();
   return true;
 }
 
