@@ -19,3 +19,5 @@ session-ses_*.md
 frontend/vite.config.js
 frontend/vite.config.d.ts
 .sisyphus/
+AGENTS.md
+HANDOFF.md
