@@ -1,7 +1,7 @@
 # Handoff
 
 **Date:** 2026-05-06  
-**Project:** `d:\work\Claudio`  
+**Project:** Claudio AI Radio  
 **User preference:** 必须使用 `opencode` 实现 AI 电台的决策和聊天功能
 
 ## 1. 当前结论
