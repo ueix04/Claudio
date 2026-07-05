@@ -474,7 +474,6 @@ async function resolveDiscoveryDirections(
       const track = await musicSources.resolveTrack(
         direction.query,
         undefined,
-        musicSources.NETEASE_LEGACY_SOURCE_ID,
       );
       if (!track) continue;
       const key = normalizeTrackKey(track.name, track.artist);
@@ -643,7 +642,7 @@ async function resolvePlayableTracksFromRequests(
 
         try {
           return await musicSources.resolveKnownTrack({
-            source: musicSources.NETEASE_LEGACY_SOURCE_ID,
+            source: "tencent",
             sourceTrackId: String(trackInfo.id),
             title: candidate.title,
             artist: candidate.artist,

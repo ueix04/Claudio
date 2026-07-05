@@ -2,11 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as netease from "./netease.js";
 import {
+  KUGOU_SOURCE_ID,
   LOCAL_LIBRARY_SOURCE_ID,
-  NETEASE_LEGACY_SOURCE_ID,
-  UNBLOCK_NETEASE_SOURCE_ID,
+  TENCENT_SOURCE_ID,
+  YOUTUBE_SOURCE_ID,
   clearLocalLibraryCacheForTests,
   getLocalLibraryFileForPlayback,
   getLocalLibraryStatus,
@@ -15,19 +15,16 @@ import {
   inferStoredTrackSource,
   listMusicSourceAdapters,
   refreshStoredTrackPlayableUrl,
-  resolveKnownTrack,
   resolveTrack,
-  setUnblockNeteaseMatcherForTests,
   summarizeLocalLibraryForPrompt,
 } from "./music-sources/index.js";
-
-vi.mock("./netease.js");
 
 describe("music source adapters", () => {
   const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
   const originalUnblockSources = process.env.UNBLOCK_NETEASE_SOURCES;
   const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
   const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
+  const originalYouTubeEnabled = process.env.YOUTUBE_ENABLED;
   let tempDirs: string[] = [];
 
   async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
@@ -45,7 +42,7 @@ describe("music source adapters", () => {
     delete process.env.UNBLOCK_NETEASE_SOURCES;
     delete process.env.LOCAL_MUSIC_ENABLED;
     delete process.env.LOCAL_MUSIC_DIRS;
-    setUnblockNeteaseMatcherForTests(null);
+    delete process.env.YOUTUBE_ENABLED;
     clearLocalLibraryCacheForTests();
   });
 
@@ -70,7 +67,11 @@ describe("music source adapters", () => {
     } else {
       process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
     }
-    setUnblockNeteaseMatcherForTests(null);
+    if (originalYouTubeEnabled === undefined) {
+      delete process.env.YOUTUBE_ENABLED;
+    } else {
+      process.env.YOUTUBE_ENABLED = originalYouTubeEnabled;
+    }
     clearLocalLibraryCacheForTests();
     await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
     tempDirs = [];
@@ -79,12 +80,11 @@ describe("music source adapters", () => {
   it("lists the registered source adapters", () => {
     const ids = listMusicSourceAdapters().map((adapter) => adapter.id);
     expect(ids).toContain(LOCAL_LIBRARY_SOURCE_ID);
-    expect(ids).toContain(NETEASE_LEGACY_SOURCE_ID);
-    expect(ids).toContain(UNBLOCK_NETEASE_SOURCE_ID);
+    expect(ids).toContain(KUGOU_SOURCE_ID);
+    expect(ids).toContain(TENCENT_SOURCE_ID);
   });
 
-  it("summarizes the runtime source order and fallback chain", async () => {
-    process.env.UNBLOCK_NETEASE_ENABLED = "true";
+  it("summarizes the runtime source order", async () => {
     const filePath = await createTempMusicFile("Runtime Artist - Runtime Song.mp3");
     process.env.LOCAL_MUSIC_ENABLED = "true";
     process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
@@ -92,9 +92,11 @@ describe("music source adapters", () => {
 
     const status = await getMusicSourceRuntimeStatus();
 
-    expect(status.searchOrder).toEqual([LOCAL_LIBRARY_SOURCE_ID, NETEASE_LEGACY_SOURCE_ID]);
-    expect(status.playableUrlFallbacks).toEqual([
-      { source: NETEASE_LEGACY_SOURCE_ID, fallbacks: [UNBLOCK_NETEASE_SOURCE_ID] },
+    // local_library is first when enabled, then playable remote sources.
+    // Tencent is metadata-only and is not part of the playable search order.
+    expect(status.searchOrder).toEqual([
+      LOCAL_LIBRARY_SOURCE_ID,
+      KUGOU_SOURCE_ID,
     ]);
     expect(status.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -104,16 +106,14 @@ describe("music source adapters", () => {
         ok: true,
       }),
       expect.objectContaining({
-        source: NETEASE_LEGACY_SOURCE_ID,
+        source: KUGOU_SOURCE_ID,
         role: "primary",
         enabled: true,
-        ok: true,
       }),
       expect.objectContaining({
-        source: UNBLOCK_NETEASE_SOURCE_ID,
-        role: "fallback",
+        source: TENCENT_SOURCE_ID,
+        role: "metadata",
         enabled: true,
-        ok: true,
       }),
     ]));
   });
@@ -165,91 +165,53 @@ describe("music source adapters", () => {
     expect(JSON.stringify(summary)).not.toContain(path.dirname(filePath));
   });
 
-  it("infers legacy source identity for old numeric queue tracks", () => {
-    expect(inferStoredTrackSource({ id: "123" })).toEqual({
-      source: NETEASE_LEGACY_SOURCE_ID,
+  it("returns null from inferStoredTrackSource for deprecated netease_legacy source, triggering migration", () => {
+    // Tracks with the old netease_legacy source trigger cross-source migration
+    expect(inferStoredTrackSource({
+      id: "123",
+      source: "netease_legacy",
       sourceTrackId: "123",
-    });
+      name: "Old Song",
+      artist: "Old Artist",
+    })).toBeNull();
   });
 
-  it("resolves a known source track into a playable track with url expiry metadata", async () => {
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("https://example.com/song.mp3");
-
-    const track = await resolveKnownTrack({
-      source: NETEASE_LEGACY_SOURCE_ID,
-      sourceTrackId: "123",
-      title: "Song",
-      artist: "Artist",
-      album: "Album",
-      duration: 180000,
-      picUrl: "pic",
-    });
-
-    expect(track).toMatchObject({
-      id: 123,
-      name: "Song",
-      artist: "Artist",
-      url: "https://example.com/song.mp3",
-      source: NETEASE_LEGACY_SOURCE_ID,
-      sourceTrackId: "123",
-      urlSource: NETEASE_LEGACY_SOURCE_ID,
-    });
-    expect(track.urlExpiresAt).toBeGreaterThan(Date.now());
-  });
-
-  it("falls back to UnblockNeteaseMusic when the primary URL resolver fails", async () => {
-    process.env.UNBLOCK_NETEASE_ENABLED = "true";
-    const fallbackMatcher = vi.fn().mockResolvedValue({
-      url: "https://fallback.example.com/song.mp3",
-      br: 320000,
-      source: "migu",
-    });
-    setUnblockNeteaseMatcherForTests(fallbackMatcher);
-    vi.mocked(netease.getPlayableUrl).mockRejectedValue(new Error("source 502"));
-
-    const track = await resolveKnownTrack({
-      source: NETEASE_LEGACY_SOURCE_ID,
-      sourceTrackId: "123",
-      title: "Song",
-      artist: "Artist",
-    });
-
-    expect(track).toMatchObject({
-      id: 123,
-      name: "Song",
-      artist: "Artist",
-      url: "https://fallback.example.com/song.mp3",
-      source: NETEASE_LEGACY_SOURCE_ID,
-      sourceTrackId: "123",
-      urlSource: UNBLOCK_NETEASE_SOURCE_ID,
-    });
-    expect(fallbackMatcher).toHaveBeenCalledWith(123, ["kugou", "bodian", "migu"]);
-  });
-
-  it("searches and resolves through the adapter registry", async () => {
-    vi.mocked(netease.searchSongs).mockResolvedValue({
-      tracks: [
-        {
-          id: 456,
-          name: "Found Song",
-          artists: [{ name: "Found Artist" }],
-          album: { name: "Found Album", picUrl: "pic" },
-          duration: 200000,
-        },
-      ],
-      total: 1,
-    });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("found-url");
-
-    const track = await resolveTrack("Found Song", "Found Artist");
-
-    expect(track).toMatchObject({
-      id: 456,
-      name: "Found Song",
-      artist: "Found Artist",
-      url: "found-url",
+  it("returns null from inferStoredTrackSource for deprecated unblock_netease source", () => {
+    expect(inferStoredTrackSource({
+      id: "456",
+      source: "unblock_netease",
       sourceTrackId: "456",
-    });
+      name: "Old Song",
+      artist: "Old Artist",
+    })).toBeNull();
+  });
+
+  it("returns source identity from inferStoredTrackSource for known playable sources", () => {
+    expect(inferStoredTrackSource({
+      id: "1",
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: "local_abc",
+      name: "Song",
+      artist: "Artist",
+    })).toEqual({ source: LOCAL_LIBRARY_SOURCE_ID, sourceTrackId: "local_abc" });
+
+    expect(inferStoredTrackSource({
+      id: "2",
+      source: KUGOU_SOURCE_ID,
+      sourceTrackId: "hash123",
+      name: "Song",
+      artist: "Artist",
+    })).toEqual({ source: KUGOU_SOURCE_ID, sourceTrackId: "hash123" });
+  });
+
+  it("treats stored Tencent tracks as metadata-only and migrates them before playback", () => {
+    expect(inferStoredTrackSource({
+      id: "3",
+      source: TENCENT_SOURCE_ID,
+      sourceTrackId: "mid123",
+      name: "Song",
+      artist: "Artist",
+    })).toBeNull();
   });
 
   it("prefers configured local music files before remote search", async () => {
@@ -260,7 +222,6 @@ describe("music source adapters", () => {
 
     const track = await resolveTrack("Local Song", "Local Artist");
 
-    expect(netease.searchSongs).not.toHaveBeenCalled();
     expect(track).toMatchObject({
       name: "Local Song",
       artist: "Local Artist",
@@ -291,7 +252,6 @@ describe("music source adapters", () => {
       sourceTrackId: track!.sourceTrackId,
     });
 
-    expect(netease.getPlayableUrl).not.toHaveBeenCalled();
     expect(refreshed).toMatchObject({
       id: track!.sourceTrackId,
       source: LOCAL_LIBRARY_SOURCE_ID,
@@ -325,22 +285,85 @@ describe("music source adapters", () => {
     expect(summary).not.toContain(tempDirs[0]);
   });
 
-  it("refreshes stored tracks and records structured errors without throwing", async () => {
-    vi.mocked(netease.getPlayableUrl).mockRejectedValue(new Error("source 502"));
+  it("refreshes stored tracks from deprecated sources by playable-source migration", async () => {
+    const filePath = await createTempMusicFile("Coldplay - Yellow.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    clearLocalLibraryCacheForTests();
 
     const refreshed = await refreshStoredTrackPlayableUrl({
       id: "789",
-      name: "Old",
-      artist: "Artist",
+      name: "Yellow",
+      artist: "Coldplay",
       url: "old-url",
+      source: "netease_legacy",
+      sourceTrackId: "789",
     });
 
-    expect(refreshed.url).toBe("old-url");
-    expect(refreshed.source).toBe(NETEASE_LEGACY_SOURCE_ID);
-    expect(refreshed.sourceTrackId).toBe("789");
-    expect(refreshed.lastResolveError).toMatchObject({
-      code: "source_502",
-      message: "source 502",
+    expect(refreshed).toMatchObject({
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      urlSource: LOCAL_LIBRARY_SOURCE_ID,
+      url: `/api/audio/local/${encodeURIComponent(refreshed.sourceTrackId!)}`,
     });
+  });
+
+  it("migrates failed youtube tracks to higher-priority playable sources", async () => {
+    const filePath = await createTempMusicFile("Coldplay - Yellow.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    process.env.YOUTUBE_ENABLED = "true";
+    clearLocalLibraryCacheForTests();
+
+    const refreshed = await refreshStoredTrackPlayableUrl({
+      id: "yt-123",
+      name: "Yellow",
+      artist: "Coldplay",
+      url: "https://example.invalid/youtube-audio",
+      source: YOUTUBE_SOURCE_ID,
+      sourceTrackId: "yt-123",
+      urlSource: YOUTUBE_SOURCE_ID,
+      lastPlaybackIssue: {
+        code: "media_error",
+        message: "browser playback failed",
+        at: Date.now(),
+      },
+    });
+
+    expect(refreshed).toMatchObject({
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      urlSource: LOCAL_LIBRARY_SOURCE_ID,
+      url: `/api/audio/local/${encodeURIComponent(refreshed.sourceTrackId!)}`,
+    });
+    expect(refreshed.lastPlaybackIssue).toBeUndefined();
+  });
+
+  it("clears stale playable urls when a failed refresh cannot resolve the new source", async () => {
+    const refreshed = await refreshStoredTrackPlayableUrl({
+      id: "local-missing",
+      name: "Missing Song",
+      artist: "Missing Artist",
+      url: "https://example.invalid/youtube-audio",
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: "missing-track",
+      urlSource: YOUTUBE_SOURCE_ID,
+      urlExpiresAt: Date.now() + 60_000,
+      urlRefreshedAt: Date.now(),
+      lastPlaybackIssue: {
+        code: "audio_error",
+        message: "browser playback failed",
+        at: Date.now(),
+      },
+    });
+
+    expect(refreshed).toMatchObject({
+      source: LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: "missing-track",
+      url: "",
+      urlSource: LOCAL_LIBRARY_SOURCE_ID,
+      playbackHealth: "failed",
+    });
+    expect(refreshed.urlExpiresAt).toBeUndefined();
+    expect(refreshed.urlRefreshedAt).toBeUndefined();
+    expect(refreshed.lastResolveError).toBeDefined();
   });
 });

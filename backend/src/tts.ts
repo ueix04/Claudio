@@ -4,7 +4,7 @@ import path from "node:path";
 import type { DjProfile } from "./db.js";
 import "./runtime.js";
 import { audioDir, repoRoot } from "./runtime.js";
-import { fetchWithProxyFallback } from "./network.js";
+import { fetchWithDirectRetry } from "./network.js";
 
 export interface TTSResult {
   audioBuffer: ArrayBuffer;
@@ -506,7 +506,7 @@ async function synthesizeWithResolvedRequest(
   apiKey: string,
   request: ResolvedMimoRequest,
 ): Promise<TTSResult> {
-  const response = await fetchWithProxyFallback(
+  const response = await fetchWithDirectRetry(
     `${getMimoApiBase()}/chat/completions`,
     {
       method: "POST",

@@ -19,6 +19,10 @@ import * as tasteProfile from "./taste-profile.js";
 import * as tts from "./tts.js";
 import * as weather from "./weather.js";
 import { routeChatIntentWithSemanticFallback, type ChatRoute, type ChatRouteContext } from "./agent-router.js";
+import {
+  fetchViaProxy,
+  hasNetworkProxyConfigured,
+} from "./network.js";
 import { audioDir, frontendDistDir } from "./runtime.js";
 import { formatStationTimeOfDay } from "./time.js";
 
@@ -54,6 +58,7 @@ const PREFETCH_LOOKAHEAD_COUNT = 3;
 const CURRENT_URL_REFRESH_THRESHOLD_MS = 2 * 60 * 1000;
 const UPCOMING_URL_REFRESH_THRESHOLD_MS = 3 * 60 * 1000;
 const PLAYBACK_LEASE_MAINTENANCE_INTERVAL_MS = 45 * 1000;
+const GOOGLEVIDEO_RANGE_CHUNK_BYTES = 1024 * 1024;
 const preparedQueueTransitions = new Map<string, PreparedQueueTransition>();
 const preparedQueueTransitionInFlight = new Map<string, Promise<PreparedQueueTransition | null>>();
 let playbackLeaseMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
@@ -89,7 +94,6 @@ interface PlaybackDiagnostics {
   };
   current: PlaybackDiagnosticTrack | null;
   upcoming: PlaybackDiagnosticTrack[];
-  fallbacks: musicSources.MusicSourceRuntimeStatus["playableUrlFallbacks"];
   sources: musicSources.MusicSourceRuntimeStatus["sources"];
   recentIssue?: db.Track["lastResolveError"] | db.Track["lastPlaybackIssue"];
 }
@@ -162,6 +166,102 @@ function toClientStoredTrack(track: db.Track) {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function shouldRetryMusicUrlViaProxy(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostname === "googlevideo.com" || hostname.endsWith(".googlevideo.com");
+  } catch {
+    return false;
+  }
+}
+
+function isLegacyYouTubePlaybackUrl(track: db.Track): boolean {
+  if (track.source !== musicSources.YOUTUBE_SOURCE_ID || !track.sourceTrackId || !track.url) {
+    return false;
+  }
+  if (track.urlSource && track.urlSource !== musicSources.YOUTUBE_SOURCE_ID) {
+    return false;
+  }
+  return track.url !== musicSources.getYouTubeAudioProxyUrl(track.sourceTrackId);
+}
+
+function normalizeOpenEndedMusicRangeHeader(rangeHeader?: string): string | undefined {
+  if (!rangeHeader) {
+    return rangeHeader;
+  }
+
+  const match = /^bytes=(\d+)-$/i.exec(rangeHeader.trim());
+  if (!match) {
+    return rangeHeader;
+  }
+
+  const start = Number(match[1]);
+  if (!Number.isSafeInteger(start) || start < 0) {
+    return rangeHeader;
+  }
+
+  return `bytes=${start}-${start + GOOGLEVIDEO_RANGE_CHUNK_BYTES - 1}`;
+}
+
+function normalizeMusicRangeHeaderForUpstream(url: string, rangeHeader?: string): string | undefined {
+  if (!rangeHeader || !shouldRetryMusicUrlViaProxy(url)) {
+    return rangeHeader;
+  }
+
+  return normalizeOpenEndedMusicRangeHeader(rangeHeader);
+}
+
+async function fetchMusicAudioUpstream(url: string, init: RequestInit): Promise<Response> {
+  const useProxy = shouldRetryMusicUrlViaProxy(url) && hasNetworkProxyConfigured();
+  return useProxy
+    ? fetchViaProxy(url, init)
+    : fetch(url, init);
+}
+
+function isRetryableYouTubeStreamStatus(status: number): boolean {
+  return status === 401
+    || status === 403
+    || status === 404
+    || status === 410
+    || status >= 500;
+}
+
+function getSafeYouTubeAudioError(): { error: string } {
+  return { error: "YouTube audio stream unavailable" };
+}
+
+async function fetchYouTubeAudioUpstream(
+  videoId: string,
+  rangeHeader: string | undefined,
+  forceRefresh: boolean,
+): Promise<Response> {
+  const lease = await musicSources.getYouTubeStreamLease(videoId, { forceRefresh });
+  const upstreamRangeHeader = normalizeOpenEndedMusicRangeHeader(rangeHeader);
+  return fetchMusicAudioUpstream(lease.streamUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 Claudio/1.0",
+      "Accept": "audio/*,*/*;q=0.9",
+      ...(upstreamRangeHeader ? { Range: upstreamRangeHeader } : {}),
+    },
+  });
+}
+
+function pipeAudioUpstreamResponse(upstream: Response, res: express.Response): void {
+  const contentType = upstream.headers.get("content-type");
+  const contentLength = upstream.headers.get("content-length");
+  const acceptRanges = upstream.headers.get("accept-ranges");
+  const contentRange = upstream.headers.get("content-range");
+
+  res.status(upstream.status);
+  if (contentType) res.setHeader("Content-Type", contentType);
+  if (contentLength) res.setHeader("Content-Length", contentLength);
+  if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
+  if (contentRange) res.setHeader("Content-Range", contentRange);
+  res.setHeader("Cache-Control", "no-store");
+
+  Readable.fromWeb(upstream.body as any).pipe(res);
 }
 
 function collectFailedSnapshotPlaylists(playlists: Array<db.NeteaseSnapshotPlaylist>) {
@@ -312,18 +412,60 @@ app.get("/api/audio/local/:sourceTrackId", async (req, res) => {
   }
 });
 
+app.get("/api/audio/youtube/:videoId", async (req, res) => {
+  const videoId = String(req.params.videoId ?? "").trim();
+  if (!musicSources.isValidYouTubeVideoId(videoId)) {
+    res.status(400).json({ error: "Invalid YouTube video id" });
+    return;
+  }
+
+  const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : undefined;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const upstream = await fetchYouTubeAudioUpstream(videoId, rangeHeader, attempt > 0);
+      if (upstream.ok && upstream.body) {
+        pipeAudioUpstreamResponse(upstream, res);
+        return;
+      }
+
+      if (attempt === 0 && isRetryableYouTubeStreamStatus(upstream.status)) {
+        musicSources.clearYouTubeStreamLease(videoId);
+        continue;
+      }
+
+      if (isRetryableYouTubeStreamStatus(upstream.status)) {
+        await markYouTubeTrackFailedAndFallback(videoId);
+        res.status(502).json(getSafeYouTubeAudioError());
+        return;
+      }
+      res.status(upstream.status).json(getSafeYouTubeAudioError());
+      return;
+    } catch {
+      if (attempt === 0) {
+        musicSources.clearYouTubeStreamLease(videoId);
+        continue;
+      }
+    }
+  }
+
+  await markYouTubeTrackFailedAndFallback(videoId);
+  console.warn(`[radio] youtube audio proxy failed for ${videoId} after stream refresh retry`);
+  res.status(502).json(getSafeYouTubeAudioError());
+});
+
 app.get("/api/audio/music", (req, res) => {
   const { url } = req.query;
   if (typeof url === "string" && /^https?:\/\//i.test(url)) {
     void (async () => {
       try {
         const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : undefined;
-        const upstream = await fetch(url, {
+        const upstreamRangeHeader = normalizeMusicRangeHeaderForUpstream(url, rangeHeader);
+        const upstream = await fetchMusicAudioUpstream(url, {
           headers: {
             // Some providers are stricter when the request looks like a generic server fetch.
             "User-Agent": "Mozilla/5.0 Claudio/1.0",
             "Accept": "audio/*,*/*;q=0.9",
-            ...(rangeHeader ? { Range: rangeHeader } : {}),
+            ...(upstreamRangeHeader ? { Range: upstreamRangeHeader } : {}),
           },
         });
 
@@ -332,19 +474,7 @@ app.get("/api/audio/music", (req, res) => {
           return;
         }
 
-        const contentType = upstream.headers.get("content-type");
-        const contentLength = upstream.headers.get("content-length");
-        const acceptRanges = upstream.headers.get("accept-ranges");
-        const contentRange = upstream.headers.get("content-range");
-
-        res.status(upstream.status);
-        if (contentType) res.setHeader("Content-Type", contentType);
-        if (contentLength) res.setHeader("Content-Length", contentLength);
-        if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
-        if (contentRange) res.setHeader("Content-Range", contentRange);
-        res.setHeader("Cache-Control", "no-store");
-
-        Readable.fromWeb(upstream.body as any).pipe(res);
+        pipeAudioUpstreamResponse(upstream, res);
       } catch (error) {
         res.status(502).json({ error: getErrorMessage(error) });
       }
@@ -840,11 +970,13 @@ async function recordClientPlaybackIssue(payload: unknown): Promise<db.AppState>
   }
 
   const trackId = getBoundedString(data.trackId, 160);
-  if (
-    trackId
-    && currentTrack.id !== trackId
-    && currentTrack.url !== trackId
-  ) {
+  const sourceTrackId = getBoundedString(data.sourceTrackId, 160);
+  const matchesTrackId = Boolean(trackId && (
+    currentTrack.id === trackId
+    || currentTrack.url === trackId
+  ));
+  const matchesSourceTrackId = Boolean(sourceTrackId && currentTrack.sourceTrackId === sourceTrackId);
+  if ((trackId || sourceTrackId) && !matchesTrackId && !matchesSourceTrackId) {
     return state;
   }
 
@@ -866,7 +998,10 @@ async function recordClientPlaybackIssue(payload: unknown): Promise<db.AppState>
   const updatedQueue = queue.map((track, index) => {
     const isCurrentQueueTrack = index === currentIndex;
     const matchesCurrent = track.id === currentTrack.id || track.url === currentTrack.url;
-    const matchesPayload = Boolean(trackId && (track.id === trackId || track.url === trackId));
+    const matchesPayload = Boolean(
+      (trackId && (track.id === trackId || track.url === trackId))
+      || (sourceTrackId && track.sourceTrackId === sourceTrackId),
+    );
     return isCurrentQueueTrack || matchesCurrent || matchesPayload
       ? {
           ...track,
@@ -881,6 +1016,69 @@ async function recordClientPlaybackIssue(payload: unknown): Promise<db.AppState>
     currentTrack: updatedCurrentTrack,
     lastInteraction: Date.now(),
   }, state);
+}
+
+function isTrackForYouTubeVideo(track: db.Track | null | undefined, videoId: string): boolean {
+  if (!track) {
+    return false;
+  }
+
+  const proxyUrl = musicSources.getYouTubeAudioProxyUrl(videoId);
+  return (
+    track.sourceTrackId === videoId
+    && (track.source === musicSources.YOUTUBE_SOURCE_ID || track.url === proxyUrl)
+  ) || track.url === proxyUrl;
+}
+
+async function markYouTubeTrackFailedAndFallback(videoId: string): Promise<db.AppState | null> {
+  const state = await db.getState();
+  const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
+  const currentIndex = clampQueueIndex(queue.length, state.currentQueueIndex);
+  const currentTrack = state.currentTrack ?? queue[currentIndex] ?? null;
+  const queueIndex = queue.findIndex((track) => isTrackForYouTubeVideo(track, videoId));
+  const matchedTrack = queueIndex >= 0 ? queue[queueIndex] : currentTrack;
+  if (!isTrackForYouTubeVideo(matchedTrack, videoId)) {
+    return null;
+  }
+
+  const at = Date.now();
+  const failedTrack: db.Track = {
+    ...matchedTrack!,
+    playbackHealth: "failed",
+    lastPlaybackIssue: {
+      code: "youtube_proxy_failed",
+      message: "YouTube audio stream unavailable after refresh retry",
+      at,
+    },
+    lastResolveError: {
+      code: "network_error",
+      message: "YouTube audio stream unavailable after refresh retry",
+      at,
+    },
+  };
+
+  const fallbackCandidate = await musicSources.refreshStoredTrackPlayableUrl(failedTrack, {
+    forceRefresh: true,
+    avoidSources: [musicSources.YOUTUBE_SOURCE_ID],
+    fallbackOnly: true,
+  });
+  const replacement = fallbackCandidate.url && !fallbackCandidate.lastResolveError
+    ? fallbackCandidate
+    : failedTrack;
+  const updatedQueue = queue.map((track, index) => (
+    index === queueIndex || isTrackForYouTubeVideo(track, videoId)
+      ? replacement
+      : track
+  ));
+  const currentMatches = isTrackForYouTubeVideo(currentTrack, videoId);
+  const updatedState = await updatePlaybackState({
+    radioQueue: updatedQueue,
+    currentTrack: currentMatches ? replacement : state.currentTrack,
+    lastInteraction: Date.now(),
+  }, state);
+
+  broadcast({ type: "state", data: updatedState });
+  return updatedState;
 }
 
 function buildListenEvidence(
@@ -1246,6 +1444,12 @@ function getTrackUrlLeaseStatus(
 }
 
 function shouldRefreshTrackUrl(track: db.Track, thresholdMs: number, now = Date.now()): boolean {
+  if (isLegacyYouTubePlaybackUrl(track)) {
+    return true;
+  }
+  if (track.lastPlaybackIssue) {
+    return true;
+  }
   return getTrackUrlLeaseStatus(track, thresholdMs, now) !== "ready";
 }
 
@@ -1332,7 +1536,6 @@ async function buildPlaybackDiagnostics(state: db.AppState): Promise<PlaybackDia
     },
     current,
     upcoming,
-    fallbacks: runtimeStatus.playableUrlFallbacks,
     sources: runtimeStatus.sources,
     recentIssue,
   };

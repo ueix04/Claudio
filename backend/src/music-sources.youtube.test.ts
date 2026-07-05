@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  NETEASE_LEGACY_SOURCE_ID,
+  KUGOU_SOURCE_ID,
   YOUTUBE_SOURCE_ID,
   getMusicSourceRuntimeStatus,
   getMusicSourceAdapter,
   isYouTubeEnabled,
   listMusicSourceAdapters,
+  refreshStoredTrackPlayableUrl,
   resolveTrack,
   setYouTubeClientForTests,
 } from "./music-sources/index.js";
@@ -22,8 +23,23 @@ interface FakeSongItem {
   duration?: { seconds?: number };
 }
 
+interface FakeVideoItem {
+  video_id?: string;
+  id?: string;
+  title?: string;
+  author?: { name?: string };
+  byline_text?: string;
+  thumbnails?: Array<{ url?: string }>;
+  best_thumbnail?: { url?: string };
+  duration?: { seconds?: number; text?: string } | number;
+  length_text?: string;
+  is_live?: boolean;
+  is_upcoming?: boolean;
+}
+
 function createFakeInnertube(options: {
   songs?: FakeSongItem[];
+  videos?: FakeVideoItem[];
   streamUrl?: string;
   streamError?: Error;
   basicInfo?: Partial<{
@@ -33,7 +49,7 @@ function createFakeInnertube(options: {
     thumbnail: Array<{ url: string }>;
   }>;
 }): Innertube {
-  const { songs = [], streamUrl, streamError, basicInfo } = options;
+  const { songs = [], videos = [], streamUrl, streamError, basicInfo } = options;
   const fake = {
     music: {
       search: async () => ({
@@ -48,6 +64,9 @@ function createFakeInnertube(options: {
         },
       }),
     },
+    search: async () => ({
+      videos,
+    }),
     getStreamingData: async () => {
       if (streamError) {
         throw streamError;
@@ -94,7 +113,7 @@ describe("youtube music source adapter", () => {
 
     const status = await getMusicSourceRuntimeStatus();
     expect(status.searchOrder).not.toContain(YOUTUBE_SOURCE_ID);
-    expect(status.searchOrder).toEqual([NETEASE_LEGACY_SOURCE_ID]);
+    expect(status.searchOrder).toEqual([KUGOU_SOURCE_ID]);
 
     const youtubeStatus = status.sources.find((source) => source.source === YOUTUBE_SOURCE_ID);
     expect(youtubeStatus).toMatchObject({
@@ -104,12 +123,12 @@ describe("youtube music source adapter", () => {
     });
   });
 
-  it("joins the search order ahead of netease when enabled", async () => {
+  it("joins the playable search order after kugou when enabled", async () => {
     process.env.YOUTUBE_ENABLED = "true";
 
     const status = await getMusicSourceRuntimeStatus();
     expect(isYouTubeEnabled()).toBe(true);
-    expect(status.searchOrder).toEqual([YOUTUBE_SOURCE_ID, NETEASE_LEGACY_SOURCE_ID]);
+    expect(status.searchOrder).toEqual([KUGOU_SOURCE_ID, YOUTUBE_SOURCE_ID]);
   });
 
   it("registers the adapter in the adapter map", () => {
@@ -163,7 +182,45 @@ describe("youtube music source adapter", () => {
     expect(tracks[0].sourceTrackId).not.toMatch(/^\d+$/);
   });
 
-  it("resolves a deciphered googlevideo direct URL with ttl metadata", async () => {
+  it("falls back to regular YouTube video search when music song search is empty", async () => {
+    process.env.YOUTUBE_ENABLED = "true";
+    setYouTubeClientForTests(
+      createFakeInnertube({
+        songs: [],
+        videos: [
+          {
+            video_id: "invalid",
+            title: "Invalid id should be skipped",
+          },
+          {
+            video_id: "yKNxeF4KMsY",
+            title: "Coldplay - Yellow (Official Video)",
+            author: { name: "Coldplay" },
+            thumbnails: [
+              { url: "https://img.example.com/small.jpg" },
+              { url: "https://img.example.com/large.jpg" },
+            ],
+            length_text: "4:33",
+          },
+        ],
+      }),
+    );
+
+    const adapter = getMusicSourceAdapter(YOUTUBE_SOURCE_ID);
+    const tracks = await adapter.search({ keyword: "Yellow Coldplay", limit: 10 });
+
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0]).toMatchObject({
+      source: YOUTUBE_SOURCE_ID,
+      sourceTrackId: "yKNxeF4KMsY",
+      title: "Coldplay - Yellow (Official Video)",
+      artist: "Coldplay",
+      picUrl: "https://img.example.com/large.jpg",
+      duration: 273,
+    });
+  });
+
+  it("resolves a track-aware proxy URL with stream validation metadata", async () => {
     process.env.YOUTUBE_ENABLED = "true";
     process.env.YOUTUBE_URL_TTL_MS = "120000";
     setYouTubeClientForTests(
@@ -177,7 +234,8 @@ describe("youtube music source adapter", () => {
 
     expect(result.source).toBe(YOUTUBE_SOURCE_ID);
     expect(result.sourceTrackId).toBe("dQw4w9WgXcQ");
-    expect(result.url).toContain("googlevideo.com");
+    expect(result.url).toBe("/api/audio/youtube/dQw4w9WgXcQ");
+    expect(result.validationUrl).toContain("googlevideo.com");
     expect(result.expiresAt - result.refreshedAt).toBe(120_000);
   });
 
@@ -265,7 +323,32 @@ describe("youtube music source adapter", () => {
     expect(track).not.toBeNull();
     expect(track?.source).toBe(YOUTUBE_SOURCE_ID);
     expect(track?.sourceTrackId).toBe("dQw4w9WgXcQ");
-    expect(track?.url).toContain("googlevideo.com");
+    expect(track?.url).toBe("/api/audio/youtube/dQw4w9WgXcQ");
+  });
+
+  it("migrates stored YouTube googlevideo urls to the track-aware proxy", async () => {
+    process.env.YOUTUBE_ENABLED = "true";
+    setYouTubeClientForTests(
+      createFakeInnertube({
+        streamUrl: "https://rr1---sn-example.googlevideo.com/videoplayback?itag=251",
+      }),
+    );
+
+    const refreshed = await refreshStoredTrackPlayableUrl({
+      id: "dQw4w9WgXcQ",
+      name: "Never Gonna Give You Up",
+      artist: "Rick Astley",
+      url: "https://rr1---sn-example.googlevideo.com/videoplayback?itag=251",
+      source: YOUTUBE_SOURCE_ID,
+      sourceTrackId: "dQw4w9WgXcQ",
+      urlSource: YOUTUBE_SOURCE_ID,
+      urlExpiresAt: Date.now() + 30 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    });
+
+    expect(refreshed.url).toBe("/api/audio/youtube/dQw4w9WgXcQ");
+    expect(refreshed.url).not.toContain("googlevideo");
+    expect(refreshed.playbackHealth).toBe("ready");
   });
 
   it("exposes a MusicSourceError with the youtube source id", () => {

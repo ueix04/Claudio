@@ -16,6 +16,9 @@ vi.mock("./weather.js");
 const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
 const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
 const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
+const originalYouTubeEnabled = process.env.YOUTUBE_ENABLED;
+const originalKugouEnabled = process.env.KUGOU_ENABLED;
+const originalTencentEnabled = process.env.TENCENT_ENABLED;
 let tempDirs: string[] = [];
 
 async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
@@ -27,25 +30,44 @@ async function createTempMusicFile(filename: string, contents = "fake audio"): P
   return filePath;
 }
 
+async function startTempHttpServer(
+  listener: http.RequestListener,
+): Promise<{ server: http.Server; baseUrl: string }> {
+  const tempServer = http.createServer(listener);
+  await new Promise<void>((resolve) => tempServer.listen(0, "127.0.0.1", resolve));
+  const tempPort = (tempServer.address() as AddressInfo).port;
+  return {
+    server: tempServer,
+    baseUrl: `http://127.0.0.1:${tempPort}`,
+  };
+}
+
 describe("API Server", () => {
-  let server: http.Server;
+  let server: http.Server | undefined;
   let port: number;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
-    delete process.env.LOCAL_MUSIC_ENABLED;
-    delete process.env.LOCAL_MUSIC_DIRS;
+    process.env.LOCAL_MUSIC_ENABLED = "false";
+    process.env.LOCAL_MUSIC_DIRS = "";
+    process.env.YOUTUBE_ENABLED = "false";
+    process.env.KUGOU_ENABLED = "false";
+    process.env.TENCENT_ENABLED = "false";
     const musicSources = await import("./music-sources/index.js");
     musicSources.clearLocalLibraryCacheForTests();
     const { startServer } = await import("./server.js");
-    server = startServer(0);
-    await new Promise<void>((resolve) => server.on("listening", resolve));
-    port = (server.address() as AddressInfo).port;
+    const activeServer = startServer(0);
+    server = activeServer;
+    await new Promise<void>((resolve) => activeServer.on("listening", resolve));
+    port = (activeServer.address() as AddressInfo).port;
   });
 
   afterEach(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server?.listening) {
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+    }
+    server = undefined;
     if (originalUnblockEnabled === undefined) {
       delete process.env.UNBLOCK_NETEASE_ENABLED;
     } else {
@@ -60,6 +82,21 @@ describe("API Server", () => {
       delete process.env.LOCAL_MUSIC_DIRS;
     } else {
       process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
+    }
+    if (originalYouTubeEnabled === undefined) {
+      delete process.env.YOUTUBE_ENABLED;
+    } else {
+      process.env.YOUTUBE_ENABLED = originalYouTubeEnabled;
+    }
+    if (originalKugouEnabled === undefined) {
+      delete process.env.KUGOU_ENABLED;
+    } else {
+      process.env.KUGOU_ENABLED = originalKugouEnabled;
+    }
+    if (originalTencentEnabled === undefined) {
+      delete process.env.TENCENT_ENABLED;
+    } else {
+      process.env.TENCENT_ENABLED = originalTencentEnabled;
     }
     const musicSources = await import("./music-sources/index.js");
     musicSources.clearLocalLibraryCacheForTests();
@@ -160,6 +197,142 @@ describe("API Server", () => {
     expect(await res.text()).toBe("local wav body");
   });
 
+  it("GET /api/audio/youtube/:videoId 在上游 403 后刷新 stream 并重试同一段 Range", async () => {
+    const musicSources = await import("./music-sources/index.js");
+    process.env.YOUTUBE_ENABLED = "true";
+    const upstreamRequests: Array<{ url?: string; range?: string }> = [];
+    let upstreamCalls = 0;
+    const upstream = await startTempHttpServer((req, res) => {
+      upstreamCalls += 1;
+      upstreamRequests.push({
+        url: req.url,
+        range: Array.isArray(req.headers.range) ? req.headers.range[0] : req.headers.range,
+      });
+      if (upstreamCalls === 1) {
+        res.writeHead(403);
+        res.end("forbidden");
+        return;
+      }
+      res.writeHead(206, {
+        "Content-Type": "audio/ogg",
+        "Content-Length": "15",
+        "Accept-Ranges": "bytes",
+        "Content-Range": "bytes 1048576-2097151/4194304",
+      });
+      res.end("OggS audio body");
+    });
+    let streamingCalls = 0;
+    musicSources.setYouTubeClientForTests({
+      getStreamingData: async () => {
+        streamingCalls += 1;
+        return {
+          url: `${upstream.baseUrl}/stream-${streamingCalls}`,
+        };
+      },
+    } as any);
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/audio/youtube/dQw4w9WgXcQ`, {
+        headers: { Range: "bytes=1048576-" },
+      });
+
+      expect(res.status).toBe(206);
+      expect(res.headers.get("content-type")).toContain("audio/ogg");
+      expect(res.headers.get("content-range")).toBe("bytes 1048576-2097151/4194304");
+      expect(await res.text()).toBe("OggS audio body");
+      expect(streamingCalls).toBe(2);
+      expect(upstreamRequests).toEqual([
+        expect.objectContaining({
+          url: "/stream-1",
+          range: "bytes=1048576-2097151",
+        }),
+        expect.objectContaining({
+          url: "/stream-2",
+          range: "bytes=1048576-2097151",
+        }),
+      ]);
+    } finally {
+      await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+    }
+  });
+
+  it("GET /api/audio/youtube/:videoId 连续失败后标记 YouTube 曲目并 fallback 到本地库", async () => {
+    const db = await import("./db.js");
+    const musicSources = await import("./music-sources/index.js");
+    const videoId = "dQw4w9WgXcQ";
+    const filePath = await createTempMusicFile("Rick Astley - Never Gonna Give You Up.mp3", "local mp3 body");
+    process.env.YOUTUBE_ENABLED = "true";
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    musicSources.clearLocalLibraryCacheForTests();
+    const upstream = await startTempHttpServer((_req, res) => {
+      res.writeHead(403);
+      res.end("forbidden");
+    });
+    musicSources.setYouTubeClientForTests({
+      getStreamingData: async () => ({
+        url: `${upstream.baseUrl}/stream`,
+      }),
+    } as any);
+
+    const youtubeTrack = {
+      id: videoId,
+      name: "Never Gonna Give You Up",
+      artist: "Rick Astley",
+      url: `/api/audio/youtube/${videoId}`,
+      source: musicSources.YOUTUBE_SOURCE_ID,
+      sourceTrackId: videoId,
+      urlSource: musicSources.YOUTUBE_SOURCE_ID,
+      urlExpiresAt: Date.now() + 30 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    };
+    let currentState = {
+      status: "playing",
+      currentTrack: youtubeTrack,
+      radioQueue: [youtubeTrack],
+      currentQueueIndex: 0,
+      currentProgram: null,
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      discoveryCandidates: [],
+      listenChecks: [],
+      djProfile: { voice: "冰糖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.updateState).mockImplementation(async (patch: any) => {
+      currentState = {
+        ...currentState,
+        ...patch,
+        radioQueue: patch.radioQueue ?? currentState.radioQueue,
+        currentTrack: patch.currentTrack ?? currentState.currentTrack,
+      };
+      return currentState;
+    });
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/audio/youtube/${videoId}`);
+
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ error: "YouTube audio stream unavailable" });
+      expect(currentState.currentTrack).toMatchObject({
+        source: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+        urlSource: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+        playbackHealth: "ready",
+      });
+      expect(currentState.currentTrack.url).toMatch(/^\/api\/audio\/local\//);
+      expect(currentState.currentTrack.lastPlaybackIssue).toBeUndefined();
+      expect(currentState.currentTrack.lastResolveError).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+    }
+  });
+
   it("GET/POST /api/music-sources/local-library 返回状态并支持重扫", async () => {
     const musicSources = await import("./music-sources/index.js");
     const firstFilePath = await createTempMusicFile("Scan Artist - First Song.mp3");
@@ -185,12 +358,13 @@ describe("API Server", () => {
     expect(JSON.stringify(rescanBody)).not.toContain(path.dirname(firstFilePath));
   });
 
-  it("GET /api/music-sources 返回主源备用源运行摘要", async () => {
+  it("GET /api/music-sources 返回可播放源和元数据源运行摘要", async () => {
     const musicSources = await import("./music-sources/index.js");
     const firstFilePath = await createTempMusicFile("Source Artist - Source Song.mp3");
     process.env.LOCAL_MUSIC_ENABLED = "true";
     process.env.LOCAL_MUSIC_DIRS = path.dirname(firstFilePath);
-    process.env.UNBLOCK_NETEASE_ENABLED = "true";
+    process.env.KUGOU_ENABLED = "true";
+    process.env.TENCENT_ENABLED = "true";
     musicSources.clearLocalLibraryCacheForTests();
 
     const res = await fetch(`http://localhost:${port}/api/music-sources`);
@@ -198,17 +372,13 @@ describe("API Server", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as {
       searchOrder: string[];
-      playableUrlFallbacks: Array<{ source: string; fallbacks: string[] }>;
       sources: Array<{ source: string; role: string; enabled: boolean; ok: boolean }>;
     };
-    expect(body.searchOrder).toEqual(["local_library", "netease_legacy"]);
-    expect(body.playableUrlFallbacks).toEqual([
-      { source: "netease_legacy", fallbacks: ["unblock_netease"] },
-    ]);
+    expect(body.searchOrder).toEqual(["local_library", "kugou"]);
     expect(body.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "local_library", role: "library", enabled: true, ok: true }),
-      expect.objectContaining({ source: "netease_legacy", role: "primary", enabled: true, ok: true }),
-      expect.objectContaining({ source: "unblock_netease", role: "fallback", enabled: true, ok: true }),
+      expect.objectContaining({ source: "kugou", role: "primary", enabled: true, ok: true }),
+      expect.objectContaining({ source: "tencent", role: "metadata", enabled: true, ok: true }),
     ]));
     expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
   });
@@ -262,7 +432,7 @@ describe("API Server", () => {
     const body = await res.json() as {
       current: { health: string; leaseStatus: string; urlSource: string; shouldRefresh: boolean };
       upcoming: Array<{ health: string; leaseStatus: string; shouldRefresh: boolean }>;
-      fallbacks: Array<{ source: string; fallbacks: string[] }>;
+      sources: Array<{ source: string; role: string }>;
     };
     expect(body.current).toMatchObject({
       health: "fallback",
@@ -275,13 +445,19 @@ describe("API Server", () => {
       leaseStatus: "expiring",
       shouldRefresh: true,
     });
-    expect(body.fallbacks[0].source).toBe("netease_legacy");
+    expect(body.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "tencent", role: "metadata" }),
+    ]));
     expect(JSON.stringify(body)).not.toContain("https://media.example.com");
   });
 
   it("GET /api/state 会在当前播放 URL 接近过期时主动刷新", async () => {
     const db = await import("./db.js");
-    const netease = await import("./netease.js");
+    const musicSources = await import("./music-sources/index.js");
+    const filePath = await createTempMusicFile("Expiring Artist - Expiring Song.mp3", "fresh local audio");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(filePath);
+    musicSources.clearLocalLibraryCacheForTests();
     const expiringTrack = {
       id: "42",
       name: "Expiring Song",
@@ -318,16 +494,23 @@ describe("API Server", () => {
       };
       return currentState;
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("fresh-url");
 
     const res = await fetch(`http://localhost:${port}/api/state`);
 
     expect(res.status).toBe(200);
-    const body = await res.json() as { currentTrack: { url: string; urlExpiresAt: number } };
-    expect(body.currentTrack.url).toBe("fresh-url");
+    const body = await res.json() as {
+      currentTrack: {
+        url: string;
+        source: string;
+        urlSource: string;
+        urlExpiresAt: number;
+      };
+    };
+    expect(body.currentTrack.url).toMatch(/^\/api\/audio\/local\//);
+    expect(body.currentTrack.source).toBe(musicSources.LOCAL_LIBRARY_SOURCE_ID);
+    expect(body.currentTrack.urlSource).toBe(musicSources.LOCAL_LIBRARY_SOURCE_ID);
     expect(body.currentTrack.urlExpiresAt).toBeGreaterThan(Date.now());
-    expect(vi.mocked(netease.getPlayableUrl)).toHaveBeenCalledWith(42, { forceRefresh: true });
-    expect(currentState.radioQueue[0].url).toBe("fresh-url");
+    expect(currentState.radioQueue[0].url).toMatch(/^\/api\/audio\/local\//);
   });
 
   it("GET /api/music-sources/local-library/matches 返回本地曲库口味命中率", async () => {
@@ -934,6 +1117,13 @@ describe("WebSocket Server", () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
+    process.env.LOCAL_MUSIC_ENABLED = "false";
+    process.env.LOCAL_MUSIC_DIRS = "";
+    process.env.YOUTUBE_ENABLED = "false";
+    process.env.KUGOU_ENABLED = "false";
+    process.env.TENCENT_ENABLED = "false";
+    const musicSources = await import("./music-sources/index.js");
+    musicSources.clearLocalLibraryCacheForTests();
     const db = await import("./db.js");
     const claude = await import("./claude.js");
     vi.mocked(claude.getLlmTaskTimeoutMs).mockImplementation((task) => ({
@@ -977,6 +1167,34 @@ describe("WebSocket Server", () => {
     } else {
       process.env.UNBLOCK_NETEASE_ENABLED = originalUnblockEnabled;
     }
+    if (originalLocalEnabled === undefined) {
+      delete process.env.LOCAL_MUSIC_ENABLED;
+    } else {
+      process.env.LOCAL_MUSIC_ENABLED = originalLocalEnabled;
+    }
+    if (originalLocalDirs === undefined) {
+      delete process.env.LOCAL_MUSIC_DIRS;
+    } else {
+      process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
+    }
+    if (originalYouTubeEnabled === undefined) {
+      delete process.env.YOUTUBE_ENABLED;
+    } else {
+      process.env.YOUTUBE_ENABLED = originalYouTubeEnabled;
+    }
+    if (originalKugouEnabled === undefined) {
+      delete process.env.KUGOU_ENABLED;
+    } else {
+      process.env.KUGOU_ENABLED = originalKugouEnabled;
+    }
+    if (originalTencentEnabled === undefined) {
+      delete process.env.TENCENT_ENABLED;
+    } else {
+      process.env.TENCENT_ENABLED = originalTencentEnabled;
+    }
+    const musicSources = await import("./music-sources/index.js");
+    musicSources.clearLocalLibraryCacheForTests();
+    vi.restoreAllMocks();
   });
 
   it("连接并接收初始状态消息", async () => {
@@ -1568,10 +1786,32 @@ describe("WebSocket Server", () => {
     const claude = await import("./claude.js");
     const tts = await import("./tts.js");
     const weather = await import("./weather.js");
-    const netease = await import("./netease.js");
+    const musicSources = await import("./music-sources/index.js");
+    const refreshSpy = vi.spyOn(musicSources, "refreshStoredTrackPlayableUrl").mockImplementation(async (track) => ({
+      ...track,
+      source: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: "local_song_b",
+      urlSource: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+      url: "/api/audio/local/local_song_b",
+      urlExpiresAt: Date.now() + 30 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+      playbackHealth: "ready",
+      lastPlaybackIssue: undefined,
+      lastResolveError: undefined,
+    }));
 
     const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100, picUrl: "pic-a" };
-    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100, picUrl: "pic-b" };
+    const trackB = {
+      id: "2",
+      name: "Song B",
+      artist: "Artist B",
+      url: "url-b",
+      duration: 100,
+      picUrl: "pic-b",
+      source: "netease_legacy",
+      sourceTrackId: "2",
+      urlSource: "netease_legacy",
+    };
     let currentState = {
       status: "playing",
       currentTrack: trackA,
@@ -1619,10 +1859,6 @@ describe("WebSocket Server", () => {
       cached: false,
       cachePath: "data/audio/prefetch-segue.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => (
-      trackId === 1 ? "url-a" : "url-b-fresh"
-    ));
-
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
     await new Promise<void>((resolve) => ws.on("open", resolve));
@@ -1650,7 +1886,11 @@ describe("WebSocket Server", () => {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("timeout waiting for prefetched track")), 3000);
       const check = setInterval(() => {
-        if (messages.some((m) => m.type === "track" && m.data?.name === "Song B" && m.data?.url === "url-b-fresh")) {
+        if (messages.some((m) => (
+          m.type === "track"
+          && m.data?.name === "Song B"
+          && /^\/api\/audio\/local\//.test(String(m.data?.url ?? ""))
+        ))) {
           clearInterval(check);
           clearTimeout(timeout);
           resolve();
@@ -1658,12 +1898,9 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(vi.mocked(netease.getPlayableUrl).mock.calls).toEqual([
-      [1, { forceRefresh: true }],
-      [2, { forceRefresh: true }],
-    ]);
     expect(claude.callJsonLLM).toHaveBeenCalledTimes(1);
     expect(tts.speak).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).toHaveBeenCalledWith(expect.objectContaining({ id: "2" }), { forceRefresh: true });
     expect(messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("Song B"))).toBe(true);
 
     ws.close();
@@ -1761,12 +1998,54 @@ describe("WebSocket Server", () => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");
     const tts = await import("./tts.js");
-    const netease = await import("./netease.js");
+    const musicSources = await import("./music-sources/index.js");
+    const refreshSpy = vi.spyOn(musicSources, "refreshStoredTrackPlayableUrl").mockImplementation(async (track) => ({
+      ...track,
+      source: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+      sourceTrackId: `local_song_${track.id}`,
+      urlSource: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+      url: `/api/audio/local/local_song_${track.id}`,
+      urlExpiresAt: Date.now() + 30 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+      playbackHealth: "ready",
+      lastPlaybackIssue: undefined,
+      lastResolveError: undefined,
+    }));
 
     const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100, picUrl: "pic-a" };
-    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100, picUrl: "pic-b" };
-    const trackC = { id: "3", name: "Song C", artist: "Artist C", url: "url-c", duration: 100, picUrl: "pic-c" };
-    const trackD = { id: "4", name: "Song D", artist: "Artist D", url: "url-d", duration: 100, picUrl: "pic-d" };
+    const trackB = {
+      id: "2",
+      name: "Song B",
+      artist: "Artist B",
+      url: "url-b",
+      duration: 100,
+      picUrl: "pic-b",
+      source: "netease_legacy",
+      sourceTrackId: "2",
+      urlSource: "netease_legacy",
+    };
+    const trackC = {
+      id: "3",
+      name: "Song C",
+      artist: "Artist C",
+      url: "url-c",
+      duration: 100,
+      picUrl: "pic-c",
+      source: "netease_legacy",
+      sourceTrackId: "3",
+      urlSource: "netease_legacy",
+    };
+    const trackD = {
+      id: "4",
+      name: "Song D",
+      artist: "Artist D",
+      url: "url-d",
+      duration: 100,
+      picUrl: "pic-d",
+      source: "netease_legacy",
+      sourceTrackId: "4",
+      urlSource: "netease_legacy",
+    };
     let currentState = {
       status: "playing",
       currentTrack: trackA,
@@ -1800,8 +2079,6 @@ describe("WebSocket Server", () => {
       cached: false,
       cachePath: "data/audio/prefetch-window.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}-fresh`);
-
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
     await new Promise<void>((resolve) => ws.on("open", resolve));
@@ -1812,8 +2089,10 @@ describe("WebSocket Server", () => {
       const timeout = setTimeout(() => reject(new Error("timeout waiting for prefetch window")), 3000);
       const check = setInterval(() => {
         if (
-          vi.mocked(netease.getPlayableUrl).mock.calls.length >= 4
-          && currentState.currentProgram?.preparedUntilIndex === 3
+          currentState.currentProgram?.preparedUntilIndex === 3
+          && currentState.radioQueue.slice(1).every((track: any) => (
+            /^\/api\/audio\/local\//.test(String(track.url ?? ""))
+          ))
         ) {
           clearInterval(check);
           clearTimeout(timeout);
@@ -1822,15 +2101,13 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(vi.mocked(netease.getPlayableUrl).mock.calls).toEqual(expect.arrayContaining([
-      [2, { forceRefresh: true }],
-      [3, { forceRefresh: true }],
-      [4, { forceRefresh: true }],
-    ]));
-    expect(currentState.radioQueue[1].url).toBe("url-2-fresh");
-    expect(currentState.radioQueue[2].url).toBe("url-3-fresh");
-    expect(currentState.radioQueue[3].url).toBe("url-4-fresh");
+    expect(currentState.radioQueue[1].url).toMatch(/^\/api\/audio\/local\//);
+    expect(currentState.radioQueue[2].url).toMatch(/^\/api\/audio\/local\//);
+    expect(currentState.radioQueue[3].url).toMatch(/^\/api\/audio\/local\//);
     expect(currentState.currentProgram.preparedUntilIndex).toBe(3);
+    expect(refreshSpy).toHaveBeenCalledWith(expect.objectContaining({ id: "2" }), { forceRefresh: true });
+    expect(refreshSpy).toHaveBeenCalledWith(expect.objectContaining({ id: "3" }), { forceRefresh: true });
+    expect(refreshSpy).toHaveBeenCalledWith(expect.objectContaining({ id: "4" }), { forceRefresh: true });
     expect(claude.callJsonLLM).not.toHaveBeenCalled();
 
     ws.close();

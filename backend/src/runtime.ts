@@ -33,9 +33,11 @@ const envCandidates = [
   path.join(process.cwd(), ".env"),
 ];
 
-for (const envPath of envCandidates) {
-  if (existsSync(envPath)) {
-    loadEnv({ path: envPath, override: false });
-    break;
+if (!isTestEnv()) {
+  for (const envPath of envCandidates) {
+    if (existsSync(envPath)) {
+      loadEnv({ path: envPath, override: false });
+      break;
+    }
   }
 }

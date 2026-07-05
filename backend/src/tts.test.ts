@@ -21,6 +21,10 @@ describe("TTS Module", () => {
       MIMO_TTS_MODEL: "mimo-v2.5-tts",
       MIMO_TTS_VOICE: "冰糖",
     };
+    delete process.env.NETWORK_PROXY_URL;
+    delete process.env.EXTERNAL_PROXY_URL;
+    delete process.env.NETWORK_PROXY_HOST;
+    delete process.env.NETWORK_PROXY_PORT;
     vi.stubGlobal("fetch", vi.fn());
     vi.clearAllMocks();
   });
@@ -158,32 +162,36 @@ describe("TTS Module", () => {
       await expect(synthesize("hello")).rejects.toThrow("MiMo API error: 401 Unauthorized");
     });
 
-    it("should retry via proxy on network failures", async () => {
+    it("should retry directly without using proxy when configured", async () => {
+      process.env.NETWORK_PROXY_URL = "http://127.0.0.1:7897";
       const base64Audio = Buffer.from("mimo-audio").toString("base64");
-      vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed"));
-      vi.mocked(undiciFetch).mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          choices: [
-            {
-              message: {
-                audio: { data: base64Audio },
+      vi.mocked(fetch)
+        .mockRejectedValueOnce(new TypeError("fetch failed"))
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({
+            choices: [
+              {
+                message: {
+                  audio: { data: base64Audio },
+                },
               },
-            },
-          ],
-        }),
-      } as Response);
+            ],
+          }),
+        } as Response);
 
       const result = await synthesize("hello");
 
       expect(Buffer.from(result.audioBuffer).toString()).toBe("mimo-audio");
-      expect(undiciFetch).toHaveBeenCalledWith(
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenLastCalledWith(
         expect.stringContaining("/chat/completions"),
         expect.objectContaining({
-          dispatcher: expect.anything(),
+          method: "POST",
         }),
       );
-      expect(ProxyAgent).toHaveBeenCalledWith("http://127.0.0.1:7897");
+      expect(undiciFetch).not.toHaveBeenCalled();
+      expect(ProxyAgent).not.toHaveBeenCalled();
     });
   });
 

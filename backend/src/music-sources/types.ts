@@ -1,8 +1,8 @@
 export type MusicSourceId =
-  | "netease_legacy"
-  | "unblock_netease"
   | "local_library"
-  | "youtube";
+  | "youtube"
+  | "kugou"
+  | "tencent";
 
 export type MusicSourceErrorCode =
   | "url_expired"
@@ -26,6 +26,7 @@ export interface PlayableUrlResult {
   source: MusicSourceId;
   sourceTrackId: string;
   url: string;
+  validationUrl?: string;
   expiresAt: number;
   refreshedAt: number;
 }

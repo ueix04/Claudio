@@ -10,7 +10,9 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@meting/core": "^1.6.1",
     "@unblockneteasemusic/server": "^0.28.0",
+    "@xnfa/qq-music-api": "^1.1.19",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
@@ -18,7 +20,7 @@
     "NeteaseCloudMusicApi": "^4.31.0",
     "undici": "^7.25.0",
     "ws": "^8.18.0",
-    "youtubei.js": "^17.0.1"
+    "youtubei.js": "^17.2.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

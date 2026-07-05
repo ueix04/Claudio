@@ -13,6 +13,14 @@ import * as weather from "./weather.js";
 
 vi.mock("./db.js");
 vi.mock("./claude.js");
+vi.mock("./music-sources/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./music-sources/index.js")>();
+  return {
+    ...actual,
+    resolveKnownTrack: vi.fn(),
+    resolveTrack: vi.fn(),
+  };
+});
 vi.mock("./netease.js");
 vi.mock("./taste-profile.js");
 vi.mock("./tts.js");
@@ -52,6 +60,53 @@ function mockNeteaseSearchTrack(track: {
   };
 }
 
+type MockPlayableTrackInput = {
+  id?: number | string;
+  title: string;
+  artist?: string;
+  album?: string;
+  picUrl?: string;
+  duration?: number;
+  url?: string;
+  source?: musicSources.MusicSourceId;
+  sourceTrackId?: string;
+};
+
+function mockPlayableTrack(track: MockPlayableTrackInput): musicSources.PlayableTrack {
+  const source = track.source ?? musicSources.KUGOU_SOURCE_ID;
+  const sourceTrackId = track.sourceTrackId ?? String(track.id ?? track.title);
+  const isLocal = source === musicSources.LOCAL_LIBRARY_SOURCE_ID;
+  return {
+    id: track.id ?? sourceTrackId,
+    name: track.title,
+    artist: track.artist ?? "",
+    album: track.album,
+    picUrl: track.picUrl ?? "",
+    duration: track.duration ?? 240_000,
+    source,
+    sourceTrackId,
+    urlSource: source,
+    url: track.url ?? (isLocal
+      ? `/api/audio/local/${encodeURIComponent(sourceTrackId)}`
+      : `url-${sourceTrackId}`),
+    urlExpiresAt: Date.now() + 30 * 60 * 1000,
+    urlRefreshedAt: Date.now(),
+  };
+}
+
+function mockResolveTrack(
+  resolver: (
+    title: string,
+    artist?: string,
+    source?: musicSources.MusicSourceId,
+  ) => MockPlayableTrackInput | null | Promise<MockPlayableTrackInput | null>,
+) {
+  vi.mocked(musicSources.resolveTrack).mockImplementation(async (title, artist, source) => {
+    const resolved = await resolver(title, artist, source);
+    return resolved ? mockPlayableTrack(resolved) : null;
+  });
+}
+
 function mockProgramResponse(overrides: Partial<{
   title: string;
   mood: string;
@@ -87,6 +142,30 @@ function mockProgramResponse(overrides: Partial<{
 }
 
 function mockSearchFromLineup(lineup: Array<{ id?: number; title: string; artist?: string }>) {
+  let index = 0;
+  mockResolveTrack((title, artist, source) => {
+    const raw = [title, artist].filter(Boolean).join(" ");
+    const matched = lineup.find((track) => raw.includes(track.title));
+    index += 1;
+    const id = matched?.id ?? 100 + index;
+    return {
+      id,
+      title: matched?.title ?? title,
+      artist: matched?.artist ?? artist ?? `Artist ${index}`,
+      duration: 240_000,
+      source: source ?? musicSources.KUGOU_SOURCE_ID,
+    };
+  });
+  vi.mocked(musicSources.resolveKnownTrack).mockImplementation(async (track) => mockPlayableTrack({
+    id: Number.isFinite(Number(track.sourceTrackId)) ? Number(track.sourceTrackId) : track.sourceTrackId,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    duration: track.duration,
+    source: musicSources.KUGOU_SOURCE_ID,
+    sourceTrackId: track.sourceTrackId,
+  }));
+
   vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
     const raw = String(keyword);
     const matched = lineup.find((track) => raw.includes(track.title));
@@ -105,6 +184,9 @@ describe("Pipeline Engine", () => {
   const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
   const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
   const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
+  const originalYouTubeEnabled = process.env.YOUTUBE_ENABLED;
+  const originalKugouEnabled = process.env.KUGOU_ENABLED;
+  const originalTencentEnabled = process.env.TENCENT_ENABLED;
   let tempDirs: string[] = [];
 
   async function createTempMusicFile(filename: string, contents = "fake audio"): Promise<string> {
@@ -125,8 +207,20 @@ describe("Pipeline Engine", () => {
       discovery: 45_000,
     })[task]);
     process.env.UNBLOCK_NETEASE_ENABLED = "false";
+    process.env.YOUTUBE_ENABLED = "false";
+    process.env.KUGOU_ENABLED = "false";
+    process.env.TENCENT_ENABLED = "false";
     delete process.env.LOCAL_MUSIC_ENABLED;
     delete process.env.LOCAL_MUSIC_DIRS;
+    vi.mocked(musicSources.resolveTrack).mockResolvedValue(null);
+    vi.mocked(musicSources.resolveKnownTrack).mockImplementation(async (track) => mockPlayableTrack({
+      id: Number.isFinite(Number(track.sourceTrackId)) ? Number(track.sourceTrackId) : track.sourceTrackId,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      duration: track.duration,
+      sourceTrackId: track.sourceTrackId,
+    }));
     musicSources.clearLocalLibraryCacheForTests();
   });
 
@@ -145,6 +239,21 @@ describe("Pipeline Engine", () => {
       delete process.env.LOCAL_MUSIC_DIRS;
     } else {
       process.env.LOCAL_MUSIC_DIRS = originalLocalDirs;
+    }
+    if (originalYouTubeEnabled === undefined) {
+      delete process.env.YOUTUBE_ENABLED;
+    } else {
+      process.env.YOUTUBE_ENABLED = originalYouTubeEnabled;
+    }
+    if (originalKugouEnabled === undefined) {
+      delete process.env.KUGOU_ENABLED;
+    } else {
+      process.env.KUGOU_ENABLED = originalKugouEnabled;
+    }
+    if (originalTencentEnabled === undefined) {
+      delete process.env.TENCENT_ENABLED;
+    } else {
+      process.env.TENCENT_ENABLED = originalTencentEnabled;
     }
     musicSources.clearLocalLibraryCacheForTests();
     await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
@@ -328,19 +437,18 @@ describe("Pipeline Engine", () => {
       cachePath: "data/audio/cached.wav",
     });
 
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      const raw = String(keyword);
-      const matched = mockClaudeResponse.lineup.find((track) => raw.includes(track.title));
-      return mockNeteaseSearchTrack({
-        id: matched?.title === "Fail" ? 111 : 200 + vi.mocked(netease.searchSongs).mock.calls.length,
-        name: matched?.title ?? raw,
-        artist: matched?.artist ?? "Artist",
-        duration: 240_000,
-      });
-    });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => {
-      if (id === 111) throw new Error("Netease Error");
-      return `url-${id}`;
+    let resolveIndex = 0;
+    mockResolveTrack((title, artist) => {
+      if (title === "Fail") {
+        throw new Error("Music source error");
+      }
+      const matched = mockClaudeResponse.lineup.find((track) => title.includes(track.title));
+      resolveIndex += 1;
+      return {
+        id: 200 + resolveIndex,
+        title: matched?.title ?? title,
+        artist: matched?.artist ?? artist ?? "Artist",
+      };
     });
 
     const result = await pipeline.runPipeline("morning_brief");
@@ -469,23 +577,24 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/mock.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      const raw = String(keyword);
-      const matched = mockClaudeResponse.lineup.find((track) => raw.includes(track.title));
-      return mockNeteaseSearchTrack({
-        id: 200 + vi.mocked(netease.searchSongs).mock.calls.length,
-        name: matched?.title ?? raw,
-        artist: matched?.artist ?? "Artist",
-        duration: 240_000,
-      });
-    });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) =>
-      id === 999 ? "http://example.com/local.mp3" : `url-${id}`,
-    );
+    mockSearchFromLineup(mockClaudeResponse.lineup);
+    vi.mocked(musicSources.resolveKnownTrack).mockImplementation(async (track) => mockPlayableTrack({
+      id: 999,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      sourceTrackId: track.sourceTrackId,
+      url: "http://example.com/local.mp3",
+    }));
 
     const result = await pipeline.runPipeline("mood_pick");
 
-    expect(netease.getPlayableUrl).toHaveBeenCalledWith(999, undefined);
+    expect(musicSources.resolveKnownTrack).toHaveBeenCalledWith(expect.objectContaining({
+      source: "tencent",
+      sourceTrackId: "999",
+      title: "Local Song",
+      artist: "Local Artist",
+    }));
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
     expect(result.tracks[0]).toMatchObject({
       id: 999,
@@ -523,33 +632,24 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/discovery.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      if (keyword.includes("Discovery Lane")) {
-        return mockNeteaseSearchTrack({
-          id: 222,
-          name: "Discovery Song",
-          artist: "Discovery Artist",
-        });
+    mockResolveTrack((title) => {
+      if (title.includes("Discovery Lane")) {
+        return { id: 222, title: "Discovery Song", artist: "Discovery Artist" };
       }
-      if (keyword.includes("Sunflower")) {
-        return mockNeteaseSearchTrack({ id: 112, name: "Stable 2", artist: "Stable Artist" });
+      if (title.includes("Sunflower")) {
+        return { id: 112, title: "Stable 2", artist: "Stable Artist" };
       }
-      if (keyword.includes("Yellow")) {
-        return mockNeteaseSearchTrack({ id: 113, name: "Stable 3", artist: "Stable Artist" });
+      if (title.includes("Yellow")) {
+        return { id: 113, title: "Stable 3", artist: "Stable Artist" };
       }
-      return mockNeteaseSearchTrack({
-        id: 111,
-        name: "Stable 1",
-        artist: "Stable Artist",
-      });
+      return { id: 111, title: "Stable 1", artist: "Stable Artist" };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
 
     const result = await pipeline.runPipeline("random_discover");
 
     expect(claude.callLLM).not.toHaveBeenCalled();
     expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 45_000);
-    expect(netease.searchSongs).toHaveBeenCalledWith("Discovery Lane", 5);
+    expect(musicSources.resolveTrack).toHaveBeenCalledWith("Discovery Lane", undefined);
     expect(result.tracks.map((track) => track.name)).toEqual([
       "Stable 1",
       "Discovery Song",
@@ -625,16 +725,15 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/bounded-discovery.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      if (keyword.includes("Adventure Lane One")) {
-        return mockNeteaseSearchTrack({ id: 331, name: "Adventure One", artist: "Discovery Artist" });
+    mockResolveTrack((title) => {
+      if (title.includes("Adventure Lane One")) {
+        return { id: 331, title: "Adventure One", artist: "Discovery Artist" };
       }
-      if (keyword.includes("Adventure Lane Two")) {
-        return mockNeteaseSearchTrack({ id: 332, name: "Adventure Two", artist: "Discovery Artist" });
+      if (title.includes("Adventure Lane Two")) {
+        return { id: 332, title: "Adventure Two", artist: "Discovery Artist" };
       }
-      return mockNeteaseSearchTrack({ id: 111, name: "Stable Anchor", artist: "Stable Artist" });
+      return { id: 111, title: "Stable Anchor", artist: "Stable Artist" };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
 
     await pipeline.runPipeline("random_discover");
 
@@ -675,17 +774,24 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/local-library.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      const raw = String(keyword);
-      const index = vi.mocked(netease.searchSongs).mock.calls.length;
-      return mockNeteaseSearchTrack({
-        id: 700 + index,
-        name: raw.split(" ").slice(0, -1).join(" ") || raw,
-        artist: `Fallback Artist ${index}`,
-        duration: 240_000,
-      });
+    let localResolveIndex = 0;
+    mockResolveTrack((title, artist) => {
+      localResolveIndex += 1;
+      if (title.includes("Library Song")) {
+        return {
+          id: "local_library_song",
+          title: "Library Song",
+          artist: "Library Artist",
+          source: musicSources.LOCAL_LIBRARY_SOURCE_ID,
+          sourceTrackId: "local_library_song",
+        };
+      }
+      return {
+        id: 700 + localResolveIndex,
+        title,
+        artist: artist ?? `Fallback Artist ${localResolveIndex}`,
+      };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
 
     const result = await pipeline.runPipeline("mood_pick");
 
@@ -728,31 +834,21 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/startup.wav",
     });
-    vi.mocked(netease.searchSongs)
-      .mockResolvedValueOnce(mockNeteaseSearchTrack({
-        id: 11,
-        name: "Song A",
-        artist: "Artist A",
-        picUrl: "pic-a",
-        duration: 100,
-      }))
-      .mockResolvedValueOnce(mockNeteaseSearchTrack({
-        id: 12,
-        name: "Song B",
-        artist: "Artist B",
-        picUrl: "pic-b",
-        duration: 120,
-      }))
-      .mockImplementation(async (keyword) => {
-        const index = vi.mocked(netease.searchSongs).mock.calls.length;
-        return mockNeteaseSearchTrack({
-          id: 100 + index,
-          name: `Fallback ${index}`,
-          artist: `Fallback Artist ${index}`,
-          duration: 240_000,
-        });
-      });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
+    let startupResolveIndex = 0;
+    mockResolveTrack((title, artist) => {
+      startupResolveIndex += 1;
+      if (title === "Song A") {
+        return { id: 11, title: "Song A", artist: "Artist A", picUrl: "pic-a", duration: 100 };
+      }
+      if (title === "Song B") {
+        return { id: 12, title: "Song B", artist: "Artist B", picUrl: "pic-b", duration: 120 };
+      }
+      return {
+        id: 100 + startupResolveIndex,
+        title: `Fallback ${startupResolveIndex}`,
+        artist: `Fallback Artist ${startupResolveIndex}`,
+      };
+    });
 
     const result = await pipeline.runStartupRadioProgram();
 
@@ -871,15 +967,14 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/program-discovery.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      if (keyword.includes("Discovery Lane")) {
-        return mockNeteaseSearchTrack({ id: 900, name: "Discovery Song", artist: "Discovery Artist" });
+    mockResolveTrack((title) => {
+      if (title.includes("Discovery Lane")) {
+        return { id: 900, title: "Discovery Song", artist: "Discovery Artist" };
       }
-      const match = keyword.match(/Stable\s+(\d)/);
+      const match = title.match(/Stable\s+(\d)/);
       const id = match ? Number(match[1]) : 1;
-      return mockNeteaseSearchTrack({ id, name: `Stable ${id}`, artist: "Stable Artist" });
+      return { id, title: `Stable ${id}`, artist: "Stable Artist" };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
 
     const result = await pipeline.runStartupRadioProgram();
 
@@ -926,14 +1021,7 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/dean-startup.wav",
     });
-    vi.mocked(netease.searchSongs).mockResolvedValue(mockNeteaseSearchTrack({
-      id: 88,
-      name: "Yellow",
-      artist: "Coldplay",
-      picUrl: "yellow-pic",
-      duration: 100,
-    }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("yellow-url");
+    mockSearchFromLineup([{ id: 88, title: "Yellow", artist: "Coldplay" }]);
 
     await pipeline.runStartupRadioProgram();
 
@@ -958,17 +1046,17 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/fallback-startup.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword) => {
-      const title = String(keyword).split(" ").slice(0, -1).join(" ") || String(keyword);
-      const index = vi.mocked(netease.searchSongs).mock.calls.length;
-      return mockNeteaseSearchTrack({
-        id: 900 + index,
-        name: title,
-        artist: `Fallback Artist ${index}`,
-        duration: 240_000,
-      });
+    let fallbackStartupIndex = 0;
+    mockResolveTrack((title, artist) => {
+      fallbackStartupIndex += 1;
+      const id = 900 + fallbackStartupIndex;
+      return {
+        id,
+        title,
+        artist: artist ?? `Fallback Artist ${fallbackStartupIndex}`,
+        url: `fallback-url-${id}`,
+      };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
 
     const result = await pipeline.runStartupRadioProgram({ background: true });
 
@@ -1028,18 +1116,18 @@ describe("Pipeline Engine", () => {
       { title: "The Scientist", artist: "Coldplay" },
       { title: "夜空中最亮的星", artist: "逃跑计划" },
     ];
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword) => {
-      const raw = String(keyword);
-      const matched = fallbackTracks.find((track) => raw.startsWith(track.title));
-      const index = vi.mocked(netease.searchSongs).mock.calls.length;
-      return mockNeteaseSearchTrack({
-        id: 1000 + index,
-        name: matched?.title ?? raw,
-        artist: matched?.artist ?? `Fallback Artist ${index}`,
-        duration: 240_000,
-      });
+    let recentFallbackIndex = 0;
+    mockResolveTrack((title, artist) => {
+      recentFallbackIndex += 1;
+      const matched = fallbackTracks.find((track) => title.startsWith(track.title));
+      const id = 1000 + recentFallbackIndex;
+      return {
+        id,
+        title: matched?.title ?? title,
+        artist: matched?.artist ?? artist ?? `Fallback Artist ${recentFallbackIndex}`,
+        url: `fallback-url-${id}`,
+      };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
 
     const result = await pipeline.runStartupRadioProgram({ background: true });
 
@@ -1090,14 +1178,14 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/switch.wav",
     });
-    vi.mocked(netease.searchSongs).mockResolvedValue(mockNeteaseSearchTrack({
+    mockResolveTrack(() => ({
       id: 66,
-      name: "Rain Song",
+      title: "Rain Song",
       artist: "Artist R",
       picUrl: "rain-pic",
       duration: 88,
+      url: "rain-url",
     }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("rain-url");
 
     const result = await pipeline.runChatSwitchProgram("换一组安静一点的歌");
 
@@ -1145,25 +1233,25 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/fallback-switch.wav",
     });
-    vi.mocked(netease.searchSongs).mockImplementation(async (keyword: string) => {
-      const index = vi.mocked(netease.searchSongs).mock.calls.length;
-      const fallbackTrack = keyword.includes("Strobe")
-        ? { name: "Strobe", artist: "deadmau5" }
-        : keyword.includes("Shelter")
-          ? { name: "Shelter", artist: "Porter Robinson, Madeon" }
-          : keyword.includes("Midnight City")
-            ? { name: "Midnight City", artist: "M83" }
-            : keyword.includes("Faded")
-              ? { name: "Faded", artist: "Alan Walker" }
-              : { name: "After Midnight", artist: "KLYMVX, Emily Zeck" };
-      return mockNeteaseSearchTrack({
-        id: 2000 + index,
-        name: fallbackTrack.name,
-        artist: fallbackTrack.artist,
-        duration: 240_000,
-      });
+    let chatFallbackIndex = 0;
+    mockResolveTrack((title) => {
+      chatFallbackIndex += 1;
+      const fallbackTrack = title.includes("Strobe")
+        ? { title: "Strobe", artist: "deadmau5" }
+        : title.includes("Shelter")
+          ? { title: "Shelter", artist: "Porter Robinson, Madeon" }
+          : title.includes("Midnight City")
+            ? { title: "Midnight City", artist: "M83" }
+            : title.includes("Faded")
+              ? { title: "Faded", artist: "Alan Walker" }
+              : { title: "After Midnight", artist: "KLYMVX, Emily Zeck" };
+      const id = 2000 + chatFallbackIndex;
+      return {
+        id,
+        ...fallbackTrack,
+        url: `fallback-url-${id}`,
+      };
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
 
     const result = await pipeline.runChatSwitchProgram("我要听电子音乐", {
       preserveCurrentTrack: true,
@@ -1233,14 +1321,14 @@ describe("Pipeline Engine", () => {
       cached: false,
       cachePath: "data/audio/replan.wav",
     });
-    vi.mocked(netease.searchSongs).mockResolvedValue(mockNeteaseSearchTrack({
+    mockResolveTrack(() => ({
       id: 77,
-      name: "Quiet Song",
+      title: "Quiet Song",
       artist: "Artist Q",
       picUrl: "quiet-pic",
       duration: 120,
+      url: "quiet-url",
     }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("quiet-url");
 
     const result = await pipeline.runChatSwitchProgram("换安静一点", {
       preserveCurrentTrack: true,

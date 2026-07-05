@@ -42,6 +42,7 @@ const AUDIO_SILENCE_RECOVERY_LEVEL = 0.006;
 const AUDIO_SILENCE_RECOVERY_MIN_VOLUME = 0.05;
 const AUDIO_SILENCE_RECOVERY_MS = 8_000;
 const AUDIO_SILENCE_RECOVERY_COOLDOWN_MS = 12_000;
+const YOUTUBE_VIDEO_ID_PATTERN = /^[a-zA-Z0-9_-]{11}$/;
 
 type PlayableTrackInfo = TrackInfo & {
   id?: string;
@@ -65,6 +66,13 @@ type QueueStepPayload = {
 
 type ClientPlaybackIssueCode = "client_silent_audio" | "audio_error";
 
+export type PlaybackUrlInput = {
+  url?: string;
+  source?: string;
+  sourceTrackId?: string;
+  urlSource?: string;
+};
+
 const getTrackPlaybackKey = (track?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null) =>
   track?.id || track?.url || "";
 
@@ -79,6 +87,47 @@ const isSamePlaybackTrack = (
       || a.url === b.url
     ),
 );
+
+export function toPlayableAudioUrl(input: string | PlaybackUrlInput): string {
+  const url = typeof input === "string" ? input : input.url ?? "";
+  const source = typeof input === "string" ? undefined : input.source;
+  const urlSource = typeof input === "string" ? undefined : input.urlSource;
+  const sourceTrackId = typeof input === "string" ? undefined : input.sourceTrackId;
+  if (
+    (source === "youtube" || urlSource === "youtube")
+    && sourceTrackId
+    && YOUTUBE_VIDEO_ID_PATTERN.test(sourceTrackId)
+  ) {
+    return `/api/audio/youtube/${encodeURIComponent(sourceTrackId)}`;
+  }
+  if (url.startsWith("/api/audio/")) return url;
+  return `/api/audio/music?url=${encodeURIComponent(url)}`;
+}
+
+export function buildPlaybackIssuePayload(
+  code: ClientPlaybackIssueCode,
+  message: string,
+  state: Pick<PlayerState, "currentTrack" | "currentTime" | "duration" | "audioSignalLevel">,
+) {
+  const track = state.currentTrack;
+  if (!track) {
+    return null;
+  }
+
+  return {
+    code,
+    message,
+    trackId: track.id,
+    source: track.source,
+    sourceTrackId: track.sourceTrackId,
+    urlSource: track.urlSource,
+    title: track.title,
+    artist: track.artist,
+    positionSec: Number.isFinite(state.currentTime) ? state.currentTime : undefined,
+    durationSec: Number.isFinite(state.duration) ? state.duration : undefined,
+    signalLevel: typeof state.audioSignalLevel === "number" ? state.audioSignalLevel : undefined,
+  };
+}
 
 export function useWebSocket() {
   const [hasHydratedState, setHasHydratedState] = useState(false);
@@ -167,10 +216,7 @@ export function useWebSocket() {
   const formatClockTime = (timestamp: number) =>
     new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-  const toPlayableUrl = useCallback((url: string) => {
-    if (url.startsWith("/api/audio/")) return url;
-    return `/api/audio/music?url=${encodeURIComponent(url)}`;
-  }, []);
+  const toPlayableUrl = useCallback(toPlayableAudioUrl, []);
 
   const showUtilityNotice = useCallback((text: string) => {
     setUtilityNotice(text);
@@ -211,6 +257,14 @@ export function useWebSocket() {
     }, 900);
   }, [clearSubtitleFadeTimer]);
 
+  const handleAudioPlayFailure = useCallback((error: unknown) => {
+    console.error(error);
+    setPlayerState((p) => ({ ...p, isPlaying: false }));
+    if (error instanceof DOMException && error.name === "NotAllowedError") {
+      showUtilityNotice("点播放开始音频");
+    }
+  }, [showUtilityNotice]);
+
   const getActiveMusicAudio = useCallback(() => {
     if (!activeMusicAudioRef.current && audioRef.current) {
       activeMusicAudioRef.current = audioRef.current;
@@ -247,8 +301,9 @@ export function useWebSocket() {
     const startVolume = audio.volume;
     const startedAt = performance.now();
     const step = (now: number) => {
-      const progress = Math.min(1, (now - startedAt) / duration);
-      audio.volume = startVolume + ((boundedTarget - startVolume) * progress);
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / duration));
+      const nextVolume = startVolume + ((boundedTarget - startVolume) * progress);
+      audio.volume = Math.min(1, Math.max(0, nextVolume));
       if (progress < 1) {
         const nextFrame = window.requestAnimationFrame(step);
         fadeFramesRef.current.set(audio, nextFrame);
@@ -354,7 +409,7 @@ export function useWebSocket() {
 
   const normalizeTrack = useCallback((data: Partial<WSTrackPayload> & { url: string; artist: string }) => {
     const title = data.title ?? data.name ?? "Unknown Title";
-    const proxiedUrl = toPlayableUrl(data.url);
+    const proxiedUrl = toPlayableUrl(data);
     return {
       id: data.id ? String(data.id) : `${title}_${data.artist}`,
       title,
@@ -362,6 +417,10 @@ export function useWebSocket() {
       album: data.album,
       url: proxiedUrl,
       duration: data.duration,
+      source: data.source,
+      sourceTrackId: data.sourceTrackId,
+      urlSource: data.urlSource,
+      playbackHealth: data.playbackHealth,
     };
   }, [toPlayableUrl]);
 
@@ -406,7 +465,7 @@ export function useWebSocket() {
         }, MUSIC_FADE_MS + 80);
       })
       .catch((error) => {
-        console.error(error);
+        handleAudioPlayFailure(error);
         activeMusicAudioRef.current = outgoing;
         standbyMusicAudioRef.current = incoming;
         incoming.pause();
@@ -415,17 +474,25 @@ export function useWebSocket() {
           outgoing.src = track.url;
           outgoing.dataset.loadedUrl = track.url;
         }
-        outgoing.play().catch(console.error);
+        outgoing.play().catch(handleAudioPlayFailure);
         fadeAudioVolume(outgoing, getEffectiveMusicVolume(), MUSIC_FADE_MS);
       });
 
     return true;
-  }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume, getStandbyMusicAudio]);
+  }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume, getStandbyMusicAudio, handleAudioPlayFailure]);
 
-  const playMusic = useCallback((url: string, title: string, artist: string, album?: string, id?: string, duration?: number) => {
+  const playMusic = useCallback((
+    url: string,
+    title: string,
+    artist: string,
+    album?: string,
+    id?: string,
+    duration?: number,
+    metadata?: Pick<PlayableTrackInfo, "source" | "sourceTrackId" | "urlSource" | "playbackHealth">,
+  ) => {
     const a = getActiveMusicAudio();
     if (!a) return;
-    const track: PlayableTrackInfo = { id, url, title, artist, album, duration };
+    const track: PlayableTrackInfo = { id, url, title, artist, album, duration, ...metadata };
     const trackKey = getTrackPlaybackKey(track);
     const recovery = audioRecoveryRef.current;
     if (recovery.trackKey !== trackKey || recovery.url !== url) {
@@ -444,21 +511,21 @@ export function useWebSocket() {
         a.dataset.loadedUrl = url;
       }
       a.currentTime = 0;
-      a.play().catch(console.error);
+      a.play().catch(handleAudioPlayFailure);
       fadeAudioVolume(a, getEffectiveMusicVolume(), MUSIC_FADE_MS);
     }
 
     const isFavorite = id ? favoriteIdsRef.current.includes(id) : false;
     setPlayerState((p) => ({
       ...p,
-      currentTrack: { id, url, title, artist, album, duration, isFavorite },
-      isPlaying: true,
+      currentTrack: { ...track, isFavorite },
+      isPlaying: false,
       currentTime: 0,
       duration: duration ?? 0,
       audioSignalLevel: null,
     }));
     setStatus("playing");
-    rememberTrack({ id, url, title, artist, album, duration, isFavorite });
+    rememberTrack({ ...track, isFavorite });
     window.setTimeout(() => {
       preloadNextPlaylistTrack();
     }, 0);
@@ -466,6 +533,7 @@ export function useWebSocket() {
     fadeAudioVolume,
     getActiveMusicAudio,
     getEffectiveMusicVolume,
+    handleAudioPlayFailure,
     preloadNextPlaylistTrack,
     rememberTrack,
     startPreloadedTrack,
@@ -481,17 +549,46 @@ export function useWebSocket() {
       artist: normalized.artist,
       album: normalized.album,
       duration: normalized.duration,
+      source: normalized.source,
+      sourceTrackId: normalized.sourceTrackId,
+      urlSource: normalized.urlSource,
+      playbackHealth: normalized.playbackHealth,
       isFavorite: favoriteIdsRef.current.includes(id),
     });
     setPlayerState((p) => {
       const exists = p.playlist.some((t) => t.id === id);
       const pl: PlaylistTrack[] = exists
         ? p.playlist
-        : [...p.playlist, { id, title: normalized.title, artist: normalized.artist, album: normalized.album, duration: normalized.duration, isPlaying: false, url: normalized.url }];
+        : [...p.playlist, {
+          id,
+          title: normalized.title,
+          artist: normalized.artist,
+          album: normalized.album,
+          duration: normalized.duration,
+          isPlaying: false,
+          url: normalized.url,
+          source: normalized.source,
+          sourceTrackId: normalized.sourceTrackId,
+          urlSource: normalized.urlSource,
+          playbackHealth: normalized.playbackHealth,
+        }];
       const finalPl = pl.map((t) => ({ ...t, isPlaying: t.id === id }));
       return { ...p, playlist: finalPl, queueCount: finalPl.length, status: "playing" as AppStatus };
     });
-    playMusic(normalized.url, normalized.title, normalized.artist, normalized.album, id, normalized.duration);
+    playMusic(
+      normalized.url,
+      normalized.title,
+      normalized.artist,
+      normalized.album,
+      id,
+      normalized.duration,
+      {
+        source: normalized.source,
+        sourceTrackId: normalized.sourceTrackId,
+        urlSource: normalized.urlSource,
+        playbackHealth: normalized.playbackHealth,
+      },
+    );
   }, [normalizeTrack, playMusic, rememberTrack]);
 
   const requestUpcomingPrefetch = useCallback(() => {
@@ -541,23 +638,14 @@ export function useWebSocket() {
 
   const reportClientPlaybackIssue = useCallback((code: ClientPlaybackIssueCode, message: string) => {
     const state = playerStateRef.current;
-    const track = state.currentTrack;
-    if (!track || wsRef.current?.readyState !== WebSocket.OPEN) {
+    const payload = buildPlaybackIssuePayload(code, message, state);
+    if (!payload || wsRef.current?.readyState !== WebSocket.OPEN) {
       return;
     }
 
     wsRef.current.send(JSON.stringify({
       type: "playback_issue",
-      data: {
-        code,
-        message,
-        trackId: track.id,
-        title: track.title,
-        artist: track.artist,
-        positionSec: Number.isFinite(state.currentTime) ? state.currentTime : undefined,
-        durationSec: Number.isFinite(state.duration) ? state.duration : undefined,
-        signalLevel: typeof state.audioSignalLevel === "number" ? state.audioSignalLevel : undefined,
-      },
+      data: payload,
     }));
   }, []);
 
@@ -567,7 +655,12 @@ export function useWebSocket() {
     const idx = pl.findIndex((t) => t.isPlaying);
     const target = pl[(idx + step + pl.length) % pl.length];
     setPlayerState((p) => ({ ...p, playlist: p.playlist.map((t) => ({ ...t, isPlaying: t.id === target.id })) }));
-    playMusic(target.url, target.title, target.artist, target.album, target.id);
+    playMusic(target.url, target.title, target.artist, target.album, target.id, target.duration, {
+      source: target.source,
+      sourceTrackId: target.sourceTrackId,
+      urlSource: target.urlSource,
+      playbackHealth: target.playbackHealth,
+    });
   }, [playMusic]);
 
   const onNext = useCallback(() => {
@@ -625,8 +718,14 @@ export function useWebSocket() {
     if (!a) return;
     const ct = playerStateRef.current.currentTrack;
     if (!ct?.url) return;
-    a.paused ? a.play().catch(console.error) : a.pause();
-  }, [getActiveMusicAudio]);
+    if (a.paused) {
+      a.play()
+        .then(() => fadeAudioVolume(a, getEffectiveMusicVolume(), 120))
+        .catch(handleAudioPlayFailure);
+      return;
+    }
+    a.pause();
+  }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume, handleAudioPlayFailure]);
 
   const onSeek = useCallback((time: number) => {
     const active = getActiveMusicAudio();
@@ -687,7 +786,12 @@ export function useWebSocket() {
     }
     setPlayerState((p) => ({ ...p, playlist: p.playlist.map((t) => ({ ...t, isPlaying: t.id === trackId })) }));
     const catalogTrack = trackCatalogRef.current.get(trackId);
-    playMusic(track.url, track.title, track.artist, track.album, track.id, catalogTrack?.duration);
+    playMusic(track.url, track.title, track.artist, track.album, track.id, catalogTrack?.duration, {
+      source: track.source ?? catalogTrack?.source,
+      sourceTrackId: track.sourceTrackId ?? catalogTrack?.sourceTrackId,
+      urlSource: track.urlSource ?? catalogTrack?.urlSource,
+      playbackHealth: track.playbackHealth ?? catalogTrack?.playbackHealth,
+    });
   }, [playMusic]);
 
   const playSavedTrack = useCallback((trackId: string) => {
@@ -712,6 +816,10 @@ export function useWebSocket() {
               duration: catalogTrack.duration,
               isPlaying: true,
               url: catalogTrack.url,
+              source: catalogTrack.source,
+              sourceTrackId: catalogTrack.sourceTrackId,
+              urlSource: catalogTrack.urlSource,
+              playbackHealth: catalogTrack.playbackHealth,
             },
           ];
       return {
@@ -728,6 +836,12 @@ export function useWebSocket() {
       catalogTrack.album,
       catalogTrack.id ?? trackId,
       catalogTrack.duration,
+      {
+        source: catalogTrack.source,
+        sourceTrackId: catalogTrack.sourceTrackId,
+        urlSource: catalogTrack.urlSource,
+        playbackHealth: catalogTrack.playbackHealth,
+      },
     );
   }, [playMusic, showUtilityNotice]);
 
@@ -1511,7 +1625,11 @@ export function useWebSocket() {
                     album: track.album,
                     duration: track.duration,
                     isPlaying: d.currentTrack?.id ? String(d.currentTrack.id) === id : false,
-                    url: toPlayableUrl(track.url),
+                    url: toPlayableUrl(track),
+                    source: track.source,
+                    sourceTrackId: track.sourceTrackId,
+                    urlSource: track.urlSource,
+                    playbackHealth: track.playbackHealth,
                   };
                 });
               setPlayerState((p) => ({
@@ -1524,7 +1642,7 @@ export function useWebSocket() {
               const normalizedTrack = {
                 ...d.currentTrack,
                 id: d.currentTrack.id ? String(d.currentTrack.id) : undefined,
-                url: toPlayableUrl(d.currentTrack.url),
+                url: toPlayableUrl(d.currentTrack),
                 title: d.currentTrack.title ?? d.currentTrack.name ?? "Unknown Title",
                 isFavorite: d.currentTrack.id ? favoriteIdsRef.current.includes(String(d.currentTrack.id)) : false,
               };
@@ -1541,7 +1659,7 @@ export function useWebSocket() {
                 active.src = normalizedTrack.url;
                 active.dataset.loadedUrl = normalizedTrack.url;
                 if ((d.status ?? "idle") === "playing") {
-                  active.play().catch(console.error);
+                  active.play().catch(handleAudioPlayFailure);
                   fadeAudioVolume(active, getEffectiveMusicVolume(), MUSIC_FADE_MS);
                 }
               }
@@ -1692,6 +1810,7 @@ export function useWebSocket() {
     fadeAudioVolume,
     getActiveMusicAudio,
     getEffectiveMusicVolume,
+    handleAudioPlayFailure,
     refreshLibraryData,
     rememberTrack,
     resolveAndPlayTrack,

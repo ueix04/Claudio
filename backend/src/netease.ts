@@ -24,7 +24,7 @@ const { cloudsearch, song_url_v1, user_account, user_playlist, playlist_track_al
     body: unknown;
   }>;
 };
-import { getNetworkErrorMessage, getNetworkProxyUrl, isLikelyNetworkError } from "./network.js";
+import { getNetworkErrorMessage, isLikelyNetworkError } from "./network.js";
 
 export interface NeteaseTrack {
   id: number;
@@ -72,23 +72,20 @@ function ensurePcOsCookie(cookie: string): string {
 const getCookie = (): string => normalizeNeteaseCookie(process.env.NETEASE_COOKIE || "");
 
 const NETEASE_DIRECT_RETRY_ATTEMPTS = 3;
-const NETEASE_PROXY_RETRY_ATTEMPTS = 2;
 const PLAYABLE_URL_CACHE_TTL_MS = 8 * 60 * 1000;
 
 const playableUrlCache = new Map<number, { url: string; cachedAt: number }>();
 
 async function withNeteaseDirectRetry<T>(
   label: string,
-  operation: (proxy?: string) => Promise<T>,
+  operation: () => Promise<T>,
 ): Promise<T> {
   let lastError: unknown;
-  const proxyUrl = getNetworkProxyUrl();
-  const totalAttempts = NETEASE_DIRECT_RETRY_ATTEMPTS + NETEASE_PROXY_RETRY_ATTEMPTS;
+  const totalAttempts = NETEASE_DIRECT_RETRY_ATTEMPTS;
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
-    const useProxy = attempt > NETEASE_DIRECT_RETRY_ATTEMPTS;
     try {
-      return await operation(useProxy ? proxyUrl : undefined);
+      return await operation();
     } catch (error) {
       lastError = error;
       if (!isLikelyNetworkError(error) || attempt === totalAttempts) {
@@ -96,7 +93,7 @@ async function withNeteaseDirectRetry<T>(
       }
 
       console.warn(
-        `${label} ${useProxy ? "proxy" : "direct"} request failed (${getNetworkErrorMessage(error)}), retry ${attempt + 1}/${totalAttempts}`,
+        `${label} direct request failed (${getNetworkErrorMessage(error)}), retry ${attempt + 1}/${totalAttempts}`,
       );
       await new Promise((resolve) => setTimeout(resolve, attempt * 400));
     }
@@ -111,11 +108,10 @@ export async function searchSongs(
 ): Promise<SearchResult> {
   const cookie = getCookie();
 
-  const res = await withNeteaseDirectRetry("Netease cloudsearch", (proxy) => cloudsearch({
+  const res = await withNeteaseDirectRetry("Netease cloudsearch", () => cloudsearch({
     keywords: keyword,
     limit,
     cookie,
-    proxy,
   }));
 
   if (res.status !== 200 || !res.body) {
@@ -166,11 +162,10 @@ export async function getPlayableUrl(
 
   const cookie = ensurePcOsCookie(getCookie());
 
-  const res = await withNeteaseDirectRetry("Netease song_url_v1", (proxy) => song_url_v1({
+  const res = await withNeteaseDirectRetry("Netease song_url_v1", () => song_url_v1({
     id: trackId.toString(),
     level: "standard",
     cookie,
-    proxy,
   }));
 
   if (res.status !== 200 || !res.body) {
@@ -213,9 +208,8 @@ export interface UserPlaylist {
 export async function getUserAccount(): Promise<UserAccount> {
   const cookie = getCookie();
 
-  const res = await withNeteaseDirectRetry("Netease user_account", (proxy) => user_account({
+  const res = await withNeteaseDirectRetry("Netease user_account", () => user_account({
     cookie,
-    proxy,
   }));
 
   if (res.status !== 200 || !res.body) {
@@ -240,11 +234,10 @@ export async function getUserAccount(): Promise<UserAccount> {
 export async function getUserPlaylists(uid: number): Promise<UserPlaylist[]> {
   const cookie = getCookie();
 
-  const res = await withNeteaseDirectRetry("Netease user_playlist", (proxy) => user_playlist({
+  const res = await withNeteaseDirectRetry("Netease user_playlist", () => user_playlist({
     uid,
     limit: 100,
     cookie,
-    proxy,
   }));
 
   if (res.status !== 200 || !res.body) {
@@ -292,12 +285,11 @@ export async function getPlaylistTracks(playlistId: number, trackCount?: number)
       : pageSize;
     if (limit <= 0) break;
 
-    const res = await withNeteaseDirectRetry("Netease playlist_track_all", (proxy) => playlist_track_all({
+    const res = await withNeteaseDirectRetry("Netease playlist_track_all", () => playlist_track_all({
       id: playlistId,
       limit,
       offset,
       cookie,
-      proxy,
     }));
 
     if (res.status !== 200 || !res.body) {

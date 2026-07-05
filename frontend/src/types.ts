@@ -44,6 +44,10 @@ export type WSTrackPayload = {
   duration?: number;
   id?: string | number;
   picUrl?: string;
+  source?: MusicSourceId | string;
+  sourceTrackId?: string;
+  urlSource?: MusicSourceId | string;
+  playbackHealth?: PlaybackHealth;
 };
 
 export type WSSeguePayload = {
@@ -71,6 +75,10 @@ export type TrackInfo = {
   album?: string;
   duration?: number;
   isFavorite?: boolean;
+  source?: MusicSourceId | string;
+  sourceTrackId?: string;
+  urlSource?: MusicSourceId | string;
+  playbackHealth?: PlaybackHealth;
 };
 
 export type PlaylistTrack = {
@@ -81,6 +89,10 @@ export type PlaylistTrack = {
   duration?: number;
   isPlaying: boolean;
   url: string;
+  source?: MusicSourceId | string;
+  sourceTrackId?: string;
+  urlSource?: MusicSourceId | string;
+  playbackHealth?: PlaybackHealth;
 };
 
 export type PlayerState = {
@@ -320,19 +332,17 @@ export type MusicSourceId =
   | "local_library"
   | "netease_legacy"
   | "unblock_netease"
-  | "youtube";
+  | "youtube"
+  | "kugou"
+  | "tencent";
 
 export type MusicSourceRuntimeStatus = {
   generatedAt: number;
   searchOrder: MusicSourceId[];
-  playableUrlFallbacks: Array<{
-    source: MusicSourceId;
-    fallbacks: MusicSourceId[];
-  }>;
   sources: Array<{
     source: MusicSourceId;
     displayName: string;
-    role: "library" | "primary" | "fallback";
+    role: "library" | "primary" | "metadata";
     enabled: boolean;
     ok: boolean;
     message?: string;
@@ -380,7 +390,6 @@ export type PlaybackDiagnostics = {
   };
   current: PlaybackDiagnosticTrack | null;
   upcoming: PlaybackDiagnosticTrack[];
-  fallbacks: MusicSourceRuntimeStatus["playableUrlFallbacks"];
   sources: MusicSourceRuntimeStatus["sources"];
   recentIssue?: PlaybackDiagnosticTrack["lastResolveError"] | PlaybackDiagnosticTrack["lastPlaybackIssue"];
 };

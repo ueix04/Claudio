@@ -568,7 +568,10 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       ]
     : playerState.playlist;
   const onlineSourceCount = musicSourceStatus?.sources.filter((source) =>
-    source.source !== "local_library" && source.enabled && source.ok
+    source.source !== "local_library"
+    && source.role !== "metadata"
+    && source.enabled
+    && source.ok
   ).length ?? 0;
   const librarySignalText = onlineSourceCount > 0
     ? `${onlineSourceCount} online source${onlineSourceCount === 1 ? "" : "s"} ready`
@@ -580,7 +583,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const formatSourceName = (source: string) =>
     source === "local_library" ? "LOCAL"
       : source === "netease_legacy" ? "NETEASE"
-        : source === "unblock_netease" ? "UNBLOCK" : source.toUpperCase();
+        : source === "unblock_netease" ? "UNBLOCK"
+          : source === "tencent" ? "QQ"
+            : source.toUpperCase();
 
   const updateVolumeFromClientX = useCallback((clientX: number) => {
     const track = volumeTrackRef.current;
@@ -1358,8 +1363,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     const searchOrderLabel = musicSourceStatus?.searchOrder.length
       ? musicSourceStatus.searchOrder.map(formatSourceName).join(" > ")
       : "--";
-    const fallbackLabel = musicSourceStatus?.playableUrlFallbacks
-      .flatMap((item) => item.fallbacks.map((fallback) => `${formatSourceName(item.source)} > ${formatSourceName(fallback)}`))
+    const metadataLabel = musicSourceStatus?.sources
+      .filter((source) => source.role === "metadata" && source.enabled)
+      .map((source) => formatSourceName(source.source))
       .join(" / ") || "--";
     const activeLocalLibraryStatus = localLibraryStatus?.enabled ? localLibraryStatus : null;
     const localStatusLabel = localLibraryStatus?.enabled
@@ -1947,8 +1953,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               <span className="stat-value text-base leading-tight break-words">{searchOrderLabel}</span>
             </div>
             <div className="stat-card">
-              <span className="stat-label">FALLBACK</span>
-              <span className="stat-value text-base leading-tight break-words">{fallbackLabel}</span>
+              <span className="stat-label">METADATA</span>
+              <span className="stat-value text-base leading-tight break-words">{metadataLabel}</span>
             </div>
             <div className="stat-card">
               <span className="stat-label">SOURCES</span>

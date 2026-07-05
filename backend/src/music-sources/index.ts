@@ -1,22 +1,34 @@
 import type { Track } from "../db.js";
+import {
+  fetchViaProxy,
+  hasNetworkProxyConfigured,
+} from "../network.js";
 import type { TasteProfile } from "../taste-profile.js";
 import {
   LOCAL_LIBRARY_SOURCE_ID,
   isLocalLibraryEnabled,
   localLibraryAdapter,
 } from "./local-library.js";
-import { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter, toPlayableTrack } from "./netease-legacy.js";
-import {
-  UNBLOCK_NETEASE_SOURCE_ID,
-  isUnblockNeteaseEnabled,
-  unblockNeteaseAdapter,
-} from "./unblock-netease.js";
 import {
   YOUTUBE_SOURCE_ID,
+  clearYouTubeStreamLease,
+  getYouTubeAudioProxyUrl,
+  getYouTubeStreamLease,
+  isValidYouTubeVideoId,
   isYouTubeEnabled,
   setYouTubeClientForTests,
   youtubeAdapter,
 } from "./youtube.js";
+import {
+  KUGOU_SOURCE_ID,
+  isKugouEnabled,
+  kugouAdapter,
+} from "./kugou-music.js";
+import {
+  TENCENT_SOURCE_ID,
+  isTencentEnabled,
+  tencentAdapter,
+} from "./tencent-music.js";
 import {
   MusicSourceAdapter,
   MusicSourceError,
@@ -39,45 +51,43 @@ export {
   localLibraryAdapter,
   summarizeLocalLibraryForPrompt,
 } from "./local-library.js";
-export { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter };
-export {
-  UNBLOCK_NETEASE_SOURCE_ID,
-  createUnblockNeteaseAdapter,
-  getUnblockNeteaseSources,
-  isUnblockNeteaseEnabled,
-  setUnblockNeteaseMatcherForTests,
-  unblockNeteaseAdapter,
-} from "./unblock-netease.js";
 export {
   YOUTUBE_SOURCE_ID,
+  clearYouTubeStreamLease,
+  getYouTubeAudioProxyUrl,
+  getYouTubeStreamLease,
+  isValidYouTubeVideoId,
   isYouTubeEnabled,
   setYouTubeClientForTests,
   youtubeAdapter,
 } from "./youtube.js";
+export {
+  KUGOU_SOURCE_ID,
+  isKugouEnabled,
+  kugouAdapter,
+} from "./kugou-music.js";
+export {
+  TENCENT_SOURCE_ID,
+  isTencentEnabled,
+  tencentAdapter,
+} from "./tencent-music.js";
 
 const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
   [localLibraryAdapter.id, localLibraryAdapter],
-  [neteaseLegacyAdapter.id, neteaseLegacyAdapter],
-  [unblockNeteaseAdapter.id, unblockNeteaseAdapter],
   [youtubeAdapter.id, youtubeAdapter],
+  [kugouAdapter.id, kugouAdapter],
+  [tencentAdapter.id, tencentAdapter],
 ]);
 
-const PLAYABLE_URL_FALLBACKS: Partial<Record<MusicSourceId, MusicSourceId[]>> = {
-  [NETEASE_LEGACY_SOURCE_ID]: [UNBLOCK_NETEASE_SOURCE_ID],
-};
 const PLAYABLE_URL_VALIDATION_TIMEOUT_MS = 5_000;
 const PLAYABLE_URL_VALIDATION_BYTES = "bytes=0-4095";
 
 export interface MusicSourceRuntimeStatus {
   generatedAt: number;
   searchOrder: MusicSourceId[];
-  playableUrlFallbacks: Array<{
-    source: MusicSourceId;
-    fallbacks: MusicSourceId[];
-  }>;
   sources: Array<MusicSourceHealth & {
     displayName: string;
-    role: "library" | "primary" | "fallback";
+    role: "library" | "primary" | "metadata";
     enabled: boolean;
   }>;
 }
@@ -105,12 +115,35 @@ export interface LocalLibraryTasteMatchSummary {
   message: string;
 }
 
+// Known source IDs from the removed netease_legacy adapter that may
+// still appear in stored Track records. These trigger a cross-source
+// migration search when encountered.
+const DEPRECATED_SOURCE_IDS = new Set(["netease_legacy", "unblock_netease"]);
+const METADATA_ONLY_SOURCE_IDS = new Set<MusicSourceId>([TENCENT_SOURCE_ID]);
+
+function toPlayableTrack(track: MusicSourceTrack, playableUrl: PlayableUrlResult): PlayableTrack {
+  const numericId = Number(track.sourceTrackId);
+  return {
+    id: Number.isFinite(numericId) ? numericId : track.sourceTrackId,
+    name: track.title,
+    artist: track.artist,
+    url: playableUrl.url,
+    picUrl: track.picUrl ?? "",
+    duration: track.duration ?? 0,
+    album: track.album,
+    source: track.source,
+    sourceTrackId: track.sourceTrackId,
+    urlSource: playableUrl.source,
+    urlExpiresAt: playableUrl.expiresAt,
+    urlRefreshedAt: playableUrl.refreshedAt,
+  };
+}
+
 export function getMusicSourceAdapter(source: MusicSourceId): MusicSourceAdapter {
   const adapter = adapters.get(source);
   if (!adapter) {
     throw new MusicSourceError(source, "not_found", `Music source adapter not found: ${source}`);
   }
-
   return adapter;
 }
 
@@ -118,39 +151,40 @@ export function listMusicSourceAdapters(): MusicSourceAdapter[] {
   return Array.from(adapters.values());
 }
 
-function getPlayableUrlFallbacks(source: MusicSourceId): MusicSourceId[] {
-  return (PLAYABLE_URL_FALLBACKS[source] ?? [])
-    .filter((fallbackSource) => {
-      if (fallbackSource === UNBLOCK_NETEASE_SOURCE_ID) {
-        return isUnblockNeteaseEnabled();
-      }
-      return true;
-    });
-}
-
 function getRuntimeSearchOrder(): MusicSourceId[] {
   return [
     ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
+    ...(isKugouEnabled() ? [KUGOU_SOURCE_ID] : []),
     ...(isYouTubeEnabled() ? [YOUTUBE_SOURCE_ID] : []),
-    NETEASE_LEGACY_SOURCE_ID,
   ];
 }
 
-function getSourceRole(source: MusicSourceId): "library" | "primary" | "fallback" {
+function getMetadataFallbackOrder(): MusicSourceId[] {
+  return [
+    ...(isTencentEnabled() ? [TENCENT_SOURCE_ID] : []),
+  ];
+}
+
+function getSourceRole(source: MusicSourceId): "library" | "primary" | "metadata" {
   if (source === LOCAL_LIBRARY_SOURCE_ID) return "library";
-  if (source === UNBLOCK_NETEASE_SOURCE_ID) return "fallback";
+  if (source === TENCENT_SOURCE_ID) return "metadata";
   return "primary";
 }
 
 function isSourceEnabled(source: MusicSourceId): boolean {
   if (source === LOCAL_LIBRARY_SOURCE_ID) return isLocalLibraryEnabled();
-  if (source === UNBLOCK_NETEASE_SOURCE_ID) return isUnblockNeteaseEnabled();
   if (source === YOUTUBE_SOURCE_ID) return isYouTubeEnabled();
+  if (source === KUGOU_SOURCE_ID) return isKugouEnabled();
+  if (source === TENCENT_SOURCE_ID) return isTencentEnabled();
   return true;
 }
 
 function shouldValidatePlayableUrl(url: string): boolean {
   return process.env.NODE_ENV !== "test" && /^https?:\/\//i.test(url);
+}
+
+function shouldRetryPlayableFetchViaProxy(result: PlayableUrlResult): boolean {
+  return result.source === YOUTUBE_SOURCE_ID;
 }
 
 function looksLikeAudioResponse(contentType: string | null, head: Uint8Array): boolean {
@@ -177,22 +211,13 @@ function looksLikeAudioResponse(contentType: string | null, head: Uint8Array): b
 }
 
 async function validatePlayableUrlResult(result: PlayableUrlResult): Promise<PlayableUrlResult> {
-  if (!shouldValidatePlayableUrl(result.url)) {
+  const validationUrl = result.validationUrl ?? result.url;
+  if (!shouldValidatePlayableUrl(validationUrl)) {
     return result;
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PLAYABLE_URL_VALIDATION_TIMEOUT_MS);
+  const response = await fetchPlayableUrlForValidation(result, validationUrl);
   try {
-    const response = await fetch(result.url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 Claudio/1.0",
-        "Accept": "audio/*,*/*;q=0.9",
-        "Range": PLAYABLE_URL_VALIDATION_BYTES,
-      },
-      signal: controller.signal,
-    });
-
     if (!response.ok || !response.body) {
       throw new MusicSourceError(
         result.source,
@@ -218,8 +243,34 @@ async function validatePlayableUrlResult(result: PlayableUrlResult): Promise<Pla
     if (error instanceof MusicSourceError) {
       throw error;
     }
-
     throw normalizeMusicSourceError(result.source, error);
+  }
+}
+
+async function fetchPlayableUrlForValidation(
+  result: PlayableUrlResult,
+  validationUrl: string,
+): Promise<Response> {
+  const useProxy = shouldRetryPlayableFetchViaProxy(result) && hasNetworkProxyConfigured();
+  return fetchPlayableUrlValidationAttempt(validationUrl, useProxy);
+}
+
+async function fetchPlayableUrlValidationAttempt(
+  url: string,
+  viaProxy: boolean,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PLAYABLE_URL_VALIDATION_TIMEOUT_MS);
+  try {
+    const init: RequestInit = {
+      headers: {
+        "User-Agent": "Mozilla/5.0 Claudio/1.0",
+        "Accept": "audio/*,*/*;q=0.9",
+        "Range": PLAYABLE_URL_VALIDATION_BYTES,
+      },
+      signal: controller.signal,
+    };
+    return viaProxy ? fetchViaProxy(url, init) : fetch(url, init);
   } finally {
     clearTimeout(timeout);
   }
@@ -253,12 +304,6 @@ export async function getMusicSourceRuntimeStatus(): Promise<MusicSourceRuntimeS
   return {
     generatedAt: Date.now(),
     searchOrder: getRuntimeSearchOrder(),
-    playableUrlFallbacks: [
-      {
-        source: NETEASE_LEGACY_SOURCE_ID,
-        fallbacks: getPlayableUrlFallbacks(NETEASE_LEGACY_SOURCE_ID),
-      },
-    ],
     sources: sourceStatuses,
   };
 }
@@ -333,21 +378,31 @@ export async function getLocalLibraryTasteMatchSummary(
 }
 
 export function inferStoredTrackSource(
-  track: Pick<Track, "id" | "source" | "sourceTrackId">,
+  track: Pick<Track, "id" | "source" | "sourceTrackId" | "name" | "artist">,
 ): { source: MusicSourceId; sourceTrackId: string } | null {
-  if (track.source && track.sourceTrackId) {
+  // If the track has a valid known source, use it directly
+  if (
+    track.source
+    && track.sourceTrackId
+    && !DEPRECATED_SOURCE_IDS.has(track.source)
+    && !METADATA_ONLY_SOURCE_IDS.has(track.source as MusicSourceId)
+  ) {
     return {
       source: track.source as MusicSourceId,
       sourceTrackId: track.sourceTrackId,
     };
   }
 
+  // For deprecated netease_legacy tracks with numeric IDs, return null
+  // so refreshStoredTrackPlayableUrl can attempt a cross-source migration.
+  if (DEPRECATED_SOURCE_IDS.has(track.source ?? "")) {
+    return null;
+  }
+
+  // Old records without explicit source, with numeric IDs (former netease default)
   const numericId = Number(track.id);
   if (Number.isFinite(numericId)) {
-    return {
-      source: NETEASE_LEGACY_SOURCE_ID,
-      sourceTrackId: String(track.id),
-    };
+    return null;
   }
 
   return null;
@@ -359,42 +414,10 @@ export async function resolveKnownTrack(
     forceRefresh?: boolean;
   },
 ): Promise<PlayableTrack> {
-  const playableUrl = await resolvePlayableUrlWithFallback(track.source, track.sourceTrackId, options);
-  return toPlayableTrack(track, playableUrl);
-}
-
-async function resolvePlayableUrlWithFallback(
-  source: MusicSourceId,
-  sourceTrackId: string,
-  options?: {
-    forceRefresh?: boolean;
-  },
-): Promise<PlayableUrlResult> {
-  try {
-    const adapter = getMusicSourceAdapter(source);
-    const result = await adapter.resolvePlayableUrl(sourceTrackId, options);
-    return await validatePlayableUrlResult(result);
-  } catch (error) {
-    const primaryError = normalizeMusicSourceError(source, error);
-    const fallbackSources = getPlayableUrlFallbacks(source);
-
-    for (const fallbackSource of fallbackSources) {
-      try {
-        const fallbackAdapter = getMusicSourceAdapter(fallbackSource);
-        const fallbackResult = await fallbackAdapter.resolvePlayableUrl(sourceTrackId, {
-          forceRefresh: options?.forceRefresh ?? true,
-        });
-        return await validatePlayableUrlResult(fallbackResult);
-      } catch (fallbackError) {
-        const normalizedFallbackError = normalizeMusicSourceError(fallbackSource, fallbackError);
-        console.warn(
-          `[music-source] fallback ${fallbackSource} failed for ${source}:${sourceTrackId}: ${normalizedFallbackError.message}`,
-        );
-      }
-    }
-
-    throw primaryError;
-  }
+  const adapter = getMusicSourceAdapter(track.source);
+  const playableUrl = await adapter.resolvePlayableUrl(track.sourceTrackId, options);
+  const validated = await validatePlayableUrlResult(playableUrl);
+  return toPlayableTrack(track, validated);
 }
 
 export async function resolveTrack(
@@ -403,66 +426,251 @@ export async function resolveTrack(
   source?: MusicSourceId,
 ): Promise<PlayableTrack | null> {
   const query = artist ? `${title} ${artist}` : title;
-  const searchSources = source
-    ? [source]
-    : getRuntimeSearchOrder();
-  let lastError: MusicSourceError | null = null;
+  if (source && !METADATA_ONLY_SOURCE_IDS.has(source)) {
+    return resolveTrackFromPlayableSources(query, [source], { throwOnFailure: true });
+  }
 
+  if (source && METADATA_ONLY_SOURCE_IDS.has(source)) {
+    return resolveTrackUsingMetadataFallback(query);
+  }
+
+  const direct = await resolveTrackFromPlayableSources(query, getRuntimeSearchOrder());
+  if (direct) {
+    return direct;
+  }
+
+  return resolveTrackUsingMetadataFallback(query);
+}
+
+async function resolveTrackFromPlayableSources(
+  query: string,
+  searchSources: MusicSourceId[],
+  options?: {
+    throwOnFailure?: boolean;
+  },
+): Promise<PlayableTrack | null> {
   for (const searchSource of searchSources) {
     try {
-      const adapter = getMusicSourceAdapter(searchSource);
-      const tracks = await adapter.search({ keyword: query, limit: 5 });
-      const track = tracks[0];
-      if (!track) {
-        continue;
+      const track = await findFirstSourceTrack(query, [searchSource], undefined, {
+        throwOnFailure: options?.throwOnFailure,
+      });
+      if (track) {
+        return await resolveKnownTrack(track);
       }
-
-      return await resolveKnownTrack(track);
     } catch (error) {
-      lastError = normalizeMusicSourceError(searchSource, error);
-      if (source) {
-        throw lastError;
+      const normalized = normalizeMusicSourceError(searchSource, error);
+      if (options?.throwOnFailure) {
+        throw normalized;
       }
-      console.warn(`[music-source] search source ${searchSource} failed for ${query}: ${lastError.message}`);
+      console.warn(`[music-source] search source ${searchSource} failed for ${query}: ${normalized.message}`);
     }
   }
 
   return null;
 }
 
+async function resolveTrackUsingMetadataFallback(query: string): Promise<PlayableTrack | null> {
+  const metadataTracks = await findMetadataFallbackTracks(query, 5);
+  for (const metadataTrack of metadataTracks) {
+    const metadataQuery = [metadataTrack.title, metadataTrack.artist].filter(Boolean).join(" ");
+    const resolved = await resolveTrackFromPlayableSources(metadataQuery, getRuntimeSearchOrder());
+    if (resolved) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
+async function findMetadataFallbackTracks(query: string, limit: number): Promise<MusicSourceTrack[]> {
+  const tracks: MusicSourceTrack[] = [];
+  for (const metadataSource of getMetadataFallbackOrder()) {
+    try {
+      const adapter = getMusicSourceAdapter(metadataSource);
+      const results = await adapter.search({ keyword: query, limit });
+      tracks.push(...results);
+      if (tracks.length >= limit) {
+        return tracks.slice(0, limit);
+      }
+    } catch (error) {
+      const normalized = normalizeMusicSourceError(metadataSource, error);
+      console.warn(`[music-source] metadata source ${metadataSource} failed for ${query}: ${normalized.message}`);
+    }
+  }
+  return tracks;
+}
+
+async function findFirstSourceTrack(
+  query: string,
+  searchSources: MusicSourceId[],
+  preferredTitle?: string,
+  options?: {
+    throwOnFailure?: boolean;
+  },
+): Promise<MusicSourceTrack | null> {
+  for (const searchSource of searchSources) {
+    try {
+      const adapter = getMusicSourceAdapter(searchSource);
+      const results = await adapter.search({ keyword: query, limit: 3 });
+      if (preferredTitle) {
+        const exact = results.find(
+          (result) => result.title.toLowerCase() === preferredTitle.toLowerCase(),
+        );
+        if (exact) {
+          return exact;
+        }
+      }
+      if (results.length > 0) {
+        return results[0];
+      }
+    } catch (error) {
+      const normalized = normalizeMusicSourceError(searchSource, error);
+      if (options?.throwOnFailure) {
+        throw normalized;
+      }
+      console.warn(`[music-source] search source ${searchSource} failed for ${query}: ${normalized.message}`);
+    }
+  }
+  return null;
+}
+
+function getPreferredPlayableSourcesBefore(source: MusicSourceId): MusicSourceId[] {
+  const searchOrder = getRuntimeSearchOrder();
+  const sourceIndex = searchOrder.indexOf(source);
+  if (sourceIndex <= 0) {
+    return [];
+  }
+  return searchOrder.slice(0, sourceIndex);
+}
+
+function filterAvoidedSources(
+  sources: MusicSourceId[],
+  avoidSources: Set<MusicSourceId>,
+): MusicSourceId[] {
+  if (avoidSources.size === 0) {
+    return sources;
+  }
+  return sources.filter((source) => !avoidSources.has(source));
+}
+
+async function findTrackIdentityInSources(
+  track: Track,
+  searchSources: MusicSourceId[],
+): Promise<{ source: MusicSourceId; sourceTrackId: string } | null> {
+  const searchQuery = [track.name, track.artist].filter(Boolean).join(" ");
+  if (!searchQuery) return null;
+
+  const direct = await findFirstSourceTrack(searchQuery, searchSources, track.name);
+  if (direct) {
+    return { source: direct.source, sourceTrackId: direct.sourceTrackId };
+  }
+
+  const metadataTracks = await findMetadataFallbackTracks(searchQuery, 3);
+  for (const metadataTrack of metadataTracks) {
+    const metadataQuery = [metadataTrack.title, metadataTrack.artist].filter(Boolean).join(" ");
+    const resolved = await findFirstSourceTrack(metadataQuery, searchSources, track.name);
+    if (resolved) {
+      return { source: resolved.source, sourceTrackId: resolved.sourceTrackId };
+    }
+  }
+  return null;
+}
+
+async function migrateDeprecatedTrack(
+  track: Track,
+  searchSources = getRuntimeSearchOrder(),
+): Promise<{ source: MusicSourceId; sourceTrackId: string } | null> {
+  return findTrackIdentityInSources(track, searchSources);
+}
+
+async function migrateFailedTrackToPreferredSource(
+  track: Track,
+  currentSource: MusicSourceId,
+  avoidSources = new Set<MusicSourceId>(),
+): Promise<{ source: MusicSourceId; sourceTrackId: string } | null> {
+  if (!track.lastPlaybackIssue && !track.lastResolveError) {
+    return null;
+  }
+
+  const preferredSources = filterAvoidedSources(
+    getPreferredPlayableSourcesBefore(currentSource),
+    avoidSources,
+  );
+  if (preferredSources.length === 0) {
+    return null;
+  }
+
+  return findTrackIdentityInSources(track, preferredSources);
+}
+
 export async function refreshStoredTrackPlayableUrl(
   track: Track,
   options?: {
     forceRefresh?: boolean;
+    avoidSources?: MusicSourceId[];
+    fallbackOnly?: boolean;
   },
 ): Promise<Track> {
-  const identity = inferStoredTrackSource(track);
+  const avoidSources = new Set(options?.avoidSources ?? []);
+  const fallbackSources = filterAvoidedSources(getRuntimeSearchOrder(), avoidSources);
+  let identity = options?.fallbackOnly ? null : inferStoredTrackSource(track);
+
+  if (identity && avoidSources.has(identity.source)) {
+    identity = null;
+  }
+
+  // Cross-source migration for deprecated netease tracks
+  if (!identity && (track.name || track.artist)) {
+    const migrated = await migrateDeprecatedTrack(track, fallbackSources);
+    if (migrated) {
+      identity = migrated;
+    }
+  }
+
+  // If a lower-priority source fails in the browser, retry higher-priority
+  // playable sources first before refreshing the same failing provider.
+  if (identity) {
+    const migrated = await migrateFailedTrackToPreferredSource(track, identity.source, avoidSources);
+    if (migrated) {
+      identity = migrated;
+    }
+  }
+
   if (!identity) {
     return track;
   }
 
   try {
-    const playableUrl = await resolvePlayableUrlWithFallback(identity.source, identity.sourceTrackId, {
+    const adapter = getMusicSourceAdapter(identity.source);
+    const playableUrl = await adapter.resolvePlayableUrl(identity.sourceTrackId, {
       forceRefresh: options?.forceRefresh ?? true,
     });
+    const validated = await validatePlayableUrlResult(playableUrl);
     return {
       ...track,
       source: identity.source,
       sourceTrackId: identity.sourceTrackId,
-      urlSource: playableUrl.source,
-      url: playableUrl.url,
-      urlExpiresAt: playableUrl.expiresAt,
-      urlRefreshedAt: playableUrl.refreshedAt,
-      playbackHealth: playableUrl.source !== identity.source ? "fallback" : "ready",
+      urlSource: validated.source,
+      url: validated.url,
+      urlExpiresAt: validated.expiresAt,
+      urlRefreshedAt: validated.refreshedAt,
+      playbackHealth: validated.source !== identity.source ? "fallback" : "ready",
       lastPlaybackIssue: undefined,
       lastResolveError: undefined,
     };
   } catch (error) {
     const normalized = normalizeMusicSourceError(identity.source, error);
+    const shouldDropStalePlayableUrl = Boolean(track.lastPlaybackIssue)
+      || (track.urlSource !== undefined && track.urlSource !== identity.source)
+      || (track.source !== undefined && track.source !== identity.source);
     return {
       ...track,
       source: identity.source,
       sourceTrackId: identity.sourceTrackId,
+      url: shouldDropStalePlayableUrl ? "" : track.url,
+      urlSource: shouldDropStalePlayableUrl ? identity.source : track.urlSource,
+      urlExpiresAt: shouldDropStalePlayableUrl ? undefined : track.urlExpiresAt,
+      urlRefreshedAt: shouldDropStalePlayableUrl ? undefined : track.urlRefreshedAt,
+      playbackHealth: "failed",
       lastResolveError: {
         code: normalized.code,
         message: normalized.message,
