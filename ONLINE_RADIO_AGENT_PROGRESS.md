@@ -189,6 +189,7 @@ Claudio 已经具备节目计划、TTS 串场、双 audio 预加载、网易云�
 
 任务：
 
+- [x] 建立 YouTube 专用代理真实播放分阶段验收计划：见 `YOUTUBE_REAL_PLAYBACK_TEST_PLAN.md`。
 - [ ] 连续播放 20 分钟。
 - [x] 记录卡顿、静音、fallback、探索、DJ 话术、用户反馈影响。
 - [x] 保存实听记录。
@@ -198,6 +199,7 @@ Claudio 已经具备节目计划、TTS 串场、双 audio 预加载、网易云�
 
 - [ ] 20 分钟内无长时间静音。
 - [ ] 自动切歌正常。
+- [ ] YouTube 曲目首段和中段 Range 均能通过 `/api/audio/youtube/{videoId}` 返回 `206`，且真实可听 2 分钟以上。
 - [ ] 至少出现一次合理探索。
 - [ ] 用户反馈能影响后续队列。
 - [ ] DJ 不重复开场、不装深沉、不频繁讲话。
@@ -254,6 +256,12 @@ Claudio 已经具备节目计划、TTS 串场、双 audio 预加载、网易云�
 - 已补齐浏览器端播放问题上报：前端发现明确 audio error 或连续静音恢复时，会通过 WebSocket 上报 `playback_issue`，后端写入当前曲目的 `lastPlaybackIssue` 并广播最新诊断状态。
 - 已调整播放 URL 刷新成功后的状态清理：刷新成功会清除旧的 `lastPlaybackIssue` / `lastResolveError`，并根据真实 URL 来源恢复为 `ready` 或 `fallback`，避免已恢复的曲目在诊断面板里一直显示失败。
 - 尚未完成真人连续 20 分钟实听，因此最终通过标准仍不能标记完成。
+
+### 2026-07-06
+
+- 已新增 `YOUTUBE_REAL_PLAYBACK_TEST_PLAN.md`，把 YouTube 专用播放代理验收拆成环境准备、自动化回归、真实 Range、2 分钟浏览器可听、lease 刷新压力、fallback、20 分钟真人实听和证据归档 8 个阶段（0 到 7）。
+- 已明确中段 `Range: bytes=1048576-` 必须返回 `206`，浏览器必须请求 `/api/audio/youtube/{videoId}`，不能退回 `/api/audio/music?url=googlevideo...`。
+- 已明确自动化测试通过不等于 20 分钟实听通过；最终通过仍必须真实听满 20 分钟并保存 Listen Check 记录。
 
 ## 7. 待确认事项
 
