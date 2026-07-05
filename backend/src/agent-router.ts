@@ -6,6 +6,7 @@ export type ChatIntent =
   | "weather_query"
   | "current_track_query"
   | "recommendation_reason"
+  | "program_refresh"
   | "style_change"
   | "playback_control"
   | "music_request"
@@ -51,9 +52,22 @@ type SemanticRouteResponse = {
   intent?: ChatIntent;
   action?: ChatActionType;
   mode?: ChatTriggerMode;
+  preserveCurrentTrack?: boolean;
   reason?: string;
   confidence?: number;
 };
+
+type MusicSemanticHint =
+  | {
+    shouldRoute: true;
+    fallbackIntent: "program_refresh" | "style_change";
+    preserveCurrentTrack: boolean;
+    reason: string;
+  }
+  | {
+    shouldRoute: false;
+    reason: string;
+  };
 
 const SEMANTIC_ROUTER_CONFIDENCE_THRESHOLD = 0.65;
 const SEMANTIC_ROUTER_ACTIONS = new Set<ChatActionType>([
@@ -66,6 +80,7 @@ const SEMANTIC_ROUTER_INTENTS = new Set<ChatIntent>([
   "weather_query",
   "current_track_query",
   "recommendation_reason",
+  "program_refresh",
   "style_change",
   "music_request",
   "ordinary_chat",
@@ -102,6 +117,14 @@ function isProgramRefreshRequest(normalized: string): boolean {
   }
 
   if (/(别|不要|不想).{0,10}(循环|重复|旧歌|之前的歌|老歌)|((一直|又).{0,8}(循环|重复).{0,10}(之前|旧))/.test(compact)) {
+    return true;
+  }
+
+  if (/^(我要新的|要新的|来点新的|换个新的|换新的|新的)$/.test(compact)) {
+    return true;
+  }
+
+  if (/(这档|这个节目|这节目).{0,8}(听腻|腻|不行|不对|换掉)|听腻了/.test(compact)) {
     return true;
   }
 
@@ -143,6 +166,81 @@ function isStyleChangeRequest(normalized: string): boolean {
   return hasChangeVerb && hasMusicOrMoodWord;
 }
 
+function getMusicSemanticHint(text: string): MusicSemanticHint {
+  const normalized = normalizeMessage(text);
+  if (!normalized) {
+    return {
+      shouldRoute: false,
+      reason: "empty_message",
+    };
+  }
+
+  const compact = normalized
+    .replace(/[!！?？。,.，\s]+$/g, "")
+    .replace(/\s+/g, " ");
+
+  if (isProgramRefreshRequest(normalized)) {
+    return {
+      shouldRoute: true,
+      fallbackIntent: "program_refresh",
+      preserveCurrentTrack: false,
+      reason: "program_refresh_signal",
+    };
+  }
+
+  if (/(不要|别|不想).{0,10}(循环|重复|旧歌|之前的歌|老歌)|((一直|又).{0,8}(循环|重复).{0,10}(之前|旧))/.test(compact)) {
+    return {
+      shouldRoute: true,
+      fallbackIntent: "program_refresh",
+      preserveCurrentTrack: false,
+      reason: "avoid_loop_signal",
+    };
+  }
+
+  if (/(换点别的|来点别的|来点不一样|来些不一样|不一样的|换个方向|换个风格|换换口味|这个感觉不对|感觉不对|没那么吵|别太吵|不要太吵|安静一点|安静点|轻一点|轻点|柔一点|柔点|别这么吵|不那么吵)/.test(compact)) {
+    return {
+      shouldRoute: true,
+      fallbackIntent: "style_change",
+      preserveCurrentTrack: true,
+      reason: "style_change_signal",
+    };
+  }
+
+  if (/^(change|switch|switch it up|change it up|something else|something different|换歌[啊呀嘛啦呗吧]*)$/.test(compact)) {
+    return {
+      shouldRoute: true,
+      fallbackIntent: "style_change",
+      preserveCurrentTrack: true,
+      reason: "bare_music_change_signal",
+    };
+  }
+
+  if (isStyleChangeRequest(normalized)) {
+    return {
+      shouldRoute: true,
+      fallbackIntent: "style_change",
+      preserveCurrentTrack: true,
+      reason: "style_change_request",
+    };
+  }
+
+  const hasAdjustmentSignal = /(新的|换|别的|不要|腻|不一样|重新|循环|节目|歌单|队列|风格|感觉|听点|放点|来点|没那么|安静|吵|\bchange\b|\bswitch\b|\bdifferent\b|\bvibe\b|\bmood\b)/.test(normalized);
+  const hasRadioContext = /(歌|音乐|节目|歌单|队列|电台|听|放|播|风格|氛围|节奏|vibe|mood|music|songs?|tracks?|playlist|queue|program|radio)/.test(normalized);
+  if (hasAdjustmentSignal && hasRadioContext) {
+    return {
+      shouldRoute: true,
+      fallbackIntent: "style_change",
+      preserveCurrentTrack: true,
+      reason: "weak_music_adjustment_signal",
+    };
+  }
+
+  return {
+    shouldRoute: false,
+    reason: "no_music_adjustment_signal",
+  };
+}
+
 function isCurrentTrackQuery(normalized: string): boolean {
   return /现在.*(放|播).*(什么|哪首)|这首歌?叫(什么|啥)|当前(歌曲|音乐)|正在(放|播).*(什么|哪首)|what.*playing|what song/.test(normalized);
 }
@@ -155,7 +253,7 @@ function isEmotionExpression(normalized: string): boolean {
   return /难过|伤心|焦虑|烦|累|失眠|睡不着|emo|开心|孤独|压力|sad|lonely|tired|anxious/.test(normalized);
 }
 
-function routeChatIntentRule(text: string): ChatRoute {
+function routeHardChatIntentRule(text: string): ChatRoute {
   const normalized = normalizeMessage(text);
 
   if (!normalized) {
@@ -190,15 +288,6 @@ function routeChatIntentRule(text: string): ChatRoute {
     };
   }
 
-  if (isProgramRefreshRequest(normalized)) {
-    return {
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: false,
-      reason: "program_refresh_replans_queue",
-    };
-  }
-
   const triggerMode = inferTriggerMode(normalized);
   if (triggerMode) {
     return {
@@ -206,15 +295,6 @@ function routeChatIntentRule(text: string): ChatRoute {
       action: "trigger_pipeline",
       mode: triggerMode,
       reason: `trigger_${triggerMode}`,
-    };
-  }
-
-  if (isStyleChangeRequest(normalized)) {
-    return {
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: true,
-      reason: "style_change_replans_upcoming_queue",
     };
   }
 
@@ -250,20 +330,19 @@ function routeChatIntentRule(text: string): ChatRoute {
 }
 
 export function routeChatIntent(text: string): ChatRoute {
-  const route = routeChatIntentRule(text);
+  const route = routeHardChatIntentRule(text);
   return {
     ...route,
     routedBy: "rule",
   };
 }
 
-function shouldAttemptSemanticRouting(text: string, ruleRoute: ChatRoute): boolean {
-  if (ruleRoute.intent !== "ordinary_chat" || ruleRoute.action !== "reply_only") {
-    return false;
+function isFinalHardRoute(route: ChatRoute): boolean {
+  if (route.action !== "reply_only") {
+    return true;
   }
 
-  const normalized = normalizeMessage(text);
-  return /(来点|想听|想要听|我要听|要听|听点|听些|换个|换成|切到|放点|整点|改成|来些|上点|给我来|给我放|没那么|不要太|别太|吵|安静|夜晚|深夜|氛围|风格|节奏|歌|音乐|\bchange\b|\bswitch\b|\bplay\b|\bmusic\b|\bsongs?\b|\btracks?\b|\bvibe\b|\bmood\b|\bquiet\b|\bcalm\b|\bsoft\b|\bchill\b|\bnight\b|\bless noisy\b|\bnot so loud\b)/.test(normalized);
+  return route.intent === "current_track_query" || route.intent === "recommendation_reason";
 }
 
 function truncateForPrompt(text: string, max = 160): string {
@@ -287,6 +366,7 @@ function buildSemanticRouterPrompt(text: string, context?: ChatRouteContext): st
 
   return `You are Claudio's lightweight chat intent router.
 Classify the listener message for a local AI emotional radio app.
+Claudio is a radio context. In Chinese, short listener phrases such as "新的", "我要新的", "别循环", "换个方向", "来点不一样的", or "这档不行" are usually music/program control intents, not ordinary chat.
 
 Listener message:
 ${JSON.stringify(text)}
@@ -297,16 +377,18 @@ Recent chat:
 ${recentChat}
 
 Return JSON only with these fields:
-- intent: one of "weather_query", "current_track_query", "recommendation_reason", "style_change", "music_request", "ordinary_chat", "emotion_expression"
+- intent: one of "weather_query", "current_track_query", "recommendation_reason", "program_refresh", "style_change", "music_request", "ordinary_chat", "emotion_expression"
 - action: one of "reply_only", "answer_weather", "replan_queue", "trigger_pipeline"
 - confidence: number from 0 to 1
 - reason: short safe reason, no private data
 - mode: optional; only when action is "trigger_pipeline", one of "morning_brief", "mood_pick", "random_discover"
+- preserveCurrentTrack: optional boolean; only for action "replan_queue"
 
 Rules:
 - Do not return skip_track, resume_queue, deletion, account, payment, or any irreversible action.
-- If the user asks for a different vibe, genre, mood, less noisy music, more night-like music, or something to listen to, use action "replan_queue".
-- If the user asks to refresh/change the program, session, playlist, queue, next set, next segment, or says the station is looping old songs, use action "replan_queue".
+- If the user asks to refresh/change the program, session, playlist, queue, next set, next segment, wants "new/fresh", says this program is tired/bad, or says the station is looping old songs, use intent "program_refresh", action "replan_queue", preserveCurrentTrack false.
+- If the user asks for a different vibe, genre, mood, less noisy music, quieter music, more night-like music, or a softer style shift, use intent "style_change", action "replan_queue", preserveCurrentTrack true.
+- If the user explicitly asks for random discovery, a morning brief, or a mood-pick program, use intent "music_request", action "trigger_pipeline", and a valid mode.
 - If the user is just chatting without asking to shape music, use "reply_only".
 - If uncertain, use "reply_only" with confidence below 0.65.`;
 }
@@ -319,8 +401,8 @@ function isValidSemanticIntent(value: unknown): value is ChatIntent {
   return typeof value === "string" && SEMANTIC_ROUTER_INTENTS.has(value as ChatIntent);
 }
 
-function normalizeSemanticRoute(response: SemanticRouteResponse): ChatRoute | null {
-  if (!SEMANTIC_ROUTER_ACTIONS.has(response.action as ChatActionType)) {
+function normalizeSemanticRoute(response: SemanticRouteResponse | null | undefined): ChatRoute | null {
+  if (!response || !SEMANTIC_ROUTER_ACTIONS.has(response.action as ChatActionType)) {
     return null;
   }
 
@@ -357,10 +439,18 @@ function normalizeSemanticRoute(response: SemanticRouteResponse): ChatRoute | nu
     };
   }
 
+  const preserveCurrentTrack = action === "replan_queue"
+    ? typeof response.preserveCurrentTrack === "boolean"
+      ? response.preserveCurrentTrack
+      : intent === "program_refresh"
+        ? false
+        : true
+    : undefined;
+
   return {
     intent,
     action,
-    preserveCurrentTrack: action === "replan_queue" ? true : undefined,
+    preserveCurrentTrack,
     reason,
     confidence,
     routedBy: "llm",
@@ -380,7 +470,13 @@ export async function routeChatIntentWithSemanticFallback(
   context?: ChatRouteContext,
 ): Promise<ChatRoute> {
   const ruleRoute = routeChatIntent(text);
-  if (!shouldAttemptSemanticRouting(text, ruleRoute)) {
+  if (isFinalHardRoute(ruleRoute)) {
+    logChatRoute(ruleRoute, text.length);
+    return ruleRoute;
+  }
+
+  const musicHint = getMusicSemanticHint(text);
+  if (!musicHint.shouldRoute) {
     logChatRoute(ruleRoute, text.length);
     return ruleRoute;
   }
@@ -402,9 +498,11 @@ export async function routeChatIntentWithSemanticFallback(
   }
 
   const fallbackRoute: ChatRoute = {
-    ...ruleRoute,
+    intent: musicHint.fallbackIntent,
+    action: "replan_queue",
+    preserveCurrentTrack: musicHint.preserveCurrentTrack,
     routedBy: "fallback",
-    reason: `semantic_router_fallback:${ruleRoute.reason}`,
+    reason: `semantic_music_fallback:${musicHint.reason}`,
   };
   logChatRoute(fallbackRoute, text.length);
   return fallbackRoute;

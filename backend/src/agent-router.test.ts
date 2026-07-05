@@ -33,56 +33,51 @@ describe("Chat Intent Router", () => {
     });
   });
 
-  it("routes style changes to upcoming queue replans without interrupting current track", () => {
-    expect(routeChatIntent("换安静一点")).toMatchObject({
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: true,
-    });
+  it("routes strong program refresh signals to a fresh program when semantic routing fails", async () => {
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("timeout"));
 
-    expect(routeChatIntent("换歌阿！！！")).toMatchObject({
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: true,
-    });
-
-    expect(routeChatIntent("change")).toMatchObject({
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: true,
-    });
-
-    expect(routeChatIntent("switch it up")).toMatchObject({
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: true,
-    });
-
-    expect(routeChatIntent("我要听电子音乐")).toMatchObject({
-      intent: "style_change",
-      action: "replan_queue",
-      preserveCurrentTrack: true,
-    });
-  });
-
-  it("routes explicit program refresh requests to a fresh queue without relying on semantic LLM", async () => {
     for (const text of [
+      "我要新的",
       "换一档新节目，不要循环旧歌",
-      "更新节目",
       "下一档",
       "别循环之前的歌了",
+      "这档听腻了",
       "更换新界面",
+    ]) {
+      const route = await routeChatIntentWithSemanticFallback(text);
+      expect(route).toMatchObject({
+        intent: "program_refresh",
+        action: "replan_queue",
+        preserveCurrentTrack: false,
+        routedBy: "fallback",
+      });
+    }
+
+    expect(claude.callJsonLLM).toHaveBeenCalledTimes(6);
+  });
+
+  it("routes weak music adjustment signals to upcoming queue replans when semantic routing fails", async () => {
+    vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("timeout"));
+
+    for (const text of [
+      "换点别的",
+      "来点不一样的",
+      "换安静一点",
+      "换歌阿！！！",
+      "change",
+      "switch it up",
+      "我要听电子音乐",
     ]) {
       const route = await routeChatIntentWithSemanticFallback(text);
       expect(route).toMatchObject({
         intent: "style_change",
         action: "replan_queue",
-        preserveCurrentTrack: false,
-        routedBy: "rule",
+        preserveCurrentTrack: true,
+        routedBy: "fallback",
       });
     }
 
-    expect(claude.callJsonLLM).not.toHaveBeenCalled();
+    expect(claude.callJsonLLM).toHaveBeenCalledTimes(7);
   });
 
   it("routes random music requests to the random_discover pipeline", () => {
@@ -122,6 +117,17 @@ describe("Chat Intent Router", () => {
     expect(claude.callJsonLLM).not.toHaveBeenCalled();
   });
 
+  it("does not call semantic LLM for current track questions", async () => {
+    const route = await routeChatIntentWithSemanticFallback("这首叫什么");
+
+    expect(route).toMatchObject({
+      intent: "current_track_query",
+      action: "reply_only",
+      routedBy: "rule",
+    });
+    expect(claude.callJsonLLM).not.toHaveBeenCalled();
+  });
+
   it("uses semantic LLM for low-confidence music expressions", async () => {
     vi.mocked(claude.callJsonLLM).mockResolvedValue({
       intent: "style_change",
@@ -141,19 +147,39 @@ describe("Chat Intent Router", () => {
     });
   });
 
-  it("falls back when semantic LLM times out", async () => {
+  it("defaults program_refresh semantic routes to replacing the current track", async () => {
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      intent: "program_refresh",
+      action: "replan_queue",
+      confidence: 0.9,
+      reason: "listener asks for a fresh program",
+    });
+
+    const route = await routeChatIntentWithSemanticFallback("我要新的");
+
+    expect(route).toMatchObject({
+      intent: "program_refresh",
+      action: "replan_queue",
+      preserveCurrentTrack: false,
+      routedBy: "llm",
+      confidence: 0.9,
+    });
+  });
+
+  it("falls back to a queue replan when semantic LLM times out for music adjustment text", async () => {
     vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("timeout"));
 
     const route = await routeChatIntentWithSemanticFallback("来点没那么吵的");
 
     expect(route).toMatchObject({
-      intent: "ordinary_chat",
-      action: "reply_only",
+      intent: "style_change",
+      action: "replan_queue",
+      preserveCurrentTrack: true,
       routedBy: "fallback",
     });
   });
 
-  it("falls back when semantic LLM returns illegal or low-confidence routes", async () => {
+  it("falls back to a queue replan when semantic LLM returns illegal or low-confidence routes", async () => {
     vi.mocked(claude.callJsonLLM).mockResolvedValueOnce({
       intent: "playback_control",
       action: "skip_track",
@@ -162,8 +188,9 @@ describe("Chat Intent Router", () => {
     });
 
     await expect(routeChatIntentWithSemanticFallback("来点没那么吵的")).resolves.toMatchObject({
-      intent: "ordinary_chat",
-      action: "reply_only",
+      intent: "style_change",
+      action: "replan_queue",
+      preserveCurrentTrack: true,
       routedBy: "fallback",
     });
 
@@ -175,8 +202,9 @@ describe("Chat Intent Router", () => {
     });
 
     await expect(routeChatIntentWithSemanticFallback("来点没那么吵的")).resolves.toMatchObject({
-      intent: "ordinary_chat",
-      action: "reply_only",
+      intent: "style_change",
+      action: "replan_queue",
+      preserveCurrentTrack: true,
       routedBy: "fallback",
     });
   });

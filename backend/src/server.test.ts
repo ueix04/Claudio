@@ -1427,6 +1427,7 @@ describe("WebSocket Server", () => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");
     const netease = await import("./netease.js");
+    const pipeline = await import("./pipeline.js");
     const tts = await import("./tts.js");
     const weather = await import("./weather.js");
 
@@ -1479,6 +1480,7 @@ describe("WebSocket Server", () => {
       expect.stringContaining('action: "reply_only"'),
       20_000,
     );
+    expect(pipeline.runChatSwitchProgram).not.toHaveBeenCalled();
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
 
     ws.close();
@@ -2924,11 +2926,10 @@ describe("WebSocket Server", () => {
     ws.close();
   });
 
-  it("chat 里的语义路由失败时不会重编节目单且会正常回复", async () => {
+  it("chat 里的音乐语义路由失败时仍会保守重编节目单", async () => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");
     const pipeline = await import("./pipeline.js");
-    const tts = await import("./tts.js");
 
     const currentTrack = {
       id: "1",
@@ -2939,6 +2940,7 @@ describe("WebSocket Server", () => {
       urlRefreshedAt: Date.now(),
     };
     const oldUpcomingTrack = { id: "2", name: "Noisy Old Song", artist: "Artist B", url: "url-b", duration: 100 };
+    const fallbackTrack = { id: "9", name: "Fallback Semantic Song", artist: "Artist F", url: "url-f", duration: 90 };
     let currentState = {
       status: "playing",
       currentTrack,
@@ -2969,11 +2971,32 @@ describe("WebSocket Server", () => {
       return currentState;
     });
     vi.mocked(claude.callJsonLLM).mockRejectedValue(new Error("semantic timeout"));
-    vi.mocked(tts.speak).mockResolvedValue({
-      audioBuffer: new ArrayBuffer(0),
-      format: "wav",
-      cached: false,
-      cachePath: "data/audio/fallback-chat.wav",
+    vi.mocked(pipeline.runChatSwitchProgram).mockImplementation(async (userText: string) => {
+      currentState = {
+        ...currentState,
+        status: "playing",
+        radioQueue: [currentTrack, fallbackTrack],
+        currentQueueIndex: 0,
+        currentTrack,
+        currentProgram: {
+          source: "chat_switch",
+          sessionId: "program_semantic_fallback",
+          title: "Fallback Semantic Set",
+          userRequest: userText,
+          generatedAt: Date.now(),
+          tracks: [currentTrack, fallbackTrack],
+        },
+      };
+      return {
+        status: "success",
+        djMessage: "收到，我先把后面的节目换成一组新的。",
+        ttsAudioPath: "data/audio/fallback-switch.wav",
+        tracks: [fallbackTrack],
+        reason: "semantic fallback",
+        programTitle: "Fallback Semantic Set",
+        shouldStartTrack: false,
+        currentTrackPreserved: true,
+      };
     });
 
     const { WebSocket } = await import("ws");
@@ -2988,9 +3011,13 @@ describe("WebSocket Server", () => {
     ws.send(JSON.stringify({ type: "chat", data: { text: "来点没那么吵的" } }));
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("timeout waiting for fallback chat reply")), 3000);
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for semantic fallback queue state")), 3000);
       const check = setInterval(() => {
-        if (messages.some((m) => m.type === "dj_message")) {
+        if (messages.some((m) => (
+          m.type === "state"
+          && Array.isArray(m.data?.radioQueue)
+          && m.data.radioQueue.some((track: any) => track?.name === "Fallback Semantic Song")
+        ))) {
           clearInterval(check);
           clearTimeout(timeout);
           resolve();
@@ -2998,15 +3025,20 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(pipeline.runChatSwitchProgram).not.toHaveBeenCalled();
-    expect(messages.some((m) => m.type === "dj_message" && String(m.data?.text).includes("我在听"))).toBe(true);
+    expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("来点没那么吵的", {
+      preserveCurrentTrack: true,
+    });
+    expect(messages.some((m) => (
+      m.type === "dj_message"
+      && m.data?.text === "收到，我先把后面的节目换成一组新的。"
+    ))).toBe(true);
     expect(currentState.radioQueue).toEqual([
       expect.objectContaining({ name: "Song A" }),
-      expect.objectContaining({ name: "Noisy Old Song" }),
+      expect.objectContaining({ name: "Fallback Semantic Song" }),
     ]);
     expect(currentState.currentProgram).toEqual(expect.objectContaining({
-      source: "startup",
-      title: "Old Set",
+      source: "chat_switch",
+      title: "Fallback Semantic Set",
     }));
 
     ws.close();

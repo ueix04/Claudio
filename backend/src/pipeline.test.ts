@@ -1261,6 +1261,7 @@ describe("Pipeline Engine", () => {
     expect(result.currentTrackPreserved).toBe(true);
     expect(result.shouldStartTrack).toBe(false);
     expect(result.djMessage).toContain("收到");
+    expect(result.djMessage).toContain("下一档节目");
     expect(db.setStatus).toHaveBeenCalledWith("thinking");
     expect(db.setStatus).toHaveBeenCalledWith("speaking");
     expect(db.setStatus).toHaveBeenCalledWith("playing");
