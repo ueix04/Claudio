@@ -1137,11 +1137,11 @@ function buildFallbackChatSwitchProgramResponse(userText: string, context: Music
     plannedMinutes: 18,
     speechPlan: radioSession.buildDefaultSpeechPlan(fallbackLineup.length),
     say: useEnglish
-      ? "Got it. I'll reshape the next stretch with a steadier fallback set and keep the handoff moving."
-      : "收到，我先把后面的节目单换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。",
+      ? "Got it. I'll switch the next program to a fresh queue now; the current song can finish while the new set loads."
+      : "收到，我现在把下一档节目换成一组新的队列；当前这首可以自然放完，后面会接到新节目。",
     ttsText: useEnglish
-      ? "Got it. I'll reshape the next stretch with a steadier fallback set and keep the handoff moving."
-      : "收到，我先把后面的节目单换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。",
+      ? "Got it. I'll switch the next program to a fresh queue now; the current song can finish while the new set loads."
+      : "收到，我现在把下一档节目换成一组新的队列；当前这首可以自然放完，后面会接到新节目。",
     lineup: fallbackLineup,
     reason: useEnglish
       ? `The model could not finish the custom switch, so Claudio used a keyword-based fallback set for: ${userText}`

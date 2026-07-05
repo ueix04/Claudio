@@ -92,6 +92,22 @@ function isResumeRequest(normalized: string): boolean {
   return /放点音乐|播放音乐|放歌|播歌|继续播放|继续放|开始播放|play music/.test(normalized);
 }
 
+function isProgramRefreshRequest(normalized: string): boolean {
+  const compact = normalized
+    .replace(/[!！?？。,.，\s]+$/g, "")
+    .replace(/\s+/g, " ");
+
+  if (/(下一档|下一段|下个节目|下一个节目|新节目|新的节目|更新节目|刷新节目|重编节目|重排节目|新歌单|新的歌单|更新歌单|刷新歌单|新队列|新的队列|更新队列|刷新队列|fresh program|new program|new playlist|new queue|new set)/.test(compact)) {
+    return true;
+  }
+
+  if (/(别|不要|不想).{0,10}(循环|重复|旧歌|之前的歌|老歌)|((一直|又).{0,8}(循环|重复).{0,10}(之前|旧))/.test(compact)) {
+    return true;
+  }
+
+  return /(换|更换|更新|刷新|重编|重排|重新|重新来|切到|来一档|开一档|接一档).{0,10}(节目|歌单|队列|一档|下一档|新界面|program|playlist|queue|set|session)/.test(compact);
+}
+
 function inferTriggerMode(normalized: string): ChatTriggerMode | null {
   if (/早安|晨间|morning brief|早报|晨报/.test(normalized)) {
     return "morning_brief";
@@ -171,6 +187,15 @@ function routeChatIntentRule(text: string): ChatRoute {
       intent: "playback_control",
       action: "resume_queue",
       reason: "resume_requested",
+    };
+  }
+
+  if (isProgramRefreshRequest(normalized)) {
+    return {
+      intent: "style_change",
+      action: "replan_queue",
+      preserveCurrentTrack: false,
+      reason: "program_refresh_replans_queue",
     };
   }
 
@@ -281,6 +306,7 @@ Return JSON only with these fields:
 Rules:
 - Do not return skip_track, resume_queue, deletion, account, payment, or any irreversible action.
 - If the user asks for a different vibe, genre, mood, less noisy music, more night-like music, or something to listen to, use action "replan_queue".
+- If the user asks to refresh/change the program, session, playlist, queue, next set, next segment, or says the station is looping old songs, use action "replan_queue".
 - If the user is just chatting without asking to shape music, use "reply_only".
 - If uncertain, use "reply_only" with confidence below 0.65.`;
 }

@@ -2690,6 +2690,112 @@ describe("WebSocket Server", () => {
     ws.close();
   });
 
+  it("chat 里的换新节目请求会立即切到新节目而不是保留旧循环", async () => {
+    const db = await import("./db.js");
+    const pipeline = await import("./pipeline.js");
+
+    const oldTrack = {
+      id: "1",
+      name: "Looped Old Song",
+      artist: "Artist A",
+      url: "url-a",
+      urlExpiresAt: Date.now() + 10 * 60 * 1000,
+      urlRefreshedAt: Date.now(),
+    };
+    const freshTrack = { id: "9", name: "Fresh Program Opener", artist: "Artist F", url: "url-f", picUrl: "pic-f", duration: 180 };
+    let currentState = {
+      status: "playing",
+      currentTrack: oldTrack,
+      radioQueue: [oldTrack],
+      currentQueueIndex: 0,
+      currentProgram: { source: "startup", sessionId: "program_old", title: "Old Loop", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      discoveryCandidates: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      favorites: [],
+      lastInteraction: Date.now(),
+      playlists: [],
+      neteaseSnapshot: null,
+    } as any;
+
+    vi.mocked(db.getState).mockImplementation(async () => currentState);
+    vi.mocked(db.addChatMessage).mockImplementation(async (message: any) => {
+      currentState = {
+        ...currentState,
+        chatHistory: [
+          ...currentState.chatHistory,
+          { ...message, timestamp: message.timestamp ?? Date.now() },
+        ],
+      };
+      return currentState;
+    });
+    vi.mocked(pipeline.runChatSwitchProgram).mockImplementation(async (userText: string) => {
+      currentState = {
+        ...currentState,
+        status: "playing",
+        radioQueue: [freshTrack],
+        currentQueueIndex: 0,
+        currentTrack: freshTrack,
+        currentProgram: {
+          source: "chat_switch",
+          sessionId: "program_fresh",
+          title: "Fresh Program",
+          userRequest: userText,
+          generatedAt: Date.now(),
+          tracks: [freshTrack],
+        },
+      };
+      return {
+        status: "success",
+        djMessage: "收到，我给你换一档新的节目。",
+        ttsAudioPath: "data/audio/fresh-program.wav",
+        tracks: [freshTrack],
+        reason: "test",
+        programTitle: "Fresh Program",
+        shouldStartTrack: true,
+        currentTrackPreserved: false,
+      };
+    });
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({ type: "chat", data: { text: "换一档新节目，不要循环旧歌" } }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for fresh program switch")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "track" && m.data?.name === "Fresh Program Opener")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(pipeline.runChatSwitchProgram).toHaveBeenCalledWith("换一档新节目，不要循环旧歌", {
+      preserveCurrentTrack: false,
+    });
+    expect(messages.some((m) => (
+      m.type === "state"
+      && m.data?.currentTrack?.name === "Fresh Program Opener"
+      && m.data?.currentProgram?.source === "chat_switch"
+    ))).toBe(true);
+    expect(messages.some((m) => m.type === "track" && m.data?.name === "Fresh Program Opener")).toBe(true);
+    expect(messages.some((m) => m.type === "dj_message" && m.data?.text === "收到，我给你换一档新的节目。")).toBe(true);
+
+    ws.close();
+  });
+
   it("chat 里的低置信音乐表达会通过语义路由重编并广播新节目单", async () => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");

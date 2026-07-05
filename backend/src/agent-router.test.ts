@@ -65,6 +65,26 @@ describe("Chat Intent Router", () => {
     });
   });
 
+  it("routes explicit program refresh requests to a fresh queue without relying on semantic LLM", async () => {
+    for (const text of [
+      "换一档新节目，不要循环旧歌",
+      "更新节目",
+      "下一档",
+      "别循环之前的歌了",
+      "更换新界面",
+    ]) {
+      const route = await routeChatIntentWithSemanticFallback(text);
+      expect(route).toMatchObject({
+        intent: "style_change",
+        action: "replan_queue",
+        preserveCurrentTrack: false,
+        routedBy: "rule",
+      });
+    }
+
+    expect(claude.callJsonLLM).not.toHaveBeenCalled();
+  });
+
   it("routes random music requests to the random_discover pipeline", () => {
     expect(routeChatIntent("帮我随机推荐一首歌")).toMatchObject({
       intent: "music_request",
