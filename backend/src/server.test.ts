@@ -256,6 +256,69 @@ describe("API Server", () => {
     }
   });
 
+  it("GET /api/audio/youtube/:videoId 在连续短暂失败后会第三次刷新并重试同一段 Range", async () => {
+    const musicSources = await import("./music-sources/index.js");
+    process.env.YOUTUBE_ENABLED = "true";
+    const upstreamRequests: Array<{ url?: string; range?: string }> = [];
+    let upstreamCalls = 0;
+    const upstream = await startTempHttpServer((req, res) => {
+      upstreamCalls += 1;
+      upstreamRequests.push({
+        url: req.url,
+        range: Array.isArray(req.headers.range) ? req.headers.range[0] : req.headers.range,
+      });
+      if (upstreamCalls <= 2) {
+        res.writeHead(upstreamCalls === 1 ? 403 : 502);
+        res.end("temporary stream failure");
+        return;
+      }
+      res.writeHead(206, {
+        "Content-Type": "audio/mp4",
+        "Content-Length": "14",
+        "Accept-Ranges": "bytes",
+        "Content-Range": "bytes 1048576-2097151/4194304",
+      });
+      res.end("mp4 audio body");
+    });
+    let streamingCalls = 0;
+    musicSources.setYouTubeClientForTests({
+      getStreamingData: async () => {
+        streamingCalls += 1;
+        return {
+          url: `${upstream.baseUrl}/stream-${streamingCalls}`,
+        };
+      },
+    } as any);
+
+    try {
+      const res = await fetch(`http://localhost:${port}/api/audio/youtube/dQw4w9WgXcQ`, {
+        headers: { Range: "bytes=1048576-" },
+      });
+
+      expect(res.status).toBe(206);
+      expect(res.headers.get("content-type")).toContain("audio/mp4");
+      expect(res.headers.get("content-range")).toBe("bytes 1048576-2097151/4194304");
+      expect(await res.text()).toBe("mp4 audio body");
+      expect(streamingCalls).toBe(3);
+      expect(upstreamRequests).toEqual([
+        expect.objectContaining({
+          url: "/stream-1",
+          range: "bytes=1048576-2097151",
+        }),
+        expect.objectContaining({
+          url: "/stream-2",
+          range: "bytes=1048576-2097151",
+        }),
+        expect.objectContaining({
+          url: "/stream-3",
+          range: "bytes=1048576-2097151",
+        }),
+      ]);
+    } finally {
+      await new Promise<void>((resolve) => upstream.server.close(() => resolve()));
+    }
+  });
+
   it("GET /api/audio/youtube/:videoId 连续失败后标记 YouTube 曲目并 fallback 到本地库", async () => {
     const db = await import("./db.js");
     const musicSources = await import("./music-sources/index.js");

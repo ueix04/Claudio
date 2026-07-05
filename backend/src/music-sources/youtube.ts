@@ -12,7 +12,7 @@ export const YOUTUBE_SOURCE_ID = "youtube" as const;
 
 const YOUTUBE_URL_TTL_DEFAULT_MS = 30 * 60 * 1000;
 const VIDEO_ID_PATTERN = /^[a-zA-Z0-9_-]{11}$/;
-const YOUTUBE_PLAYBACK_CLIENTS = ["MWEB", "TV", "WEB"] as const;
+const YOUTUBE_PLAYBACK_CLIENTS = ["TV", "MWEB", "WEB"] as const;
 const YOUTUBE_AUDIO_PROXY_PREFIX = "/api/audio/youtube";
 
 type YouTubeMusicSearchResult = Awaited<ReturnType<Innertube["music"]["search"]>>;

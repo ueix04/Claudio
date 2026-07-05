@@ -239,6 +239,26 @@ describe("youtube music source adapter", () => {
     expect(result.expiresAt - result.refreshedAt).toBe(120_000);
   });
 
+  it("prefers TV playback streams for range-stable YouTube audio", async () => {
+    process.env.YOUTUBE_ENABLED = "true";
+    const streamingClients: string[] = [];
+    setYouTubeClientForTests({
+      getStreamingData: async (_sourceTrackId: string, options?: { client?: string }) => {
+        streamingClients.push(String(options?.client ?? ""));
+        return {
+          url: `https://rr1---sn-example.googlevideo.com/videoplayback?client=${options?.client ?? ""}`,
+        };
+      },
+    } as unknown as Innertube);
+
+    const adapter = getMusicSourceAdapter(YOUTUBE_SOURCE_ID);
+    const result = await adapter.resolvePlayableUrl("dQw4w9WgXcQ");
+
+    expect(streamingClients).toEqual(["TV"]);
+    expect(result.validationUrl).toContain("client=TV");
+    expect(result.url).toBe("/api/audio/youtube/dQw4w9WgXcQ");
+  });
+
   it("rejects malformed video ids with a not_found error", async () => {
     process.env.YOUTUBE_ENABLED = "true";
     setYouTubeClientForTests(createFakeInnertube({}));

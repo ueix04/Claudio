@@ -59,6 +59,7 @@ const CURRENT_URL_REFRESH_THRESHOLD_MS = 2 * 60 * 1000;
 const UPCOMING_URL_REFRESH_THRESHOLD_MS = 3 * 60 * 1000;
 const PLAYBACK_LEASE_MAINTENANCE_INTERVAL_MS = 45 * 1000;
 const GOOGLEVIDEO_RANGE_CHUNK_BYTES = 1024 * 1024;
+const YOUTUBE_AUDIO_PROXY_MAX_ATTEMPTS = 3;
 const preparedQueueTransitions = new Map<string, PreparedQueueTransition>();
 const preparedQueueTransitionInFlight = new Map<string, Promise<PreparedQueueTransition | null>>();
 let playbackLeaseMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
@@ -420,7 +421,7 @@ app.get("/api/audio/youtube/:videoId", async (req, res) => {
   }
 
   const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : undefined;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < YOUTUBE_AUDIO_PROXY_MAX_ATTEMPTS; attempt += 1) {
     try {
       const upstream = await fetchYouTubeAudioUpstream(videoId, rangeHeader, attempt > 0);
       if (upstream.ok && upstream.body) {
@@ -428,7 +429,7 @@ app.get("/api/audio/youtube/:videoId", async (req, res) => {
         return;
       }
 
-      if (attempt === 0 && isRetryableYouTubeStreamStatus(upstream.status)) {
+      if (attempt < YOUTUBE_AUDIO_PROXY_MAX_ATTEMPTS - 1 && isRetryableYouTubeStreamStatus(upstream.status)) {
         musicSources.clearYouTubeStreamLease(videoId);
         continue;
       }
@@ -441,7 +442,7 @@ app.get("/api/audio/youtube/:videoId", async (req, res) => {
       res.status(upstream.status).json(getSafeYouTubeAudioError());
       return;
     } catch {
-      if (attempt === 0) {
+      if (attempt < YOUTUBE_AUDIO_PROXY_MAX_ATTEMPTS - 1) {
         musicSources.clearYouTubeStreamLease(videoId);
         continue;
       }
