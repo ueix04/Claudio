@@ -198,9 +198,22 @@ const formatPlaybackTime = (timeInSeconds: number) => {
   return `${m}:${s.toString().padStart(2, "0")}`;
 };
 
+const normalizeDurationSeconds = (duration?: number | null) => {
+  if (!duration || !Number.isFinite(duration)) return 0;
+  return duration > 1000 ? duration / 1000 : duration;
+};
+
+const normalizePlaybackPositionSeconds = (position: number, durationSeconds: number) => {
+  if (!Number.isFinite(position)) return 0;
+  if (durationSeconds > 0 && position > durationSeconds && position > 1000) {
+    return Math.max(0, position / 1000);
+  }
+  return Math.max(0, position);
+};
+
 const formatTrackDuration = (duration?: number) => {
   if (!duration || Number.isNaN(duration)) return "--:--";
-  const seconds = duration > 1000 ? Math.round(duration / 1000) : Math.round(duration);
+  const seconds = Math.round(normalizeDurationSeconds(duration));
   return formatPlaybackTime(seconds);
 };
 
@@ -301,6 +314,8 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const listStageScrollRef = useRef<HTMLDivElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const listenCheckSaveKeyRef = useRef<string | null>(null);
+  const durationSeconds = normalizeDurationSeconds(playerState.duration);
+  const currentTimeSeconds = normalizePlaybackPositionSeconds(playerState.currentTime, durationSeconds);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -315,9 +330,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     setListenCheck((current) => {
       if (!current.startedAt || current.completedAt) return current;
       const currentTrackKey = playerState.currentTrack?.id ?? playerState.currentTrack?.url ?? null;
-      const currentPositionSec = Number.isFinite(playerState.currentTime)
-        ? Math.max(0, playerState.currentTime)
-        : 0;
+      const currentPositionSec = currentTimeSeconds;
       const isPlaybackActive = playerState.isPlaying && Boolean(currentTrackKey);
       const fallbackSegmentTrackId = [
         playerState.currentTrack?.title,
@@ -423,6 +436,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     playerState.currentTrack?.id,
     playerState.currentTrack?.url,
     playerState.currentTime,
+    playerState.duration,
     playerState.isPlaying,
     playerState.audioSignalLevel,
     playerState.volume,
@@ -551,11 +565,11 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const percent = (e.clientX - rect.left) / rect.width;
-    onSeek(percent * playerState.duration);
+    onSeek(percent * durationSeconds);
   };
 
-  const progressPercent = playerState.duration > 0
-    ? (playerState.currentTime / playerState.duration) * 100
+  const progressPercent = durationSeconds > 0
+    ? Math.min(100, Math.max(0, (currentTimeSeconds / durationSeconds) * 100))
     : 0;
 
   const currentTrackId = playerState.currentTrack?.id;
@@ -915,9 +929,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
               <div className="player-dock-meta">
                 <span className="truncate">{playerState.currentTrack?.artist || "Unknown Artist"}</span>
                 <span className="h-1 w-1 rounded-full bg-[color:var(--claudio-border)]"></span>
-                <span className="flex-shrink-0">{formatPlaybackTime(playerState.currentTime)}</span>
+                <span className="flex-shrink-0">{formatPlaybackTime(currentTimeSeconds)}</span>
                 <span className="flex-shrink-0">/</span>
-                <span className="flex-shrink-0">{formatPlaybackTime(playerState.duration)}</span>
+                <span className="flex-shrink-0">{formatPlaybackTime(durationSeconds)}</span>
               </div>
             </div>
           </div>
@@ -1432,9 +1446,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
       const programGeneratedAt = programAudit?.program?.generatedAt;
       const startedAt = Date.now();
       const currentTrackKey = playerState.currentTrack?.id ?? playerState.currentTrack?.url ?? null;
-      const currentPositionSec = Number.isFinite(playerState.currentTime)
-        ? Math.max(0, playerState.currentTime)
-        : 0;
+      const currentPositionSec = currentTimeSeconds;
       const isPlaybackActive = playerState.isPlaying && Boolean(currentTrackKey);
       setListenCheck({
         ...createEmptyListenCheck(),

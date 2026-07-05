@@ -129,6 +129,74 @@ describe("split panel harmony", () => {
     expect(markup).toMatch(/1:05<\/span><span class="flex-shrink-0">\/<\/span><span class="flex-shrink-0">3:20/);
   });
 
+  it("normalizes millisecond track duration in the player dock", () => {
+    const markup = renderToStaticMarkup(
+      <LayoutManager>
+        <PlayerPanel
+          playerState={{
+            ...playerState,
+            currentTime: 150,
+            duration: 405000,
+            currentTrack: {
+              ...playerState.currentTrack!,
+              title: "Faint",
+              artist: "Linkin Park",
+              duration: 405000,
+            },
+            playlist: [
+              {
+                ...playerState.playlist[0],
+                title: "Faint",
+                artist: "Linkin Park",
+                duration: 405000,
+              },
+            ],
+          }}
+          favoriteTracks={[]}
+          playHistory={[]}
+          userFeedback={[]}
+          discoveryCandidates={discoveryCandidates}
+          tasteProfile={null}
+          isSyncingLibrary={false}
+          lastSyncSummary={null}
+          musicSourceStatus={null}
+          playbackDiagnostics={null}
+          localLibraryStatus={localLibraryStatus}
+          localLibraryMatchStatus={null}
+          programAudit={null}
+          listenCheckRecords={[]}
+          listenAcceptance={null}
+          isRescanningLocalLibrary={false}
+          utilityNotice={null}
+          visualizerBars={Array.from({ length: 12 }, () => 0.2)}
+          onPlayPause={() => {}}
+          onNext={() => {}}
+          onPrevious={() => {}}
+          onSeek={() => {}}
+          onVolumeChange={() => {}}
+          onToggleFavorite={() => {}}
+          onTrackFeedback={() => {}}
+          onSelectTrack={() => {}}
+          onPlaySavedTrack={() => {}}
+          onUserAvatarUpload={async () => {}}
+          onFullscreenToggle={() => {}}
+          isFullscreen={false}
+          onTrigger={() => {}}
+          onSyncLibrary={() => {}}
+          onRetryFailedSync={() => {}}
+          onRescanLocalLibrary={() => {}}
+          onListenCheckSaved={() => {}}
+          isTriggerBusy={false}
+          statusText="Now playing"
+          status="playing"
+        />
+      </LayoutManager>,
+    );
+
+    expect(markup).toMatch(/2:30<\/span><span class="flex-shrink-0">\/<\/span><span class="flex-shrink-0">6:45/);
+    expect(markup).not.toContain("6750:00");
+  });
+
   it("shows online source standby in the empty player state", () => {
     const markup = renderToStaticMarkup(
       <LayoutManager>
