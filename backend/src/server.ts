@@ -2326,6 +2326,51 @@ function parseQueueAdvanceFeedback(payload: any): { type: db.UserFeedbackType; n
   return null;
 }
 
+function shouldRefreshProgramAtQueueEnd(
+  state: db.AppState,
+  step: number,
+  feedback?: { type: db.UserFeedbackType; note: string } | null,
+): boolean {
+  if (step !== 1 || feedback?.type !== "complete_track") {
+    return false;
+  }
+
+  const queue = Array.isArray(state.radioQueue) ? state.radioQueue : [];
+  if (queue.length === 0) {
+    return false;
+  }
+
+  const currentIndex = clampQueueIndex(queue.length, state.currentQueueIndex);
+  return currentIndex >= queue.length - 1;
+}
+
+async function refreshProgramAtQueueEnd(
+  feedback?: { type: db.UserFeedbackType; note: string } | null,
+): Promise<boolean> {
+  const previousState = await db.getState();
+  if (!shouldRefreshProgramAtQueueEnd(previousState, 1, feedback)) {
+    return false;
+  }
+
+  invalidatePreparedQueueTransition();
+  broadcast({ type: "status", data: "thinking" });
+
+  let result: pipeline.PipelineResult;
+  try {
+    result = await pipeline.runPipeline("mood_pick");
+  } catch (error) {
+    console.warn(`[radio] queue-end program refresh failed: ${getErrorMessage(error)}`);
+    return false;
+  }
+
+  const previousTrack = previousState.currentTrack;
+  if (previousTrack && feedback) {
+    await addTrackFeedbackFromState(previousState, previousTrack, feedback.type, feedback.note);
+  }
+  await broadcastPipelineResult(result);
+  return true;
+}
+
 async function advanceQueueWithSegue(
   step: number,
   options?: {
@@ -2517,8 +2562,13 @@ wss.on("connection", async (ws) => {
 
       if (payload.type === "queue_next") {
         try {
+          const feedback = parseQueueAdvanceFeedback(payload);
+          const refreshedProgram = await refreshProgramAtQueueEnd(feedback);
+          if (refreshedProgram) {
+            return;
+          }
           const nextState = await advanceQueueWithSegue(1, {
-            feedback: parseQueueAdvanceFeedback(payload),
+            feedback,
           });
           if (!nextState?.currentTrack) {
             ws.send(JSON.stringify({ type: "error", data: { message: "当前没有可切换的歌曲队列" } }));

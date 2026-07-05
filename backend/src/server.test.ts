@@ -1844,6 +1844,91 @@ describe("WebSocket Server", () => {
     ws.close();
   });
 
+  it("queue_next 在自然播完最后一首时续编下一档节目而不是循环旧队列", async () => {
+    const db = await import("./db.js");
+    const pipeline = await import("./pipeline.js");
+
+    const trackA = { id: "1", name: "Song A", artist: "Artist A", url: "url-a", duration: 100 };
+    const trackB = { id: "2", name: "Song B", artist: "Artist B", url: "url-b", duration: 100 };
+    const currentState = {
+      status: "playing",
+      currentTrack: trackB,
+      radioQueue: [trackA, trackB],
+      currentQueueIndex: 1,
+      currentProgram: { source: "startup", sessionId: "program_1", generatedAt: 1 },
+      chatHistory: [],
+      playHistory: [],
+      userFeedback: [],
+      listenChecks: [],
+      djProfile: { voice: "温暖", style: "情感电台", name: "Claudio" },
+      playlists: [],
+      neteaseSnapshot: null,
+      favorites: [],
+      lastInteraction: Date.now(),
+    } as any;
+
+    vi.mocked(db.getState).mockResolvedValue(currentState);
+    vi.mocked(pipeline.runPipeline).mockResolvedValue({
+      status: "success",
+      djMessage: "下一档节目已经接上。",
+      tracks: [
+        {
+          id: "3",
+          name: "Fresh Song",
+          artist: "Fresh Artist",
+          url: "/api/audio/youtube/fresh123456",
+          picUrl: "",
+          duration: 180,
+        },
+      ],
+      reason: "queue end refresh",
+      programTitle: "Fresh Program",
+    } as any);
+
+    const { WebSocket } = await import("ws");
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
+    const messages: Array<Record<string, any>> = [];
+    ws.on("message", (data) => {
+      messages.push(JSON.parse(data.toString()));
+    });
+
+    ws.send(JSON.stringify({
+      type: "queue_next",
+      data: {
+        reason: "track_complete",
+        positionSec: 100,
+        durationSec: 100,
+      },
+    }));
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for queue-end program refresh")), 3000);
+      const check = setInterval(() => {
+        if (messages.some((m) => m.type === "track" && m.data?.name === "Fresh Song")) {
+          clearInterval(check);
+          clearTimeout(timeout);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(pipeline.runPipeline).toHaveBeenCalledWith("mood_pick");
+    expect(db.advanceRadioQueue).not.toHaveBeenCalled();
+    expect(db.addUserFeedback).toHaveBeenCalledWith(expect.objectContaining({
+      type: "complete_track",
+      title: "Song B",
+      artist: "Artist B",
+      programSessionId: "program_1",
+      queueIndex: 1,
+    }));
+    expect(messages.some((m) => m.type === "status" && m.data === "thinking")).toBe(true);
+    expect(messages.some((m) => m.type === "dj_message" && m.data?.text === "下一档节目已经接上。")).toBe(true);
+
+    ws.close();
+  });
+
   it("会在 queue_prefetch 时提前缓存下一首链接和串场，并在切歌时复用", async () => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");
