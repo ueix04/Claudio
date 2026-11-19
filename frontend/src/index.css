@@ -327,7 +327,17 @@ body {
 }
 
 /* Subtitle overlay style */
+.subtitle-overlay,
+.mobile-subtitle {
+  max-height: min(10rem, 25dvh);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  overscroll-behavior: contain;
+}
+
 .subtitle-overlay {
+  pointer-events: auto;
   opacity: 1;
   transform: translateY(0);
   filter: blur(0);
@@ -339,6 +349,7 @@ body {
 }
 
 .subtitle-overlay-fading {
+  pointer-events: none;
   opacity: 0;
   transform: translateY(8px);
   filter: blur(2px);
@@ -1933,6 +1944,7 @@ body {
 }
 
 .mobile-subtitle-fading {
+  pointer-events: none;
   opacity: 0;
   transform: translateY(8px);
 }

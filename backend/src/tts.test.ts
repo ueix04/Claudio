@@ -29,6 +29,7 @@ describe("TTS Module", () => {
   afterEach(() => {
     process.env = originalEnv;
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   describe("synthesize", () => {
@@ -83,7 +84,7 @@ describe("TTS Module", () => {
       expect(body.messages[0].content).toContain("正常聊天语速");
       expect(body.messages[0].content).toContain("声音气质 — 温暖");
       expect(body.messages[0].content).toContain("情感电台");
-      expect(body.messages[0].content).toContain("本句导演提示 — 第一句轻快。 ‘hello’稍带笑意。");
+      expect(body.messages[0].content).toContain("本段导演提示 — 第一句轻快。\n‘hello’稍带笑意。");
       expect(body.messages[1]).toMatchObject({
         role: "assistant",
         content: "hello",
@@ -150,7 +151,7 @@ describe("TTS Module", () => {
       const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
       expect(body.audio).toEqual({ format: "wav", optimize_text_preview: false });
       expect(body.messages[0].content).toContain(process.env.MIMO_TTS_VOICE_PROMPT);
-      expect(body.messages[0].content).toContain("接歌短而顺");
+      expect(body.messages[0].content).toContain("按台词的意思自然停连");
       expect(body.messages[1]).toEqual({ role: "assistant", content: "接下来听首歌。" });
     });
 
@@ -168,7 +169,7 @@ describe("TTS Module", () => {
 
       const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
       expect(body.audio).toEqual({ format: "wav", voice: `data:audio/mpeg;base64,${sample}` });
-      expect(body.messages[0].content).toContain("像听完对方的话马上接一句");
+      expect(body.messages[0].content).toContain("根据内容自然展开和收尾");
       expect(body.messages[0].content).not.toContain("茉莉");
     });
 
@@ -233,23 +234,41 @@ describe("TTS Module", () => {
   describe("speak", () => {
     const frame = (pcm: string) => `data: ${JSON.stringify({ choices: [{ delta: { audio: { data: pcm } } }] })}\r\n\r\n`;
 
-    it("delivers PCM before the stream finishes and caches a replayable WAV", async () => {
+    function mockStream() {
       vi.mocked(fs.access).mockRejectedValueOnce(new Error("not found"));
       let controller!: ReadableStreamDefaultController<Uint8Array>;
       const body = new ReadableStream<Uint8Array>({ start: (value) => { controller = value; } });
-      vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { headers: { "Content-Type": "text/event-stream" } }));
+      vi.mocked(fetch).mockImplementationOnce(async (_url, init) => {
+        const signal = init?.signal;
+        signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+        return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+      });
+      const encoder = new TextEncoder();
+      return {
+        send: (data: string) => controller.enqueue(encoder.encode(data)),
+        close: () => controller.close(),
+      };
+    }
+
+    it("streams past the initial wait interval while PCM keeps arriving and caches the full WAV", async () => {
+      vi.useFakeTimers();
+      process.env.MIMO_TTS_TIMEOUT_MS = "1000";
+      const stream = mockStream();
 
       const onPcmChunk = vi.fn();
       const result = speak("live", { onPcmChunk });
-      const encoder = new TextEncoder();
       const first = frame("AAA=");
-      controller.enqueue(encoder.encode(first.slice(0, -2)));
-      controller.enqueue(encoder.encode(first.slice(-2)));
-      await vi.waitFor(() => expect(onPcmChunk).toHaveBeenCalledWith("AAA="));
+      stream.send(first.slice(0, -2));
+      stream.send(first.slice(-2));
+      await vi.advanceTimersByTimeAsync(700);
+      expect(onPcmChunk).toHaveBeenCalledWith("AAA=");
       expect(fs.writeFile).not.toHaveBeenCalled();
 
-      controller.enqueue(encoder.encode(frame("AQI=") + "data: [DONE]\r\n\r\n"));
-      controller.close();
+      stream.send(frame("AQI="));
+      await vi.advanceTimersByTimeAsync(700);
+      expect(onPcmChunk).toHaveBeenCalledWith("AQI=");
+      stream.send("data: [DONE]\r\n\r\n");
+      stream.close();
       const wav = Buffer.from((await result).audioBuffer);
       expect(wav.toString("ascii", 0, 4)).toBe("RIFF");
       expect(wav.readUInt32LE(24)).toBe(24_000);
@@ -257,6 +276,24 @@ describe("TTS Module", () => {
       expect(fs.writeFile).toHaveBeenCalledOnce();
       const requestBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
       expect(requestBody).toMatchObject({ stream: true, audio: { format: "pcm16", voice: "冰糖" } });
+    });
+
+    it("stops an idle audio stream even when the connection sends keepalives", async () => {
+      vi.useFakeTimers();
+      process.env.MIMO_TTS_TIMEOUT_MS = "1000";
+      const stream = mockStream();
+      const onPcmChunk = vi.fn();
+      const result = expect(speak("stalled", { onPcmChunk })).rejects.toMatchObject({ name: "TimeoutError" });
+
+      stream.send(frame("AAA="));
+      await vi.advanceTimersByTimeAsync(600);
+      expect(onPcmChunk).toHaveBeenCalledOnce();
+      stream.send(": keepalive\r\n\r\n");
+      await vi.advanceTimersByTimeAsync(450);
+
+      await result;
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
     it("falls back to WAV when streaming fails before the first chunk", async () => {

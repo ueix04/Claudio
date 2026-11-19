@@ -46,7 +46,7 @@ export function buildHostStyleGuide(
 
   if (dayPart === "late_night") {
     return useEnglish
-      ? "Host style: late-night companion. Close-mic, restrained, soft, never hyped, and never oversized in wording."
+      ? "Host style: late-night companion. Close-mic, restrained, soft, and conversational."
       : "主持风格：深夜陪伴型。贴耳、克制、轻声，不要兴奋，不要用大开大合的词。";
   }
 
@@ -70,8 +70,8 @@ export function buildHostStyleGuide(
 
   if (dayPart === "evening" && weatherTone === "rainy") {
     return useEnglish
-      ? "Host style: rainy-night radio. Shorter lines, softer mood, strong sense of company, and no repeated greetings."
-      : "主持风格：夜雨电台型。句子更短，情绪更柔软，强调陪伴感，不要频繁使用问候语。";
+      ? "Host style: rainy-night radio. Soft mood, natural pauses, and a sense of company. Skip repeated greetings."
+      : "主持风格：夜雨电台型。情绪柔软，留出自然停顿，像是在陪一个人听歌。避免重复问候。";
   }
 
   if (dayPart === "evening") {
@@ -126,8 +126,8 @@ export function buildSegueDirective(kind: SegueKind, language: PromptLanguage = 
         : "串场类型：降温。像顺着上一首把听感放平，帮人沉下来。";
     case "night_companion":
       return useEnglish
-        ? "Segue type: late-night companion. Speak as if you are easing the next track in by the listener's ear. Short lines, contained emotion."
-        : "串场类型：深夜陪伴。像在耳边轻声接歌，句子短，情绪收着。";
+        ? "Segue type: late-night companion. Ease the next track in with a close, conversational tone and contained emotion."
+        : "串场类型：深夜陪伴。像在身边给听众接歌，语气自然，情绪收着。";
     case "landing":
       return useEnglish
         ? "Segue type: landing. Give the set a gentle point of arrival, like settling this section into place."

@@ -1,4 +1,4 @@
-import { resolveDjCopyLanguage, TTS_DIRECTION_FIELD } from "./dj-language.js";
+import { DJ_SPEECH_GUIDANCE, resolveDjCopyLanguage, TTS_DIRECTION_FIELD } from "./dj-language.js";
 
 const DEFAULT_TIMEOUT = 120_000;
 const DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1";
@@ -383,7 +383,7 @@ ${playlistContext || "The listener has not imported a playlist yet. Recommend fr
 ${candidateContext ? `\n\n${candidateContext}` : ""}
 
 Reply in JSON. Field requirements:
-- say: the line shown in the UI, natural English, 12-32 words, warm and conversational, without inline audio tags
+- say: what the DJ says, written in warm, conversational English without inline audio tags. ${DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say. Keep normal conversational pace; do not add slow, deep, whisper, or theatrical stage directions
 ${TTS_DIRECTION_FIELD.en}
 - play: the song list you recommend. Each item includes title (required), artist (optional), id (required if it comes from the online candidate pool), mood (optional), reason (optional)
@@ -391,7 +391,7 @@ ${TTS_DIRECTION_FIELD.en}
   - If an online candidate pool is provided, prefer choosing from it and preserve id, title, and artist exactly as given
 - If live weather is provided, weave it naturally into say / ttsText, but do not invent extra weather details
 - reason: why this recommendation fits, natural English, 10-24 words
-- segue: optional transition line, natural English, 8-18 words
+- segue: optional transition into the next song, in natural spoken English
 
 Return JSON only. Do not include any extra text.`;
   }
@@ -407,7 +407,7 @@ ${playlistContext || "用户尚未导入歌单，请根据模式和音乐常识�
 ${candidateContext ? `\n\n${candidateContext}` : ""}
 
 请以 JSON 格式回复，字段说明：
-- say: 前端显示给用户的话（中文，30-80 字，温柔治愈的风格，不要包含任何音频标签）
+- say: 给听众说的话，用温暖自然的中文口语，不包含音频标签。${DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 TTS 朗读的文本，内容应与 say 语义一致。保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${TTS_DIRECTION_FIELD.zh}
 - play: 你推荐的歌曲列表，每首包含 title（必填）、artist（选填）、id（若来自在线候选池则必填）、mood（选填）、reason（选填）
@@ -415,7 +415,7 @@ ${TTS_DIRECTION_FIELD.zh}
   - 如果提供了“在线候选池”，优先从候选池里选；此时必须原样返回候选曲目的 id、title、artist，不要改写
 - 如果提供了实时天气，可以自然地融入 say / ttsText，但不要编造未提供的天气细节
 - reason: 你推荐这首歌的理由（中文，20-50 字，说明与用户口味的关联）
-- segue: 衔接语（选填，用于在歌曲之间过渡的话，中文，20-50 字）
+- segue: 用自然的中文口语衔接下一首歌，选填
 
 只输出 JSON，不要包含任何其他文字。`;
 }

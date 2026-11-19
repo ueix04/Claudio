@@ -52,14 +52,14 @@ const DELIVERY = {
     scene: {
       program_intro: "开场有一点欢迎的笑意，第一句轻轻带起，接着顺势介绍节目。",
       music_recommendation: "像给朋友递一首歌，轻轻点出推荐的重点。",
-      segue: "接歌短而顺，提到下一首后利落收尾。",
-      chat_reply: "像听完对方的话马上接一句，语气亲切，有来有回。",
+      segue: "像在给听众接歌，按台词的意思自然停连，把情绪顺到下一首。",
+      chat_reply: "像听完对方的话马上回应，语气亲切，根据内容自然展开和收尾。",
     },
     name: "主播名",
     style: "节目风格",
     atmosphere: "节目氛围",
     voiceNote: "声音气质",
-    direction: "本句导演提示",
+    direction: "本段导演提示",
   },
   en: {
     base: "Speak like a radio DJ talking to one listener. Use a clear, relaxed voice at conversational speed. Pause briefly at punctuation and let the ends of sentences settle naturally. Pronounce song titles naturally in their own language.",
@@ -67,14 +67,14 @@ const DELIVERY = {
     scene: {
       program_intro: "Open with a small welcoming smile, then ease into the show.",
       music_recommendation: "Offer the song as you would to a friend, with a little emphasis on what to listen for.",
-      segue: "Connect the songs in one smooth breath and finish promptly after naming the next track.",
+      segue: "Let the delivery flow naturally from the previous song into the next, with pauses that follow the thought.",
       chat_reply: "Answer as if you just heard the listener speak. Sound warm and spontaneous.",
     },
     name: "Host name",
     style: "Show style",
     atmosphere: "Atmosphere",
     voiceNote: "Voice note",
-    direction: "Direction for this line",
+    direction: "Direction for this script",
   },
 };
 
@@ -138,7 +138,7 @@ function composeStylePrompt(model: MimoTtsModel, options?: TTSSpeakOptions): str
     ? profile.voice.trim()
     : undefined;
   const direction = typeof options?.direction === "string"
-    ? options.direction.replace(/\s+/g, " ").trim().slice(0, 300)
+    ? options.direction.trim()
     : "";
 
   return [
@@ -409,20 +409,30 @@ async function synthesizeForPlayback(
   request: ResolvedMimoRequest,
   onChunk?: (base64: string) => void,
 ): Promise<TTSResult> {
-  const signal = AbortSignal.timeout(getMimoTimeoutMs());
-  if (onChunk && request.model === DEFAULT_MIMO_MODEL) {
-    let started = false;
-    try {
-      const response = await requestMimoSpeech(apiKey, request, signal, true);
-      return await consumeMimoPcmStream(response, (base64) => {
-        started = true;
-        onChunk(base64);
-      });
-    } catch (error) {
-      if (started || signal.aborted) throw error;
-    }
+  const timeoutMs = getMimoTimeoutMs();
+  if (!onChunk || request.model !== DEFAULT_MIMO_MODEL) {
+    return synthesizeWithResolvedRequest(apiKey, request, AbortSignal.timeout(timeoutMs));
   }
-  return synthesizeWithResolvedRequest(apiKey, request, signal);
+
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const idleTimer = setTimeout(() => {
+    controller.abort(new DOMException("MiMo stopped sending audio", "TimeoutError"));
+  }, timeoutMs).unref();
+  let started = false;
+  try {
+    const response = await requestMimoSpeech(apiKey, request, signal, true);
+    return await consumeMimoPcmStream(response, (base64) => {
+      started = true;
+      idleTimer.refresh();
+      onChunk(base64);
+    });
+  } catch (error) {
+    if (started || signal.aborted) throw error;
+    return await synthesizeWithResolvedRequest(apiKey, request, signal);
+  } finally {
+    clearTimeout(idleTimer);
+  }
 }
 
 export async function speak(

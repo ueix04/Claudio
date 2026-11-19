@@ -3,9 +3,14 @@ import "./runtime.js";
 
 export type DjCopyLanguage = "zh" | "en";
 
+export const DJ_SPEECH_GUIDANCE: Record<DjCopyLanguage, string> = {
+  zh: "篇幅跟着内容和当下的节目节奏走。值得展开的细节把它说完，说到自然的落点就收尾。",
+  en: "Let the amount of speech follow the subject and the pace of the show. Give details room when they matter, and end where the thought naturally lands.",
+};
+
 export const TTS_DIRECTION_FIELD: Record<DjCopyLanguage, string> = {
-  zh: "- ttsDirection: 可选的一句导演提示，只写怎么读。根据台词给出情绪底色，有需要时混合相容的情绪、指明前后句的语气变化，或点出一句里的具体停顿和重音。以自然聊天语速和电台的克制表演为准。",
-  en: "- ttsDirection: optional one-sentence performance direction tailored to this line. Set the emotional baseline and, where it helps, blend compatible emotions, describe a shift between sentences, or identify an exact pause or word to stress. Keep the delivery conversational and restrained.",
+  zh: "- ttsDirection: 可选的导演提示，只写怎么读。根据台词给出情绪底色，有需要时混合相容的情绪、指明段落间的语气变化，或点出具体停顿和重音。保持自然聊天语速和克制的表演。",
+  en: "- ttsDirection: optional performance direction tailored to the script. Set the emotional baseline and, where it helps, blend compatible emotions, describe transitions in tone, or indicate exact pauses and words to stress. Keep the delivery conversational and restrained.",
 };
 
 const PRESET_LANGUAGES = {

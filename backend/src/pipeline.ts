@@ -356,7 +356,7 @@ Rules:
 - Avoid exact repeats from recent playback and explicit dislikes
 
 Return JSON only:
-- say: one short DJ line, natural English, 10-26 words, explaining that you will test a nearby direction
+- say: naturally tell the listener in English what nearby direction you are about to explore. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning, normal conversational pace, no slow/deep/whisper/theatrical tags
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 - directions: array of objects with query, direction, reason, risk ("adjacent" or "small_adventure")
@@ -386,7 +386,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - 避免最近播放和明确不喜欢的歌曲
 
 只输出 JSON：
-- say: 一句很短的 DJ 说明，中文 20-60 字，说明会试一个相邻方向
+- say: 用中文口语告诉听众接下来想试哪个相邻方向。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 语义相同，正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 - directions: 数组，每项包含 query、direction、reason、risk（"adjacent" 或 "small_adventure"）
@@ -802,7 +802,7 @@ Return JSON only. Required fields:
 - title: optional show title
 - mood: the overall mood of this session
 - plannedMinutes: target duration, an integer from 20 to 40
-- say: the opening line for the UI, natural English, 20-65 words
+- say: open the show in natural spoken English and lead into the first track. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
@@ -837,7 +837,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - title: 节目标题，可选
 - mood: 这段节目的整体氛围
 - plannedMinutes: 目标时长，20 到 40 之间的整数
-- say: 开场对白，给前端显示，中文 40-120 字
+- say: 用中文口语打开这段节目，顺势引入第一首歌。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
@@ -878,14 +878,13 @@ Please refresh the station with a complete 20-40 minute radio program, not a sin
 - Prefer the online candidate pool. For numeric Netease candidates, return id/title/artist exactly
 - Output 6 to 10 songs
 - Make the first song reliable and familiar enough, then sequence the rest naturally
-- The DJ line should be specific and concise, 16-40 words
 - Include a sparse speechPlan: intro before the first song, then only short talk or bumper spots every 2-3 songs
 
 Return JSON only. Required fields:
 - title: optional show title
 - mood: the overall mood of this session
 - plannedMinutes: target duration, an integer from 20 to 40
-- say: the line shown in the UI, natural English, 16-40 words
+- say: introduce the new set to the listener in natural spoken English, with details that fit this moment. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
@@ -913,14 +912,13 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - 优先使用在线候选池；命中网易云数字 id 候选时原样返回 id、title、artist
 - 输出 6 到 10 首歌
 - 第一首要稳，后续顺序要自然、有承接
-- DJ 文案要具体、短，中文 35-90 字
 - 增加稀疏 speechPlan：第一首前是 intro，之后每 2 到 3 首歌才安排一次 short_say 或 bumper
 
 只输出 JSON，对象字段必须是：
 - title: 节目标题，可选
 - mood: 这段节目的整体氛围
 - plannedMinutes: 目标时长，20 到 40 之间的整数
-- say: 前端显示文案，中文 35-90 字
+- say: 用中文口语向听众介绍这组歌，聊聊和当下有关的具体细节。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
@@ -958,7 +956,7 @@ ${mergedPlaylistContext || "No playlist context yet"}
 ${candidateContext ? `\n\nOnline candidate pool:\n${candidateContext}` : ""}
 
 The listener wants to reshape the current set through chat. Build a tighter mini-program around that request. Requirements:
-- Start by replying like a DJ to the listener and briefly explain why this new set fits
+- Start by replying like a DJ and explain how this new set answers what the listener just said
 - The reply must continue the current show. Do not reintroduce yourself and do not sound like a rebooted program
 - Prefer adjusting within the listener's taste instead of drifting away from their library
 - Prefer the online candidate pool. For numeric Netease candidates, return id/title/artist exactly
@@ -967,7 +965,7 @@ The listener wants to reshape the current set through chat. Build a tighter mini
 
 Return JSON only. Required fields:
 - title: optional show title
-- say: the DJ's reply to the listener, natural English, 16-44 words
+- say: the DJ's reply to the listener in natural spoken English. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
@@ -1000,7 +998,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 
 只输出 JSON，对象字段必须是：
 - title: 节目标题，可选
-- say: DJ 对用户的回应，中文 35-100 字
+- say: DJ 用中文口语回应听众。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
@@ -1028,22 +1026,6 @@ function buildFallbackStartupProgramResponse(context: MusicContext): StationProg
       ? "Fallback programming keeps a complete long-form set available when the model is temporarily unavailable."
       : "模型暂时不可用时，先用稳定候选曲保持一档完整节目可播放。",
   };
-}
-
-function clampDjLine(text: string | undefined, fallback: string, maxLength = 92): string {
-  const normalized = (text?.trim() || fallback).replace(/\s+/g, " ");
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-
-  const head = normalized.slice(0, maxLength);
-  const breakpoints = ["。", "！", "？", ".", "!", "?", "；", ";"];
-  const boundary = Math.max(...breakpoints.map((mark) => head.lastIndexOf(mark)));
-  if (boundary >= 35) {
-    return head.slice(0, boundary + 1);
-  }
-
-  return `${head.slice(0, Math.max(1, maxLength - 3)).trimEnd()}...`;
 }
 
 function buildManualFallbackLineup(
@@ -1270,8 +1252,8 @@ export async function runStartupRadioProgram(
       response = buildFallbackStartupProgramResponse(context);
     }
 
-    const say = clampDjLine(response.say, "我先把节目接稳，让前几首歌自然展开，中间只在需要承接的时候短短说一句。");
-    const ttsText = clampDjLine(response.ttsText, say, 140);
+    const say = response.say?.trim() || "我先把节目接稳，让前几首歌自然展开，中间只在需要承接的时候和你聊聊。";
+    const ttsText = response.ttsText?.trim() || say;
 
     if (!background) {
       await db.setStatus("speaking");
@@ -1344,8 +1326,8 @@ export async function runChatSwitchProgram(
       usedFallbackProgram = true;
     }
 
-    const say = clampDjLine(response.say, "收到，我把后面的节目换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。");
-    const ttsText = clampDjLine(response.ttsText, say, 140);
+    const say = response.say?.trim() || "收到，我把后面的节目换成一组更稳的候选，当前音乐不断，下一段会按你的方向接过去。";
+    const ttsText = response.ttsText?.trim() || say;
 
     await db.setStatus("speaking");
     const [ttsAudioPath, stableTracks] = await Promise.all([
@@ -1419,11 +1401,10 @@ async function runManualRadioProgram(
     }
 
     const fallbackLineup = buildManualFallbackLineup(mode, context);
-    const say = clampDjLine(
-      response.say,
+    const say = response.say?.trim() || (
       mode === "morning_brief"
         ? "我把晨间节目重新接成一组完整队列，先保证音乐不断，后面按清爽一点的节奏自然往前走。"
-        : "我把后面的节目换成一组更贴近当下心情的队列，先保证音乐不断，再慢慢把气氛接顺。",
+        : "我把后面的节目换成一组更贴近当下心情的队列，先保证音乐不断，再慢慢把气氛接顺。"
     );
     const ttsText = response.ttsText?.trim() || say;
 
@@ -1492,10 +1473,8 @@ export async function runPipeline(
       const scoutResponse = await runDiscoveryScout(context, "random_discover");
       await db.setStatus("speaking");
 
-      const say = clampDjLine(
-        scoutResponse.say,
-        "我先从你的稳定口味旁边试一个新方向，同时保留几首稳的歌，让节目能继续播下去。",
-      );
+      const say = scoutResponse.say?.trim()
+        || "我先从你的稳定口味旁边试一个新方向，同时保留几首稳的歌，让节目能继续播下去。";
       const reason = scoutResponse.reason?.trim()
         || "Discovery Scout selected nearby directions and the backend verified playable audio.";
       const stableSeedCount = hasRecentPositiveFeedback(context) ? 4 : 3;

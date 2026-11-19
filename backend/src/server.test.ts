@@ -1412,9 +1412,9 @@ describe("WebSocket Server", () => {
     });
 
     const prompt = String(vi.mocked(claude.callJsonLLM).mock.calls[0]?.[0] ?? "");
-    expect(prompt).toContain("natural English");
+    expect(prompt).toContain("warm, conversational English");
     expect(prompt).toContain('action: "reply_only"');
-    expect(prompt).not.toContain("中文 30-80 字");
+    expect(prompt).toContain("end where the thought naturally lands");
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
 
     ws.close();
@@ -1722,7 +1722,16 @@ describe("WebSocket Server", () => {
     ws.close();
   });
 
-  it("queue_next 会收敛过长的英文 DJ 串场", async () => {
+  it.each([
+    {
+      voice: "Dean",
+      text: "Song A leaves a steady pulse. Listen to how Song B brings the bass forward while giving the voice space to settle.\n\nThat change is why these two songs sit so well together.",
+    },
+    {
+      voice: "茉莉",
+      text: "刚才那首歌把节奏留在了最后几下鼓声里。接下来这首的贝斯往前了一点，人声却留在后面，听起来会更松。\n\n可以听一下副歌进来的时候，节奏是怎么接住前面那段的。",
+    },
+  ])("queue_next 会完整保留 $voice 音色的串场台词", async ({ voice, text }) => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");
     const tts = await import("./tts.js");
@@ -1742,7 +1751,7 @@ describe("WebSocket Server", () => {
         speechPlan: [{ beforeTrackIndex: 1, type: "short_say", note: "接到下一首" }],
       },
       chatHistory: [],
-      djProfile: { voice: "Dean", style: "emotional radio", name: "Claudio" },
+      djProfile: { voice, style: "emotional radio", name: "Claudio" },
       lastInteraction: Date.now(),
       playlists: [],
     } as any;
@@ -1767,14 +1776,14 @@ describe("WebSocket Server", () => {
     });
     vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
     vi.mocked(claude.callJsonLLM).mockResolvedValue({
-      say: "Song A leaves a steady pulse, and Song B keeps that rhythm moving with a cleaner vocal line before the set opens into a much wider emotional shape.",
-      ttsText: "Song A leaves a steady pulse, and Song B keeps that rhythm moving with a cleaner vocal line before the set opens into a much wider emotional shape.",
+      say: text,
+      ttsText: text,
     });
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
       cached: false,
-      cachePath: "data/audio/clamped-segue.wav",
+      cachePath: "data/audio/full-segue.wav",
     });
 
     const { WebSocket } = await import("ws");
@@ -1789,7 +1798,7 @@ describe("WebSocket Server", () => {
     ws.send(JSON.stringify({ type: "queue_next" }));
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("timeout waiting for clamped segue")), 3000);
+      const timeout = setTimeout(() => reject(new Error("timeout waiting for the segue")), 3000);
       const check = setInterval(() => {
         if (messages.some((m) => m.type === "dj_message")) {
           clearInterval(check);
@@ -1800,8 +1809,7 @@ describe("WebSocket Server", () => {
     });
 
     const djMessage = messages.find((m) => m.type === "dj_message")?.data?.text as string;
-    expect(djMessage.length).toBeLessThanOrEqual(94);
-    expect(djMessage).toBe("Song A leaves a steady pulse, and Song B keeps that rhythm moving with a cleaner vocal line.");
+    expect(djMessage).toBe(text);
     expect(tts.speak).toHaveBeenCalledWith(
       djMessage,
       expect.objectContaining({ scene: "segue" }),

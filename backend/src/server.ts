@@ -1194,7 +1194,7 @@ function resolveSpeechSlotForTransition(
     return {
       beforeTrackIndex: nextIndex,
       type: "short_say",
-      note: "临时队列切歌，保持一句自然接歌",
+      note: "临时队列切歌，自然衔接前后两首",
     };
   }
 
@@ -1785,12 +1785,12 @@ No weather context is provided because this is not a weather request. Do not men
 
 Return JSON only. Required fields:
 - action: "reply_only"
-- say: the line shown in the UI, natural English, 10-28 words, warm and conversational, no inline audio tags
+- say: respond to the listener in warm, conversational English without inline audio tags. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 
 If the intent is recommendation_reason, explain the current track using only the current track and current program notes. Do not invent private listener data.
-If the intent is emotion_expression, acknowledge the feeling briefly and keep the show moving gently.
+If the intent is emotion_expression, acknowledge what the listener shared in your own words and keep the show moving gently.
 `;
   }
 
@@ -1807,7 +1807,7 @@ ${recentHistory || "无"}
 
 请输出 JSON，不要 Markdown，不要额外说明。字段必须是：
 - action: "reply_only"
-- say: 前端显示给用户的话，中文 30-80 字，温柔自然，不要包含音频标签
+- say: 用温柔自然的中文口语回应听众，不包含音频标签。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 
@@ -1834,7 +1834,7 @@ ${recentHistory || "none"}
 
 You are Claudio, an AI emotional radio DJ. Return JSON only.
 - action: "answer_weather"
-- say: answer the weather question naturally in English, 12-34 words, based only on the weather context above
+- say: answer the listener's question in natural spoken English, using only the weather context above. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 
@@ -1852,7 +1852,7 @@ ${recentHistory || "无"}
 
 你是 Claudio，AI 情感电台 DJ。请输出 JSON，不要 Markdown，不要额外说明。
 - action: "answer_weather"
-- say: 自然回答天气问题，中文 30-90 字，只能基于上面的天气上下文
+- say: 用中文口语回答听众的问题，只依据上面的天气信息。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 
@@ -1940,53 +1940,6 @@ async function replyOnlyChat(text: string, route: ChatRoute, streamClient?: WebS
   await broadcastDjChatReply(state, { say: replyText, ttsText: replyTtsText, ttsDirection: replyTtsDirection }, atmosphere, streamClient);
 }
 
-function splitTransitionSentences(text: string): string[] {
-  return text
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(/(?<=[.!?。！？])\s+/u)
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function clampEnglishTransitionText(text: string, fallbackText: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return fallbackText;
-  const sentences = splitTransitionSentences(normalized);
-  const picked: string[] = [];
-  for (const sentence of sentences.length ? sentences : [normalized]) {
-    const next = [...picked, sentence].join(" ");
-    const wordCount = next.split(/\s+/).filter(Boolean).length;
-    if (wordCount <= 20 && next.length <= 94) {
-      picked.push(sentence);
-    }
-    if (picked.length > 0 && (wordCount >= 14 || next.length >= 72)) break;
-  }
-  const joined = picked.join(" ").trim();
-  if (joined) return joined;
-
-  const words = normalized.split(/\s+/).filter(Boolean).slice(0, 18);
-  const clipped = words.join(" ").replace(/[,:;，、；：]+$/u, "").trim();
-  return clipped ? `${clipped}.` : fallbackText;
-}
-
-function clampChineseTransitionText(text: string, fallbackText: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized) return fallbackText;
-  if (normalized.length <= 58) return normalized;
-  const firstSentence = normalized.split(/[。！？!?]/u).map((part) => part.trim()).filter(Boolean)[0];
-  const candidate = firstSentence && firstSentence.length <= 58
-    ? firstSentence
-    : normalized.slice(0, 56).replace(/[，、；：,.!?！？。]+$/u, "");
-  return candidate ? `${candidate}。` : fallbackText;
-}
-
-function clampTransitionText(text: string, fallbackText: string, useEnglish: boolean): string {
-  return useEnglish
-    ? clampEnglishTransitionText(text, fallbackText)
-    : clampChineseTransitionText(text, fallbackText);
-}
-
 async function buildTransitionReply(
   previousTrack: db.Track | null,
   nextTrack: db.Track,
@@ -2071,7 +2024,7 @@ Next track: ${nextTrack.name} - ${nextTrack.artist}
 ${recentDjLines ? `A few recent DJ lines you already said:\n${recentDjLines}` : ""}
 
 Return JSON only. No markdown, no extra explanation.
-- say: one natural radio segue, natural English, 8-24 words, like a real DJ handing one song into the next
+- say: connect the tracks in natural spoken English, as a DJ talking to a listener. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
 ${djLanguage.TTS_DIRECTION_FIELD.en}
 
@@ -2079,11 +2032,10 @@ Extra constraints:
 - Do not reintroduce yourself
 - Do not say things like "good evening", "welcome back", or "I'm Claudio" as if the show restarted
 - Do not repeat wording that is too close to the last few lines
-- Say one concrete judgment about the handoff: tempo, vocal, rhythm, melody, texture, or why the next track belongs here
-- Prefer one track-specific detail over abstract mood words
+- Ground the handoff in specific details about the tracks, such as tempo, voice, rhythm, melody, or texture
 - Avoid vague filler such as "atmosphere", "vibe", "room", "light", "temperature", "story", "dream", unless tied to a concrete musical detail
 - If this is a closing slot, give the section a soft landing without sounding final unless the note asks for it
-- The focus is the handoff from the previous track to the next, not a long lyrical monologue
+- Let the thought lead back into the next song
 `
       : `你是 Claudio，一位 AI 情感电台 DJ。
 ${hostStyleGuide}
@@ -2098,7 +2050,7 @@ ${weatherContext ? `当前天气：${weatherContext}` : ""}
 ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
 
 请输出 JSON，不要 markdown，不要额外说明：
-- say: 一句自然的电台串场词，中文 18-45 字，要像 DJ 真的在接歌
+- say: 用中文口语在两首歌之间自然接话，像 DJ 在和听众聊天。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
 ${djLanguage.TTS_DIRECTION_FIELD.zh}
 
@@ -2106,16 +2058,16 @@ ${djLanguage.TTS_DIRECTION_FIELD.zh}
 - 不要重新自我介绍
 - 不要说“下午好/晚上好/欢迎回来/我是 Claudio”这类重新开场的话
 - 不要重复最近几句已经说过的表述
-- 必须说一个具体判断：节奏、人声、旋律、鼓点、吉他、钢琴、音色，或者为什么下一首适合接在这里
+- 从歌曲的具体细节聊起，例如节奏、人声、旋律、鼓点或乐器，让听众知道为什么这两首可以接在一起
 - 优先说歌曲本身的变化，不要只说“氛围、情绪、房间、灯光、温度、故事、梦”这类抽象词
 - 如果用了抽象词，必须同时给出一个具体音乐理由
 - 如果是收束位置，要让这一小段有落点，但不要像整档节目结束，除非备注要求
-- 重点是把上一首自然接到下一首，不要写成长段抒情文
+- 让话自然落回下一首歌
 `;
 
     const reply = await claude.callJsonLLM<TransitionReplyPayload>(prompt, 25_000);
-    replyText = clampTransitionText(reply.say?.trim() || fallbackText, fallbackText, useEnglish);
-    replyTtsText = clampTransitionText(reply.ttsText?.trim() || replyText, replyText, useEnglish);
+    replyText = reply.say?.trim() || fallbackText;
+    replyTtsText = reply.ttsText?.trim() || replyText;
     replyTtsDirection = reply.ttsDirection;
   } catch {
     // keep fallback text

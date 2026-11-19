@@ -902,7 +902,7 @@ describe("Pipeline Engine", () => {
     ]);
   });
 
-  it("should generate English startup copy when Dean preset is active", async () => {
+  it("keeps the full English opening in the program and in TTS", async () => {
     vi.mocked(db.getState).mockResolvedValue({
       ...baseState,
       djProfile: { voice: "Dean", style: "late-night radio", name: "Claudio" },
@@ -913,10 +913,12 @@ describe("Pipeline Engine", () => {
     vi.mocked(tasteProfile.summarizeTasteProfile).mockResolvedValue("");
     vi.mocked(tasteProfile.summarizeRecommendationCandidates).mockReturnValue("");
     vi.mocked(weather.getDefaultWeatherPromptContext).mockResolvedValue("Hong Kong cloudy, 24°C");
+    const opening = "Let's ease into the room with something soft and open. The guitar leaves enough space to settle in, and the rhythm carries us toward a brighter stretch.\n\nWhen the chorus comes around, stay with that change in pace for a moment.";
+    const spokenOpening = opening.replace("stay with that change", "listen for that change");
     vi.mocked(claude.callJsonLLM).mockResolvedValue({
       title: "Midnight Ease",
-      say: "Let's ease into the room with something soft and open.",
-      ttsText: "(softly) Let's ease into the room with something soft and open.",
+      say: opening,
+      ttsText: spokenOpening,
       lineup: [{ title: "Yellow", artist: "Coldplay" }],
       reason: "The weather and timing both lean naturally into a gentler start.",
     });
@@ -935,12 +937,14 @@ describe("Pipeline Engine", () => {
     }));
     vi.mocked(netease.getPlayableUrl).mockResolvedValue("yellow-url");
 
-    await pipeline.runStartupRadioProgram();
+    const result = await pipeline.runStartupRadioProgram();
 
     const prompt = String(vi.mocked(claude.callJsonLLM).mock.calls[0]?.[0] ?? "");
-    expect(prompt).toContain("natural English");
-    expect(prompt).not.toContain("中文 40-120 字");
+    expect(prompt).toContain("natural spoken English");
+    expect(prompt).toContain("end where the thought naturally lands");
     expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.any(String), 120_000);
+    expect(result.djMessage).toBe(opening);
+    expect(tts.speak).toHaveBeenCalledWith(spokenOpening, expect.objectContaining({ scene: "program_intro" }));
   });
 
   it("should fall back to a deterministic startup program when LLM is rate limited", async () => {
