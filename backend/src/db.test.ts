@@ -33,10 +33,12 @@ const loadModule = async () => {
 
 beforeEach(() => {
   cleanup();
+  vi.stubEnv("MIMO_TTS_VOICE", "冰糖");
 });
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllEnvs();
 });
 
 describe("db.ts", () => {
@@ -68,6 +70,16 @@ describe("db.ts", () => {
       },
     });
     expect(state.lastInteraction).toBeTypeOf("number");
+  });
+
+  it("uses the configured default for a new station and keeps a saved voice", async () => {
+    vi.stubEnv("MIMO_TTS_VOICE", "茉莉");
+    const { getState } = await loadModule();
+    expect((await getState()).djProfile.voice).toBe("茉莉");
+
+    vi.stubEnv("MIMO_TTS_VOICE", "Dean");
+    const reloaded = await loadModule();
+    expect((await reloaded.getState()).djProfile.voice).toBe("茉莉");
   });
 
   it("updates state and reads it back", async () => {

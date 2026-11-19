@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { normalizeVoicePreset } from "../types";
+import { PcmSpeechPlayer } from "../pcm-speech";
 import type {
   AppStatus,
   ChatEntry,
@@ -28,9 +30,10 @@ import type {
   WSTrackPayload,
   WSChatPayload,
   WSSeguePayload,
+  WSTtsChunkPayload,
+  WSTtsCompletePayload,
 } from "../types";
 
-const normalizeVoicePreset = (value?: string): TtsPreset => value === "Dean" ? "Dean" : "冰糖";
 const USER_DISPLAY_NAME = "xian";
 const DJ_DISPLAY_NAME = "CLAUDIO";
 const USER_AVATAR_STORAGE_KEY = "claudio-user-avatar";
@@ -42,6 +45,22 @@ const AUDIO_SILENCE_RECOVERY_LEVEL = 0.006;
 const AUDIO_SILENCE_RECOVERY_MIN_VOLUME = 0.05;
 const AUDIO_SILENCE_RECOVERY_MS = 8_000;
 const AUDIO_SILENCE_RECOVERY_COOLDOWN_MS = 12_000;
+
+type SpeechStream = {
+  id: string;
+  text: string;
+  player?: PcmSpeechPlayer;
+  started: boolean;
+};
+
+function resolveSpeechUrl(cachePath?: string): string | undefined {
+  const filename = cachePath?.split(/[/\\]/).pop();
+  return filename ? `/api/audio/tts/${filename}` : undefined;
+}
+
+function chatEntryKey(entry: Pick<ChatEntry, "role" | "text" | "timestamp">): string {
+  return JSON.stringify([entry.timestamp, entry.role, entry.text]);
+}
 
 type PlayableTrackInfo = TrackInfo & {
   id?: string;
@@ -128,6 +147,7 @@ export function useWebSocket() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const nextAudioRef = useRef<HTMLAudioElement>(null);
   const ttsAudioRef = useRef<HTMLAudioElement>(null);
+  const speechStreamRef = useRef<SpeechStream | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const ttsPlayingRef = useRef(false);
   const prefetchedTrackKeyRef = useRef<string | null>(null);
@@ -731,14 +751,46 @@ export function useWebSocket() {
     );
   }, [playMusic, showUtilityNotice]);
 
+  const startDjSpeech = useCallback((text?: string) => {
+    if (text) showSubtitle(text);
+    ttsPlayingRef.current = true;
+    applyActiveMusicVolume(160);
+    setStatus("speaking");
+    setPlayerState((current) => ({ ...current, status: "speaking" }));
+  }, [applyActiveMusicVolume, showSubtitle]);
+
+  const finishDjSpeech = useCallback(() => {
+    ttsPlayingRef.current = false;
+    applyActiveMusicVolume(220);
+    hideSubtitle(true);
+    const active = getActiveMusicAudio();
+    const nextStatus: AppStatus = active && !active.paused && active.currentSrc ? "playing" : "idle";
+    setStatus(nextStatus);
+    setPlayerState((current) => ({ ...current, status: nextStatus }));
+  }, [applyActiveMusicVolume, getActiveMusicAudio, hideSubtitle]);
+
+  const cancelSpeechStream = useCallback(() => {
+    const stream = speechStreamRef.current;
+    speechStreamRef.current = null;
+    stream?.player?.cancel();
+    if (stream?.started) finishDjSpeech();
+  }, [finishDjSpeech]);
+
+  const playSpeechFile = useCallback((url: string, text?: string) => {
+    const audio = ttsAudioRef.current;
+    if (!audio) return;
+    cancelSpeechStream();
+    startDjSpeech(text);
+    audio.src = url;
+    void audio.play().catch(() => {
+      if (!speechStreamRef.current?.started && audio.getAttribute("src") === url) finishDjSpeech();
+    });
+  }, [cancelSpeechStream, finishDjSpeech, startDjSpeech]);
+
   const onReplayAudio = useCallback((messageId: string) => {
     const found = messages.find((m) => m.id === messageId);
     if (found?.audioUrl && ttsAudioRef.current) {
-      ttsPlayingRef.current = true;
-      applyActiveMusicVolume(160);
-      showSubtitle(found.text);
-      ttsAudioRef.current.src = found.audioUrl;
-      ttsAudioRef.current.play().catch(console.error);
+      playSpeechFile(found.audioUrl, found.text);
       const currentTrack = playerStateRef.current.currentTrack;
       if (currentTrack) {
         void fetch("/api/feedback", {
@@ -754,7 +806,7 @@ export function useWebSocket() {
         }).catch(() => {});
       }
     }
-  }, [applyActiveMusicVolume, messages, showSubtitle]);
+  }, [messages, playSpeechFile]);
 
   const sendTrigger = useCallback((mode: TriggerMode) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -775,7 +827,16 @@ export function useWebSocket() {
 
   const sendMessage = useCallback((text: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "chat", data: { text } }));
+      let streamTts = false;
+      try {
+        const context = audioContextRef.current ?? new AudioContext();
+        audioContextRef.current = context;
+        streamTts = context.state !== "closed";
+        if (streamTts && context.state !== "running") void context.resume().catch(() => {});
+      } catch {
+        // The saved audio path also works in browsers without Web Audio.
+      }
+      wsRef.current.send(JSON.stringify({ type: "chat", data: { text, streamTts } }));
     }
   }, []);
 
@@ -1413,39 +1474,16 @@ export function useWebSocket() {
   useEffect(() => {
     const t = ttsAudioRef.current;
     if (!t) return;
-    const onPlay = () => {
-      ttsPlayingRef.current = true;
-      applyActiveMusicVolume(160);
+    const onFinish = () => {
+      if (!speechStreamRef.current?.started) finishDjSpeech();
     };
-    const onEnd = () => {
-      ttsPlayingRef.current = false;
-      applyActiveMusicVolume(220);
-      hideSubtitle(true);
-      const active = getActiveMusicAudio();
-      const isMusicPlaying = Boolean(active && !active.paused && active.currentSrc);
-      const nextStatus: AppStatus = isMusicPlaying ? "playing" : "idle";
-      setStatus(nextStatus);
-      setPlayerState((p) => ({ ...p, status: nextStatus }));
-    };
-    const onError = () => {
-      ttsPlayingRef.current = false;
-      applyActiveMusicVolume(220);
-      hideSubtitle(true);
-      const active = getActiveMusicAudio();
-      if (active && !active.paused && active.currentSrc) {
-        setStatus("playing");
-        setPlayerState((p) => ({ ...p, status: "playing" }));
-      }
-    };
-    t.addEventListener("play", onPlay);
-    t.addEventListener("ended", onEnd);
-    t.addEventListener("error", onError);
+    t.addEventListener("ended", onFinish);
+    t.addEventListener("error", onFinish);
     return () => {
-      t.removeEventListener("play", onPlay);
-      t.removeEventListener("ended", onEnd);
-      t.removeEventListener("error", onError);
+      t.removeEventListener("ended", onFinish);
+      t.removeEventListener("error", onFinish);
     };
-  }, [applyActiveMusicVolume, getActiveMusicAudio, hideSubtitle]);
+  }, [finishDjSpeech]);
 
   useEffect(() => {
     let disposed = false;
@@ -1486,18 +1524,21 @@ export function useWebSocket() {
               setDjProfile(d.djProfile);
             }
             if (Array.isArray(d.chatHistory)) {
-              const historyMessages = d.chatHistory
-                .slice()
-                .sort((a, b) => a.timestamp - b.timestamp)
-                .map((entry, index) => ({
+              const history = d.chatHistory.slice().sort((a, b) => a.timestamp - b.timestamp);
+              setMessages((current) => {
+                const visible = new Map(current.map((message) => [chatEntryKey(message), message]));
+                const merged = history.map((entry, index) => visible.get(chatEntryKey(entry)) ?? {
                   id: `history_${entry.timestamp}_${index}`,
                   role: entry.role,
                   text: entry.text,
                   time: formatClockTime(entry.timestamp),
                   timestamp: entry.timestamp,
                   sender: entry.role === "dj" ? DJ_DISPLAY_NAME : USER_DISPLAY_NAME,
-                }));
-              setMessages(historyMessages);
+                });
+                const activeStream = current.find((message) => message.id === speechStreamRef.current?.id);
+                if (activeStream && !merged.includes(activeStream)) merged.push(activeStream);
+                return merged;
+              });
             }
             if (Array.isArray(d.radioQueue)) {
               const playlist = d.radioQueue
@@ -1559,38 +1600,61 @@ export function useWebSocket() {
           case "dj_message": {
             const d = msg.data as WSDJMessagePayload;
             const timestamp = d.timestamp ?? Date.now();
-            const fn = d.ttsAudioPath?.split(/[/\\]/).pop() ?? "";
-            const audioUrl = fn ? `/api/audio/tts/${fn}` : undefined;
-            setMessages((p) => [...p, {
-              id: crypto.randomUUID(),
+            const audioUrl = resolveSpeechUrl(d.ttsAudioPath);
+            const entry: ChatEntry = {
+              id: d.ttsStreamId ?? crypto.randomUUID(),
               role: "dj",
               text: d.text,
               time: formatClockTime(timestamp),
               timestamp,
               sender: DJ_DISPLAY_NAME,
               audioUrl,
-            }]);
-            if (d.ttsAudioPath) {
-              showSubtitle(d.text);
-              ttsPlayingRef.current = true;
-              applyActiveMusicVolume(160);
-              setStatus("speaking");
-              setPlayerState((p) => ({ ...p, status: "speaking" }));
-              if (ttsAudioRef.current) {
-                ttsAudioRef.current.src = audioUrl ?? "";
-                ttsAudioRef.current.play().catch(() => {
-                  ttsPlayingRef.current = false;
-                  applyActiveMusicVolume(220);
-                  hideSubtitle(true);
-                  const active = getActiveMusicAudio();
-                  if (active && !active.paused && active.currentSrc) {
-                    setStatus("playing");
-                    setPlayerState((p) => ({ ...p, status: "playing" }));
-                  }
+            };
+            const entryKey = chatEntryKey(entry);
+            setMessages((current) => [...current.filter((message) => chatEntryKey(message) !== entryKey), entry]);
+            if (d.ttsStreamId) {
+              cancelSpeechStream();
+              const stream: SpeechStream = { id: d.ttsStreamId, text: d.text, started: false };
+              const context = audioContextRef.current;
+              if (context) {
+                stream.player = new PcmSpeechPlayer(context, () => {
+                  if (speechStreamRef.current !== stream) return;
+                  speechStreamRef.current = null;
+                  if (stream.started) finishDjSpeech();
                 });
               }
-            } else {
+              speechStreamRef.current = stream;
+            } else if (audioUrl) {
+              playSpeechFile(audioUrl, d.text);
+            } else if (!speechStreamRef.current?.started) {
               hideSubtitle(false);
+            }
+            break;
+          }
+          case "tts_chunk": {
+            const d = msg.data as WSTtsChunkPayload;
+            const stream = speechStreamRef.current;
+            if (!stream || stream.id !== d.streamId || !stream.player?.append(d.pcm)) break;
+            if (!stream.started) {
+              ttsAudioRef.current?.pause();
+              stream.started = true;
+              startDjSpeech(stream.text);
+            }
+            break;
+          }
+          case "tts_complete": {
+            const d = msg.data as WSTtsCompletePayload;
+            const audioUrl = resolveSpeechUrl(d.ttsAudioPath);
+            if (audioUrl) {
+              setMessages((p) => p.map((message) => message.id === d.streamId ? { ...message, audioUrl } : message));
+            }
+            const stream = speechStreamRef.current;
+            if (!stream || stream.id !== d.streamId) break;
+            if (stream.started) {
+              stream.player?.finish();
+            } else {
+              cancelSpeechStream();
+              if (audioUrl) playSpeechFile(audioUrl, stream.text);
             }
             break;
           }
@@ -1614,12 +1678,7 @@ export function useWebSocket() {
           }
           case "segue": {
             const d = msg.data as WSSeguePayload;
-            if (d.audioPath && ttsAudioRef.current) {
-              ttsPlayingRef.current = true;
-              applyActiveMusicVolume(160);
-              ttsAudioRef.current.src = d.audioPath;
-              ttsAudioRef.current.play().catch(console.error);
-            }
+            if (d.audioPath) playSpeechFile(d.audioPath);
             break;
           }
           case "error":
@@ -1662,6 +1721,7 @@ export function useWebSocket() {
           return;
         }
 
+        cancelSpeechStream();
         wsRef.current = null;
         setIsConnected(false);
         setReconnecting(true);
@@ -1679,6 +1739,7 @@ export function useWebSocket() {
 
     return () => {
       disposed = true;
+      cancelSpeechStream();
       clearPingTimer();
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
@@ -1688,13 +1749,17 @@ export function useWebSocket() {
       ws?.close();
     };
   }, [
-    applyActiveMusicVolume,
+    cancelSpeechStream,
     fadeAudioVolume,
+    finishDjSpeech,
     getActiveMusicAudio,
     getEffectiveMusicVolume,
+    hideSubtitle,
+    playSpeechFile,
     refreshLibraryData,
     rememberTrack,
     resolveAndPlayTrack,
+    startDjSpeech,
     toPlayableUrl,
   ]);
 

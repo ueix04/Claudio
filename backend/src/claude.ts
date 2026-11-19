@@ -1,4 +1,4 @@
-import { normalizeTtsPresetName } from "./tts.js";
+import { resolveDjCopyLanguage, TTS_DIRECTION_FIELD } from "./dj-language.js";
 
 const DEFAULT_TIMEOUT = 120_000;
 const DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1";
@@ -275,6 +275,7 @@ async function callWithLlmFallback<T>(
 export interface LLMResponse {
   say: string;
   ttsText?: string;
+  ttsDirection?: string;
   play: Array<{ id?: number; title: string; artist?: string; mood?: string; reason?: string }>;
   reason: string;
   segue?: string;
@@ -283,6 +284,7 @@ export interface LLMResponse {
 export interface TaggedReplyResponse {
   say: string;
   ttsText?: string;
+  ttsDirection?: string;
 }
 
 export interface ContextPromptParams {
@@ -353,7 +355,7 @@ export async function callTextLLM(
 
 export function buildContextPrompt(params: ContextPromptParams): string {
   const { mode, timeOfDay, recentHistory, userFeedbackContext, playlistContext, candidateContext, weatherContext, djVoice } = params;
-  const useEnglish = normalizeTtsPresetName(djVoice) === "Dean";
+  const useEnglish = resolveDjCopyLanguage({ voice: djVoice }) === "en";
 
   const modeDescriptions = useEnglish
     ? {
@@ -383,6 +385,7 @@ ${candidateContext ? `\n\n${candidateContext}` : ""}
 Reply in JSON. Field requirements:
 - say: the line shown in the UI, natural English, 12-32 words, warm and conversational, without inline audio tags
 - ttsText: same meaning as say. Keep normal conversational pace; do not add slow, deep, whisper, or theatrical stage directions
+${TTS_DIRECTION_FIELD.en}
 - play: the song list you recommend. Each item includes title (required), artist (optional), id (required if it comes from the online candidate pool), mood (optional), reason (optional)
   - If the listener has imported playlists, prefer music close to those artists, styles, or eras
   - If an online candidate pool is provided, prefer choosing from it and preserve id, title, and artist exactly as given
@@ -406,6 +409,7 @@ ${candidateContext ? `\n\n${candidateContext}` : ""}
 请以 JSON 格式回复，字段说明：
 - say: 前端显示给用户的话（中文，30-80 字，温柔治愈的风格，不要包含任何音频标签）
 - ttsText: 给 TTS 朗读的文本，内容应与 say 语义一致。保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${TTS_DIRECTION_FIELD.zh}
 - play: 你推荐的歌曲列表，每首包含 title（必填）、artist（选填）、id（若来自在线候选池则必填）、mood（选填）、reason（选填）
   - 如果用户有导入歌单，优先推荐与歌单中歌手/风格/年代相近的音乐
   - 如果提供了“在线候选池”，优先从候选池里选；此时必须原样返回候选曲目的 id、title、artist，不要改写

@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import { Readable } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
@@ -26,11 +27,13 @@ interface ChatReplyPayload {
   action?: "reply_only" | "answer_weather";
   say: string;
   ttsText?: string;
+  ttsDirection?: string;
 }
 
 interface TransitionReplyPayload {
   say: string;
   ttsText?: string;
+  ttsDirection?: string;
 }
 
 interface PreparedQueueTransition {
@@ -1121,10 +1124,10 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(frontendDistDir, "index.html"));
 });
 
-export function broadcast(data: object) {
+export function broadcast(data: object, except?: WebSocket) {
   const message = JSON.stringify(data);
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
+    if (client !== except && client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
   });
@@ -1166,14 +1169,15 @@ function buildPreparedQueueTransitionKey(state: db.AppState, step = 1): string |
     return null;
   }
 
-  return [
+  return JSON.stringify([
     step,
     context.currentIndex,
     context.currentTrack.id,
     context.nextIndex,
     context.nextTrack.id,
     state.currentProgram?.generatedAt ?? 0,
-  ].join(":");
+    state.djProfile,
+  ]);
 }
 
 function resolveSpeechSlotForTransition(
@@ -1664,32 +1668,50 @@ async function broadcastPipelineResult(result: pipeline.PipelineResult) {
   broadcast({ type: "status", data: "playing" });
 }
 
-async function speakChatText(
+async function broadcastDjChatReply(
   state: db.AppState,
-  text: string,
+  reply: ChatReplyPayload,
   atmosphere?: string,
-): Promise<string | undefined> {
+  streamClient?: WebSocket,
+): Promise<void> {
+  const timestamp = Date.now();
+  const streamId = streamClient ? randomUUID() : undefined;
+  let streamed = false;
+  let ttsAudioPath: string | undefined;
+  await db.addChatMessage({ role: "dj", text: reply.say, timestamp });
+
+  const onPcmChunk = streamClient && streamId ? (pcm: string) => {
+    if (streamClient.readyState !== WebSocket.OPEN) return;
+    if (!streamed) {
+      streamClient.send(JSON.stringify({
+        type: "dj_message", data: { text: reply.say, timestamp, ttsStreamId: streamId },
+      }));
+      streamed = true;
+    }
+    streamClient.send(JSON.stringify({ type: "tts_chunk", data: { streamId, pcm } }));
+  } : undefined;
+
   try {
-    const ttsResult = await tts.speak(text, {
+    const result = await tts.speak(reply.ttsText ?? reply.say, {
       profile: state.djProfile,
       scene: "chat_reply",
       atmosphere,
+      ...(reply.ttsDirection ? { direction: reply.ttsDirection } : {}),
+      ...(onPcmChunk ? { onPcmChunk } : {}),
     });
-    return ttsResult.cachePath;
+    ttsAudioPath = result.cachePath;
   } catch (error) {
     console.error("Chat TTS failed:", error);
-    return undefined;
   }
-}
 
-async function broadcastDjChatReply(replyText: string, ttsAudioPath?: string): Promise<void> {
+  if (streamed && streamClient?.readyState === WebSocket.OPEN) {
+    streamClient.send(JSON.stringify({ type: "tts_complete", data: { streamId, ttsAudioPath } }));
+  }
+  const except = streamed ? streamClient : undefined;
   if (ttsAudioPath) {
-    broadcast({ type: "status", data: "speaking" });
+    broadcast({ type: "status", data: "speaking" }, except);
   }
-
-  const djTimestamp = Date.now();
-  broadcast({ type: "dj_message", data: { text: replyText, ttsAudioPath, timestamp: djTimestamp } });
-  await db.addChatMessage({ role: "dj", text: replyText, timestamp: djTimestamp });
+  broadcast({ type: "dj_message", data: { text: reply.say, ttsAudioPath, timestamp } }, except);
 }
 
 function buildCurrentTrackReply(state: db.AppState): string {
@@ -1765,6 +1787,7 @@ Return JSON only. Required fields:
 - action: "reply_only"
 - say: the line shown in the UI, natural English, 10-28 words, warm and conversational, no inline audio tags
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
+${djLanguage.TTS_DIRECTION_FIELD.en}
 
 If the intent is recommendation_reason, explain the current track using only the current track and current program notes. Do not invent private listener data.
 If the intent is emotion_expression, acknowledge the feeling briefly and keep the show moving gently.
@@ -1786,6 +1809,7 @@ ${recentHistory || "无"}
 - action: "reply_only"
 - say: 前端显示给用户的话，中文 30-80 字，温柔自然，不要包含音频标签
 - ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 
 如果 intent 是 recommendation_reason，只能基于当前歌曲和当前节目说明推荐原因，不要编造用户隐私或不存在的资料。
 如果 intent 是 emotion_expression，先轻轻承接情绪，再自然把后面的音乐接住。
@@ -1812,6 +1836,7 @@ You are Claudio, an AI emotional radio DJ. Return JSON only.
 - action: "answer_weather"
 - say: answer the weather question naturally in English, 12-34 words, based only on the weather context above
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
+${djLanguage.TTS_DIRECTION_FIELD.en}
 
 If the weather context is unavailable, say you cannot get the latest weather right now.
 `;
@@ -1829,12 +1854,13 @@ ${recentHistory || "无"}
 - action: "answer_weather"
 - say: 自然回答天气问题，中文 30-90 字，只能基于上面的天气上下文
 - ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 
 如果天气上下文不可用，就说明现在拿不到最新天气，不要编造。
 `;
 }
 
-async function answerWeatherChat(text: string): Promise<void> {
+async function answerWeatherChat(text: string, streamClient?: WebSocket): Promise<void> {
   const state = await db.getState();
   const useEnglish = djLanguage.usesEnglishDjCopy(state.djProfile);
   let weatherContext: string | undefined;
@@ -1853,6 +1879,7 @@ async function answerWeatherChat(text: string): Promise<void> {
     );
   let replyText = fallbackText;
   let replyTtsText = fallbackText;
+  let replyTtsDirection: string | undefined;
 
   try {
     const reply = await claude.callJsonLLM<ChatReplyPayload>(
@@ -1861,34 +1888,36 @@ async function answerWeatherChat(text: string): Promise<void> {
     );
     replyText = reply.say?.trim() || replyText;
     replyTtsText = reply.ttsText?.trim() || replyText;
+    replyTtsDirection = reply.ttsDirection;
   } catch {
     // keep fallback text
   }
 
-  const ttsAudioPath = await speakChatText(
+  await broadcastDjChatReply(
     state,
-    replyTtsText,
+    { say: replyText, ttsText: replyTtsText, ttsDirection: replyTtsDirection },
     [weatherContext, text].filter(Boolean).join("；"),
+    streamClient,
   );
-  await broadcastDjChatReply(replyText, ttsAudioPath);
 }
 
-async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
+async function replyOnlyChat(text: string, route: ChatRoute, streamClient?: WebSocket): Promise<void> {
   const state = await db.getState();
 
   if (route.intent === "current_track_query") {
     const replyText = buildCurrentTrackReply(state);
-    const ttsAudioPath = await speakChatText(
+    await broadcastDjChatReply(
       state,
-      replyText,
+      { say: replyText },
       [state.currentTrack?.name, state.currentTrack?.artist].filter(Boolean).join(" - "),
+      streamClient,
     );
-    await broadcastDjChatReply(replyText, ttsAudioPath);
     return;
   }
 
   let replyText = buildReplyFallback(state, route);
   let replyTtsText = replyText;
+  let replyTtsDirection: string | undefined;
 
   try {
     const reply = await claude.callJsonLLM<ChatReplyPayload>(
@@ -1897,6 +1926,7 @@ async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
     );
     replyText = reply.say?.trim() || replyText;
     replyTtsText = reply.ttsText?.trim() || replyText;
+    replyTtsDirection = reply.ttsDirection;
   } catch {
     // keep fallback text
   }
@@ -1907,8 +1937,7 @@ async function replyOnlyChat(text: string, route: ChatRoute): Promise<void> {
     state.currentProgram?.summary,
     text,
   ].filter(Boolean).join("；");
-  const ttsAudioPath = await speakChatText(state, replyTtsText, atmosphere);
-  await broadcastDjChatReply(replyText, ttsAudioPath);
+  await broadcastDjChatReply(state, { say: replyText, ttsText: replyTtsText, ttsDirection: replyTtsDirection }, atmosphere, streamClient);
 }
 
 function splitTransitionSentences(text: string): string[] {
@@ -2026,6 +2055,7 @@ async function buildTransitionReply(
   let replyText = fallbackText;
   let replyTtsText = fallbackText;
 
+  let replyTtsDirection: string | undefined;
   try {
     const prompt = useEnglish
       ? `You are Claudio, an AI emotional radio DJ.
@@ -2043,6 +2073,7 @@ ${recentDjLines ? `A few recent DJ lines you already said:\n${recentDjLines}` : 
 Return JSON only. No markdown, no extra explanation.
 - say: one natural radio segue, natural English, 8-24 words, like a real DJ handing one song into the next
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+${djLanguage.TTS_DIRECTION_FIELD.en}
 
 Extra constraints:
 - Do not reintroduce yourself
@@ -2069,6 +2100,7 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
 请输出 JSON，不要 markdown，不要额外说明：
 - say: 一句自然的电台串场词，中文 18-45 字，要像 DJ 真的在接歌
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 
 额外限制：
 - 不要重新自我介绍
@@ -2084,6 +2116,7 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
     const reply = await claude.callJsonLLM<TransitionReplyPayload>(prompt, 25_000);
     replyText = clampTransitionText(reply.say?.trim() || fallbackText, fallbackText, useEnglish);
     replyTtsText = clampTransitionText(reply.ttsText?.trim() || replyText, replyText, useEnglish);
+    replyTtsDirection = reply.ttsDirection;
   } catch {
     // keep fallback text
   }
@@ -2093,6 +2126,7 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
       profile: state.djProfile,
       scene: "segue",
       atmosphere: [currentProgram?.title, currentProgram?.summary, weatherContext].filter(Boolean).join("；"),
+      ...(replyTtsDirection ? { direction: replyTtsDirection } : {}),
     });
     return {
       text: replyText,
@@ -2395,8 +2429,9 @@ wss.on("connection", async (ws) => {
           chatHistory: routeSourceState.chatHistory,
         };
         const chatRoute = await routeChatIntentWithSemanticFallback(text, routeContext);
+        const streamClient = payload.data?.streamTts === true ? ws : undefined;
         if (chatRoute.action === "answer_weather") {
-          await answerWeatherChat(text);
+          await answerWeatherChat(text, streamClient);
           return;
         }
 
@@ -2467,7 +2502,7 @@ wss.on("connection", async (ws) => {
           }
         }
 
-        await replyOnlyChat(text, chatRoute);
+        await replyOnlyChat(text, chatRoute, streamClient);
       }
     } catch (e) {}
   });

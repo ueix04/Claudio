@@ -965,7 +965,7 @@ body {
   color: var(--claudio-accent);
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  cursor: pointer;
   transition: color 0.2s ease, opacity 0.2s ease;
 }
 
@@ -973,11 +973,9 @@ body {
   color: var(--claudio-text-strong);
 }
 
-.chat-voice-switch:disabled {
+.chat-voice-switch:disabled,
+.mobile-voice-preset:disabled {
   cursor: wait;
-}
-
-.chat-voice-switch-pending {
   opacity: 0.6;
 }
 
@@ -1971,15 +1969,16 @@ body {
 
 .mobile-voice-preset {
   min-height: 38px;
-  max-width: 62px;
+  max-width: 76px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--claudio-border) 84%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--claudio-surface) 76%, transparent);
   color: var(--claudio-accent);
-  padding: 0 10px;
-  font-size: 10px;
+  padding: 0 8px;
+  font-size: 11px;
   font-weight: 900;
+  cursor: pointer;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

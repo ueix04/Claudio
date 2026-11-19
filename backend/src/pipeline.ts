@@ -164,6 +164,7 @@ interface StationProgramResponse {
   speechPlan?: radioSession.RadioSpeechSlotInput[];
   say: string;
   ttsText?: string;
+  ttsDirection?: string;
   lineup: ProgramRequestedTrack[];
   reason: string;
 }
@@ -178,6 +179,7 @@ interface DiscoveryScoutDirection {
 interface DiscoveryScoutResponse {
   say?: string;
   ttsText?: string;
+  ttsDirection?: string;
   directions?: DiscoveryScoutDirection[];
   reason?: string;
 }
@@ -356,6 +358,7 @@ Rules:
 Return JSON only:
 - say: one short DJ line, natural English, 10-26 words, explaining that you will test a nearby direction
 - ttsText: same meaning, normal conversational pace, no slow/deep/whisper/theatrical tags
+${djLanguage.TTS_DIRECTION_FIELD.en}
 - directions: array of objects with query, direction, reason, risk ("adjacent" or "small_adventure")
 - reason: short explanation of the exploration strategy`;
   }
@@ -385,6 +388,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 只输出 JSON：
 - say: 一句很短的 DJ 说明，中文 20-60 字，说明会试一个相邻方向
 - ttsText: 语义相同，正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 - directions: 数组，每项包含 query、direction、reason、risk（"adjacent" 或 "small_adventure"）
 - reason: 简短说明这次探索策略`;
 }
@@ -800,6 +804,7 @@ Return JSON only. Required fields:
 - plannedMinutes: target duration, an integer from 20 to 40
 - say: the opening line for the UI, natural English, 20-65 words
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+${djLanguage.TTS_DIRECTION_FIELD.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
 - reason: why this set is arranged this way, natural English, 14-30 words
@@ -834,6 +839,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - plannedMinutes: 目标时长，20 到 40 之间的整数
 - say: 开场对白，给前端显示，中文 40-120 字
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
 - reason: 说明这档节目为什么这么编排，中文 30-80 字
@@ -881,6 +887,7 @@ Return JSON only. Required fields:
 - plannedMinutes: target duration, an integer from 20 to 40
 - say: the line shown in the UI, natural English, 16-40 words
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+${djLanguage.TTS_DIRECTION_FIELD.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
 - reason: why this set is arranged this way, natural English, 14-30 words
@@ -915,6 +922,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - plannedMinutes: 目标时长，20 到 40 之间的整数
 - say: 前端显示文案，中文 35-90 字
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
 - reason: 说明这档节目为什么这么编排，中文 30-80 字
@@ -961,6 +969,7 @@ Return JSON only. Required fields:
 - title: optional show title
 - say: the DJ's reply to the listener, natural English, 16-44 words
 - ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
+${djLanguage.TTS_DIRECTION_FIELD.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - reason: why this switch works, natural English, 12-28 words
 `;
@@ -993,6 +1002,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - title: 节目标题，可选
 - say: DJ 对用户的回应，中文 35-100 字
 - ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
+${djLanguage.TTS_DIRECTION_FIELD.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - reason: 说明这次为什么这么换歌，中文 30-80 字
 `;
@@ -1155,12 +1165,14 @@ async function speakDjText(
   profile: db.DjProfile,
   scene: tts.TTSSpeakOptions["scene"],
   atmosphere?: string,
+  direction?: string,
 ): Promise<string | undefined> {
   try {
     const ttsResult = await tts.speak(text, {
       profile,
       scene,
       atmosphere,
+      ...(direction ? { direction } : {}),
     });
     return ttsResult.cachePath;
   } catch (error) {
@@ -1270,6 +1282,7 @@ export async function runStartupRadioProgram(
         context.state.djProfile,
         "program_intro",
         [context.weatherContext, response.reason].filter(Boolean).join("；"),
+        response.ttsDirection,
       ),
       resolvePlayableTracksFromRequests(
         response.lineup ?? [],
@@ -1341,6 +1354,7 @@ export async function runChatSwitchProgram(
         context.state.djProfile,
         "music_recommendation",
         [userText, response.reason].filter(Boolean).join("；"),
+        response.ttsDirection,
       ),
       resolvePlayableTracksFromRequests(
         response.lineup ?? [],
@@ -1420,6 +1434,7 @@ async function runManualRadioProgram(
         context.state.djProfile,
         "music_recommendation",
         [context.weatherContext, response.reason].filter(Boolean).join("；"),
+        response.ttsDirection,
       ),
       resolvePlayableTracksFromRequests(
         response.lineup ?? [],
@@ -1490,6 +1505,7 @@ export async function runPipeline(
           context.state.djProfile,
           "music_recommendation",
           reason,
+          scoutResponse.ttsDirection,
         ),
         resolvePlayableTracksFromRequests(
           buildStableSeedRequests(context, stableSeedCount),

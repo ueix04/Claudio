@@ -6,7 +6,18 @@ export type LayoutMode = "split" | "player-fullscreen" | "chat-fullscreen";
 
 export type ThemeMode = "dark" | "light";
 export type AudioEffectMode = "wave" | "border-pulse";
-export type TtsPreset = "冰糖" | "Dean";
+export const TTS_PRESET_GROUPS = {
+  中文: ["冰糖", "茉莉", "苏打", "白桦"],
+  English: ["Mia", "Chloe", "Milo", "Dean"],
+} as const;
+
+const ttsPresets = Object.values(TTS_PRESET_GROUPS).flat();
+export type TtsPreset = typeof ttsPresets[number];
+
+export function normalizeVoicePreset(value?: string): TtsPreset {
+  const name = typeof value === "string" ? value.trim() : "";
+  return ttsPresets.find((preset) => preset === name) ?? "冰糖";
+}
 
 export type DjProfile = {
   voice: string;
@@ -15,7 +26,7 @@ export type DjProfile = {
 };
 
 export type WSMessage = {
-  type: "state" | "status" | "dj_message" | "track" | "error" | "chat" | "segue";
+  type: "state" | "status" | "dj_message" | "track" | "error" | "chat" | "segue" | "tts_chunk" | "tts_complete";
   data: unknown;
 };
 
@@ -32,8 +43,12 @@ export type WSChatPayload = {
 export type WSDJMessagePayload = {
   text: string;
   ttsAudioPath?: string;
+  ttsStreamId?: string;
   timestamp?: number;
 };
+
+export type WSTtsChunkPayload = { streamId: string; pcm: string };
+export type WSTtsCompletePayload = { streamId: string; ttsAudioPath?: string };
 
 export type WSTrackPayload = {
   url: string;

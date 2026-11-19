@@ -14,6 +14,7 @@ import type {
 } from "../types";
 import { useLayout } from "./LayoutManager";
 import { PixelClock } from "./PixelClock";
+import { VoicePresetSelect } from "./VoicePresetSelect";
 
 const USER_DISPLAY_NAME = "xian";
 
@@ -185,11 +186,6 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
     onVoiceAction();
     setVoiceHint("Voice input coming soon");
     window.setTimeout(() => setVoiceHint(null), 2200);
-  };
-
-  const handleVoicePresetToggle = () => {
-    if (isUpdatingVoicePreset) return;
-    onVoicePresetChange(voicePreset === "冰糖" ? "Dean" : "冰糖");
   };
 
   const renderAvatar = (className: string, label = USER_DISPLAY_NAME) => (
@@ -558,14 +554,12 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
       )}
 
       <footer className="mobile-input-bar">
-        <button
-          type="button"
+        <VoicePresetSelect
           className="mobile-voice-preset"
-          onClick={handleVoicePresetToggle}
+          value={voicePreset}
           disabled={isUpdatingVoicePreset}
-        >
-          {voicePreset}
-        </button>
+          onChange={onVoicePresetChange}
+        />
         <div className="mobile-input-wrap">
           <input
             type="text"

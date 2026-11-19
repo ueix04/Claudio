@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { DjProfile } from "./db.js";
-import "./runtime.js";
 import { audioDir, repoRoot } from "./runtime.js";
+import { getTtsPresetName, normalizeTtsPresetName, resolveDjCopyLanguage } from "./dj-language.js";
 import { fetchWithProxyFallback } from "./network.js";
 
 export interface TTSResult {
@@ -17,10 +17,9 @@ export interface TTSSpeakOptions {
   profile?: Partial<DjProfile>;
   scene?: "program_intro" | "music_recommendation" | "segue" | "chat_reply";
   atmosphere?: string;
+  direction?: string;
+  onPcmChunk?: (base64: string) => void;
 }
-
-export const TTS_PRESET_NAMES = ["冰糖", "Dean"] as const;
-export type TtsPresetName = typeof TTS_PRESET_NAMES[number];
 
 type MimoTtsModel =
   | "mimo-v2.5-tts"
@@ -33,31 +32,51 @@ interface ResolvedMimoRequest {
   audio: {
     format: "wav";
     voice?: string;
+    optimize_text_preview?: false;
   };
   cacheVariant: string;
 }
 
 const DEFAULT_MIMO_API_BASE = "https://api.xiaomimimo.com/v1";
 const DEFAULT_MIMO_MODEL: MimoTtsModel = "mimo-v2.5-tts";
-const DEFAULT_MIMO_VOICE: TtsPresetName = "冰糖";
+const DEFAULT_MIMO_TIMEOUT_MS = 10_000;
+const MAX_MIMO_SAMPLE_BASE64_BYTES = 10_000_000;
+const PCM_SAMPLE_RATE = 24_000;
+const PCM_BYTES_PER_SAMPLE = 2;
 const AUDIO_CACHE_DIR = audioDir;
 
-const TTS_PRESET_CONFIG: Record<TtsPresetName, { voice: string; character: string }> = {
-  冰糖: {
-    voice: "冰糖",
-    character:
-      "内置音色“冰糖”。她不是温吞的抒情女声，而是明亮、轻盈、灵动、带一点少女感与真实呼吸感的陪伴型主播。她可以活泼、俏皮、带笑意，但不能幼稚做作，也不能一直悬浮发甜。表达要接近日常聊天速度，不要故意拖长、压低或装深沉；安静氛围里只需要收住亮度，保留灵气，但不抢戏。",
+const DELIVERY = {
+  zh: {
+    base: "像电台 DJ 对一位听众说话。用清楚放松的声音和正常聊天语速，按标点短暂停连，句尾自然收住。中文和外文歌名都按各自语言自然读。",
+    design: "二十多岁的普通话女电台主播。声线偏中音，明亮温和，吐字清楚，发声松弛。",
+    scene: {
+      program_intro: "开场有一点欢迎的笑意，第一句轻轻带起，接着顺势介绍节目。",
+      music_recommendation: "像给朋友递一首歌，轻轻点出推荐的重点。",
+      segue: "接歌短而顺，提到下一首后利落收尾。",
+      chat_reply: "像听完对方的话马上接一句，语气亲切，有来有回。",
+    },
+    name: "主播名",
+    style: "节目风格",
+    atmosphere: "节目氛围",
+    voiceNote: "声音气质",
+    direction: "本句导演提示",
   },
-  Dean: {
-    voice: "Dean",
-    character:
-      "Built-in voice preset \"Dean\". His baseline tone is relaxed, close-mic, warm, and conversational, like a real host speaking directly to one listener. Keep a normal speaking pace and natural word flow. He should never sound preachy, artificially deep, theatrical, or drawn out. When the mood is quiet, stay calm and simple instead of lowering the voice for effect.",
+  en: {
+    base: "Speak like a radio DJ talking to one listener. Use a clear, relaxed voice at conversational speed. Pause briefly at punctuation and let the ends of sentences settle naturally. Pronounce song titles naturally in their own language.",
+    design: "A male radio host in his thirties with a warm mid-range, clear diction, and a relaxed delivery.",
+    scene: {
+      program_intro: "Open with a small welcoming smile, then ease into the show.",
+      music_recommendation: "Offer the song as you would to a friend, with a little emphasis on what to listen for.",
+      segue: "Connect the songs in one smooth breath and finish promptly after naming the next track.",
+      chat_reply: "Answer as if you just heard the listener speak. Sound warm and spontaneous.",
+    },
+    name: "Host name",
+    style: "Show style",
+    atmosphere: "Atmosphere",
+    voiceNote: "Voice note",
+    direction: "Direction for this line",
   },
 };
-
-function shouldUseEnglishPrompt(preset: TtsPresetName): boolean {
-  return preset === "Dean";
-}
 
 function getMimoApiKey(): string {
   return (process.env.MIMO_API_KEY || "").trim();
@@ -67,16 +86,11 @@ function getMimoApiBase(): string {
   return (process.env.MIMO_API_BASE || DEFAULT_MIMO_API_BASE).trim().replace(/\/+$/, "");
 }
 
-export function normalizeTtsPresetName(raw?: string): TtsPresetName {
-  const value = (raw || "").trim();
-  if (value === "Dean") return "Dean";
-  if (value === "冰糖") return "冰糖";
-  if ((process.env.MIMO_TTS_VOICE || "").trim() === "Dean") return "Dean";
-  return DEFAULT_MIMO_VOICE;
-}
-
-function getMimoVoiceSamplePath(): string {
-  return (process.env.MIMO_TTS_VOICE_SAMPLE_PATH || "").trim();
+function getMimoTimeoutMs(): number {
+  const timeout = Number(process.env.MIMO_TTS_TIMEOUT_MS);
+  return Number.isInteger(timeout) && timeout > 0 && timeout <= 2_147_483_647
+    ? timeout
+    : DEFAULT_MIMO_TIMEOUT_MS;
 }
 
 function parseMimoModel(raw: string | undefined): MimoTtsModel {
@@ -114,251 +128,33 @@ function getMimeTypeForSample(filePath: string): string {
   }
 }
 
-function composeGeneralStylePrompt(profile?: Partial<DjProfile>): string {
-  return composeGeneralStylePromptWithContext("", { profile });
-}
-
-function composeVoiceDesignPrompt(profile?: Partial<DjProfile>): string {
-  const preset = normalizeTtsPresetName(profile?.voice);
-  const presetConfig = TTS_PRESET_CONFIG[preset];
-  const useEnglish = shouldUseEnglishPrompt(preset);
-  const parts = [
-    useEnglish ? `Reference preset voice: ${presetConfig.voice}` : `参考预设音色：${presetConfig.voice}`,
-    useEnglish ? `Character brief: ${presetConfig.character}` : `角色设定：${presetConfig.character}`,
-    profile?.style
-      ? useEnglish ? `Performance style: ${profile.style}` : `表达风格：${profile.style}`
-      : "",
-    profile?.name
-      ? useEnglish ? `Persona name: ${profile.name}` : `角色名：${profile.name}`
-      : "",
-  ];
-
-  const prompt = parts
-    .filter(Boolean)
-    .join(useEnglish ? "; " : "；")
-    .trim();
-
-  if (!prompt) {
-    throw new Error("MiMo VoiceDesign requires preset or djProfile style/name to describe the target voice");
-  }
-
-  return prompt;
-}
-
-function buildSceneInstruction(
-  scene?: TTSSpeakOptions["scene"],
-  atmosphere?: string,
-  preset?: TtsPresetName,
-): string {
-  const useEnglish = preset ? shouldUseEnglishPrompt(preset) : false;
-  const atmosphereLine = atmosphere
-    ? useEnglish ? `Atmosphere note: ${atmosphere}` : `当前氛围补充：${atmosphere}`
-    : "";
-
-  if (useEnglish) {
-    switch (scene) {
-      case "program_intro":
-        return [
-          "The show is just opening. Bring the listener in with plain, natural spoken rhythm.",
-          "Sound like a real DJ opening the mic, not a machine announcement and not a formal news anchor.",
-          atmosphereLine,
-        ].filter(Boolean).join("\n");
-      case "music_recommendation":
-        return [
-          "You are easing a song into the set. Recommend it like a DJ in a natural flow, not like reading a playlist.",
-          "Gently move the listener toward the next song so it feels inevitable and right for this moment.",
-          atmosphereLine,
-        ].filter(Boolean).join("\n");
-      case "segue":
-        return [
-          "The previous song has just ended and you are handling a brief between-song segue.",
-          "This is a transition, not a fresh opening and not a long monologue. Keep it short and smooth.",
-          atmosphereLine,
-        ].filter(Boolean).join("\n");
-      case "chat_reply":
-        return [
-          "You are replying to one listener in real time, like a live DJ speaking close to the mic.",
-          "Keep it conversational and immediate, not performative or overly formal.",
-          atmosphereLine,
-        ].filter(Boolean).join("\n");
-      default:
-        return [
-          "Deliver a natural spoken line that sounds human, not mechanical.",
-          atmosphereLine,
-        ].filter(Boolean).join("\n");
-    }
-  }
-
-  switch (scene) {
-    case "program_intro":
-      return [
-        "刚刚开麦进入节目，用自然口语节奏把听众带入此刻。",
-        "要像真人 DJ 自然开场，而不是机器播报，也不要像新闻主持人念稿。",
-        atmosphereLine,
-      ].filter(Boolean).join("\n");
-    case "music_recommendation":
-      return [
-        "正在把一首歌顺进节目里，要像 DJ 在自然推荐，不要像列表播报。",
-        "重点是把听感轻轻推向下一首歌，让听众觉得这首歌就是此刻该出现。",
-        atmosphereLine,
-      ].filter(Boolean).join("\n");
-    case "segue":
-      return [
-        "上一首刚结束，正在进行歌曲之间的串场衔接。",
-        "这是接歌，不是重新开场，也不是长篇独白，句子要更短更顺。",
-        atmosphereLine,
-      ].filter(Boolean).join("\n");
-    case "chat_reply":
-      return [
-        "正在和听众一对一聊天，要有即时反应感，像真人 DJ 贴着麦克风在回话。",
-        "不是朗诵，也不是正式演讲，要保留口语气和互动感。",
-        atmosphereLine,
-      ].filter(Boolean).join("\n");
-    default:
-      return [
-        "正在进行一段自然播报，要像真人说话，不要机械。",
-        atmosphereLine,
-      ].filter(Boolean).join("\n");
-  }
-}
-
-function buildDirectionInstruction(
-  scene?: TTSSpeakOptions["scene"],
-  preset?: TtsPresetName,
-  textLength?: number,
-): string {
-  const useEnglish = preset ? shouldUseEnglishPrompt(preset) : false;
-
-  if (useEnglish) {
-    const baseLength = textLength && textLength > 80
-      ? "If the copy is longer, follow punctuation for light phrasing, but keep a normal conversational pace."
-      : "If the copy is short, make it feel spontaneous and spoken, not stretched for effect.";
-    const presetDirection = "Keep the voice relaxed and close, but do not lower it, dramatize it, or drag out endings.";
-
-    switch (scene) {
-      case "program_intro":
-        return [
-          "Open at an everyday radio pace, as if you are speaking to one person in real time.",
-          "Use only small natural pauses. Do not slow down to sound profound or rehearsed.",
-          presetDirection,
-          baseLength,
-        ].join("\n");
-      case "music_recommendation":
-        return [
-          "Recommend the song like you are handing a friend something that fits this exact moment.",
-          "A slight smile or lift is fine, but never push it into hype or performance mode.",
-          presetDirection,
-          baseLength,
-        ].join("\n");
-      case "segue":
-        return [
-          "A segue should be short, smooth, and intimate. Its job is to connect the last song to the next one.",
-          "Do not reintroduce yourself, do not restart the show, and do not drift into a long reflective speech.",
-          presetDirection,
-          baseLength,
-        ].join("\n");
-      case "chat_reply":
-        return [
-          "Reply like a real radio DJ answering a listener immediately after hearing them.",
-          "Let there be a little breath, thought, or a small smile if needed, but keep the tone controlled.",
-          presetDirection,
-          baseLength,
-        ].join("\n");
-      default:
-        return [
-          presetDirection,
-          baseLength,
-          "Preserve the feeling of real speech instead of a formal announcer delivery.",
-        ].join("\n");
-    }
-  }
-
-  const baseLength = textLength && textLength > 80
-    ? "文本偏长时按标点自然停连，但保持正常聊天语速。"
-    : "文本偏短时像真人即兴说出来，不要故意拖长。";
-
-  const presetDirection = "声音清楚贴近，语气放松自然，不要故意压低、拖长尾音或装深沉。";
-
-  switch (scene) {
-    case "program_intro":
-      return [
-        "开场像正常 DJ 开麦，不要拉成长段抒情。",
-        "语速按正常聊天来，允许轻微停顿，但不要为了氛围刻意变慢。",
-        presetDirection,
-        baseLength,
-      ].join("\n");
-    case "music_recommendation":
-      return [
-        "像给朋友推荐一首此刻刚好合适的歌，语气自然，有一点点带入感，但不要夸张。",
-        "推荐语可以有轻微笑意或小幅情绪抬升，但不要喊麦。",
-        presetDirection,
-        baseLength,
-      ].join("\n");
-    case "segue":
-      return [
-        "串场要短、顺、贴耳，重点是把上一首和下一首轻轻接上。",
-        "不要重新自我介绍，不要像节目重新开始，也不要大段抒情。",
-        presetDirection,
-        baseLength,
-      ].join("\n");
-    case "chat_reply":
-      return [
-        "像真人电台 DJ 在听完对方一句话后立刻回应，句子口语化，语序自然。",
-        "可以带轻微呼吸感、轻笑感或思考感，但不要腔调太满，也不要拖慢。",
-        presetDirection,
-        baseLength,
-      ].join("\n");
-    default:
-      return [
-        presetDirection,
-        baseLength,
-        "保持真实说话感，不要机械。",
-      ].join("\n");
-  }
-}
-
-function composeGeneralStylePromptWithContext(
-  text: string,
-  options?: TTSSpeakOptions,
-): string {
+function composeStylePrompt(model: MimoTtsModel, options?: TTSSpeakOptions): string {
   const profile = options?.profile;
-  const preset = normalizeTtsPresetName(profile?.voice);
-  const presetConfig = TTS_PRESET_CONFIG[preset];
-  const useEnglish = shouldUseEnglishPrompt(preset);
-  const extraVoiceNote = profile?.voice && !TTS_PRESET_NAMES.includes(profile.voice as TtsPresetName)
-    ? useEnglish ? `Additional voice note: ${profile.voice}.` : `补充声音气质：${profile.voice}。`
+  const delivery = DELIVERY[resolveDjCopyLanguage(profile)];
+  const design = model === "mimo-v2.5-tts-voicedesign"
+    ? process.env.MIMO_TTS_VOICE_PROMPT?.trim() || delivery.design
+    : undefined;
+  const voiceNote = model === DEFAULT_MIMO_MODEL && typeof profile?.voice === "string" && !getTtsPresetName(profile.voice)
+    ? profile.voice.trim()
+    : undefined;
+  const direction = typeof options?.direction === "string"
+    ? options.direction.replace(/\s+/g, " ").trim().slice(0, 300)
     : "";
-  const roleLine = profile?.name
-    ? useEnglish ? `Persona name: ${profile.name}` : `角色名：${profile.name}`
-    : useEnglish ? "Persona name: Claudio" : "角色名：Claudio";
-  const styleLine = profile?.style
-    ? useEnglish ? `Show style: ${profile.style}` : `节目风格：${profile.style}`
-    : useEnglish ? "Show style: emotional radio" : "节目风格：情感电台";
-  const characterBlock = [
-    "CHARACTER",
-    roleLine,
-    useEnglish ? `Use preset voice: ${presetConfig.voice}` : `使用正确音色：${presetConfig.voice}`,
-    presetConfig.character,
-    extraVoiceNote,
-    styleLine,
-  ].filter(Boolean).join("\n");
-  const sceneBlock = [
-    "SCENE",
-    buildSceneInstruction(options?.scene, options?.atmosphere, preset),
-  ].join("\n");
-  const directionBlock = [
-    "DIRECTION",
-    buildDirectionInstruction(options?.scene, preset, text.length),
-    useEnglish
-      ? "Avoid a formal announcer tone. Keep subtle motion, breath, and the texture of real spoken language."
-      : "少用播音腔，保留一点真实口语里的轻微起伏和呼吸感。",
-  ].join("\n");
 
-  return [characterBlock, sceneBlock, directionBlock].join("\n\n");
+  return [
+    design,
+    delivery.base,
+    profile?.name && (delivery.name + " — " + profile.name),
+    profile?.style && (delivery.style + " — " + profile.style),
+    voiceNote && (delivery.voiceNote + " — " + voiceNote),
+    options?.scene && delivery.scene[options.scene],
+    options?.atmosphere && (delivery.atmosphere + " — " + options.atmosphere),
+    direction && (delivery.direction + " — " + direction),
+  ].filter(Boolean).join("\n");
 }
 
 async function resolveVoiceCloneSample(): Promise<{ dataUri: string; fingerprint: string }> {
-  const samplePath = getMimoVoiceSamplePath();
+  const samplePath = process.env.MIMO_TTS_VOICE_SAMPLE_PATH?.trim();
   if (!samplePath) {
     throw new Error("MIMO_TTS_VOICE_SAMPLE_PATH is required when MIMO_TTS_MODEL=mimo-v2.5-tts-voiceclone");
   }
@@ -366,13 +162,17 @@ async function resolveVoiceCloneSample(): Promise<{ dataUri: string; fingerprint
   const absolutePath = path.isAbsolute(samplePath)
     ? samplePath
     : path.join(repoRoot, samplePath);
-  const sampleBuffer = await fs.readFile(absolutePath);
   const mimeType = getMimeTypeForSample(absolutePath);
+  const sampleBuffer = await fs.readFile(absolutePath);
+  const base64Size = Math.ceil(sampleBuffer.length / 3) * 4;
+  if (base64Size === 0 || base64Size > MAX_MIMO_SAMPLE_BASE64_BYTES) {
+    throw new Error("MiMo VoiceClone sample must be non-empty and at most 10 MB after Base64 encoding");
+  }
   const base64Audio = sampleBuffer.toString("base64");
 
   return {
     dataUri: `data:${mimeType};base64,${base64Audio}`,
-    fingerprint: hashText(sampleBuffer.toString("base64")),
+    fingerprint: hashText(base64Audio),
   };
 }
 
@@ -381,55 +181,20 @@ async function resolveMimoRequest(
   options?: TTSSpeakOptions,
 ): Promise<ResolvedMimoRequest> {
   const model = parseMimoModel(process.env.MIMO_TTS_MODEL);
-  const profile = options?.profile;
+  const stylePrompt = composeStylePrompt(model, options);
+  const audio: ResolvedMimoRequest["audio"] = { format: "wav" };
+  let voiceKey: string | undefined;
 
-  if (model === "mimo-v2.5-tts") {
-    const preset = normalizeTtsPresetName(profile?.voice);
-    const voice = TTS_PRESET_CONFIG[preset].voice;
-    const stylePrompt = composeGeneralStylePromptWithContext(text, options);
-
-    return {
-      model,
-      messages: [
-        { role: "user", content: stylePrompt },
-        { role: "assistant", content: text },
-      ],
-      audio: {
-        format: "wav",
-        voice,
-      },
-      cacheVariant: JSON.stringify({
-        provider: "mimo",
-        model,
-        preset,
-        voice,
-        stylePrompt,
-      }),
-    };
+  if (model === DEFAULT_MIMO_MODEL) {
+    audio.voice = normalizeTtsPresetName(options?.profile?.voice);
+    voiceKey = audio.voice;
+  } else if (model === "mimo-v2.5-tts-voiceclone") {
+    const sample = await resolveVoiceCloneSample();
+    audio.voice = sample.dataUri;
+    voiceKey = sample.fingerprint;
+  } else {
+    audio.optimize_text_preview = false;
   }
-
-  if (model === "mimo-v2.5-tts-voicedesign") {
-    const stylePrompt = composeVoiceDesignPrompt(profile);
-
-    return {
-      model,
-      messages: [
-        { role: "user", content: stylePrompt },
-        { role: "assistant", content: text },
-      ],
-      audio: {
-        format: "wav",
-      },
-      cacheVariant: JSON.stringify({
-        provider: "mimo",
-        model,
-        stylePrompt,
-      }),
-    };
-  }
-
-  const voiceClone = await resolveVoiceCloneSample();
-  const stylePrompt = composeGeneralStylePrompt(profile);
 
   return {
     model,
@@ -437,21 +202,13 @@ async function resolveMimoRequest(
       { role: "user", content: stylePrompt },
       { role: "assistant", content: text },
     ],
-    audio: {
-      format: "wav",
-      voice: voiceClone.dataUri,
-    },
-    cacheVariant: JSON.stringify({
-      provider: "mimo",
-      model,
-      stylePrompt,
-      voiceFingerprint: voiceClone.fingerprint,
-    }),
+    audio,
+    cacheVariant: JSON.stringify({ model, voiceKey, stylePrompt }),
   };
 }
 
 async function readCachedAudio(cachePath: string): Promise<TTSResult> {
-  const absolutePath = path.join(repoRoot, cachePath);
+  const absolutePath = path.join(AUDIO_CACHE_DIR, path.posix.basename(cachePath));
   const buffer = await fs.readFile(absolutePath);
   return {
     audioBuffer: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
@@ -468,9 +225,16 @@ export async function cacheAudio(
 ): Promise<string> {
   const fileName = getCacheFileName(text, variant);
   const filePath = path.join(AUDIO_CACHE_DIR, fileName);
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
 
   await fs.mkdir(AUDIO_CACHE_DIR, { recursive: true });
-  await fs.writeFile(filePath, Buffer.from(audioBuffer));
+  try {
+    await fs.writeFile(temporaryPath, Buffer.from(audioBuffer));
+    await fs.rename(temporaryPath, filePath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  }
 
   return path.posix.join("data", "audio", fileName);
 }
@@ -499,17 +263,20 @@ export async function synthesize(
   }
 
   const request = await resolveMimoRequest(text, options);
-  return synthesizeWithResolvedRequest(apiKey, request);
+  return synthesizeWithResolvedRequest(apiKey, request, AbortSignal.timeout(getMimoTimeoutMs()));
 }
 
-async function synthesizeWithResolvedRequest(
+async function requestMimoSpeech(
   apiKey: string,
   request: ResolvedMimoRequest,
-): Promise<TTSResult> {
+  signal: AbortSignal,
+  stream = false,
+): Promise<Response> {
   const response = await fetchWithProxyFallback(
     `${getMimoApiBase()}/chat/completions`,
     {
       method: "POST",
+      signal,
       headers: {
         "api-key": apiKey,
         "Content-Type": "application/json",
@@ -517,17 +284,26 @@ async function synthesizeWithResolvedRequest(
       body: JSON.stringify({
         model: request.model,
         messages: request.messages,
-        audio: request.audio,
+        audio: stream ? { ...request.audio, format: "pcm16" } : request.audio,
+        ...(stream ? { stream: true } : {}),
       }),
     },
     "MiMo TTS",
   );
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`MiMo API error: ${response.status} ${errorText}`);
+    void response.body?.cancel().catch(() => {});
+    throw new Error("MiMo API error: HTTP " + response.status);
   }
+  return response;
+}
 
+async function synthesizeWithResolvedRequest(
+  apiKey: string,
+  request: ResolvedMimoRequest,
+  signal: AbortSignal,
+): Promise<TTSResult> {
+  const response = await requestMimoSpeech(apiKey, request, signal);
   const payload = await response.json() as {
     choices?: Array<{
       message?: {
@@ -550,6 +326,105 @@ async function synthesizeWithResolvedRequest(
   };
 }
 
+async function consumeMimoPcmStream(
+  response: Response,
+  onChunk: (base64: string) => void,
+): Promise<TTSResult> {
+  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+    throw new Error("MiMo response did not include a PCM stream");
+  }
+
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  const chunks: Buffer[] = [];
+  let pending = "";
+  let complete = false;
+  try {
+    while (!complete) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += value;
+      let boundary = /\r?\n\r?\n/.exec(pending);
+      while (boundary) {
+        const data = pending.slice(0, boundary.index).split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n")
+          .trim();
+        pending = pending.slice(boundary.index + boundary[0].length);
+        if (data === "[DONE]") {
+          complete = true;
+          break;
+        }
+        if (data) {
+          let payload: { choices?: Array<{ delta?: { audio?: { data?: unknown } } }>; error?: unknown };
+          try {
+            payload = JSON.parse(data);
+          } catch {
+            throw new Error("MiMo PCM stream returned an invalid event");
+          }
+          if (payload.error) throw new Error("MiMo PCM stream returned an error");
+          const base64 = payload.choices?.[0]?.delta?.audio?.data;
+          if (typeof base64 === "string" && base64) {
+            const chunk = Buffer.from(base64, "base64");
+            if (!chunk.length || chunk.length % PCM_BYTES_PER_SAMPLE !== 0) {
+              throw new Error("MiMo PCM stream contained invalid samples");
+            }
+            chunks.push(chunk);
+            onChunk(base64);
+          }
+        }
+        boundary = /\r?\n\r?\n/.exec(pending);
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+
+  if (!complete || chunks.length === 0) throw new Error("MiMo PCM stream ended without complete audio");
+  return { audioBuffer: pcmToWav(chunks), format: "wav", cached: false };
+}
+
+function pcmToWav(chunks: Buffer[]): ArrayBuffer {
+  const pcm = Buffer.concat(chunks);
+  const wav = new ArrayBuffer(44 + pcm.length);
+  const header = Buffer.from(wav);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(PCM_SAMPLE_RATE, 24);
+  header.writeUInt32LE(PCM_SAMPLE_RATE * PCM_BYTES_PER_SAMPLE, 28);
+  header.writeUInt16LE(PCM_BYTES_PER_SAMPLE, 32);
+  header.writeUInt16LE(PCM_BYTES_PER_SAMPLE * 8, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  pcm.copy(header, 44);
+  return wav;
+}
+
+async function synthesizeForPlayback(
+  apiKey: string,
+  request: ResolvedMimoRequest,
+  onChunk?: (base64: string) => void,
+): Promise<TTSResult> {
+  const signal = AbortSignal.timeout(getMimoTimeoutMs());
+  if (onChunk && request.model === DEFAULT_MIMO_MODEL) {
+    let started = false;
+    try {
+      const response = await requestMimoSpeech(apiKey, request, signal, true);
+      return await consumeMimoPcmStream(response, (base64) => {
+        started = true;
+        onChunk(base64);
+      });
+    } catch (error) {
+      if (started || signal.aborted) throw error;
+    }
+  }
+  return synthesizeWithResolvedRequest(apiKey, request, signal);
+}
+
 export async function speak(
   text: string,
   options?: TTSSpeakOptions,
@@ -565,7 +440,7 @@ export async function speak(
     return readCachedAudio(cachedPath);
   }
 
-  const result = await synthesizeWithResolvedRequest(apiKey, request);
+  const result = await synthesizeForPlayback(apiKey, request, options?.onPcmChunk);
   const cachePath = await cacheAudio(text, result.audioBuffer, request.cacheVariant);
 
   return {

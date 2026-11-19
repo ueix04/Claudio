@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatEntry, DJMessage, AppStatus, TrackInfo, TtsPreset } from '../types';
 import { useLayout } from './LayoutManager';
+import { VoicePresetSelect } from './VoicePresetSelect';
 
 const USER_DISPLAY_NAME = "xian";
 
@@ -78,11 +79,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     window.setTimeout(() => setVoiceHint(null), 2200);
   };
 
-  const handleVoicePresetToggle = () => {
-    if (isUpdatingVoicePreset) return;
-    onVoicePresetChange(voicePreset === "冰糖" ? "Dean" : "冰糖");
-  };
-
   const renderUserAvatar = (sizeClass: string, textClass: string) => (
     <div className={`rounded-full overflow-hidden border border-white/10 bg-[color:var(--claudio-surface-strong)] flex items-center justify-center ${sizeClass}`}>
       {userAvatarUrl ? (
@@ -148,14 +144,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             <div className="chat-live-meta flex items-center gap-2">
               <span className="chat-live-label text-sm claudio-theme-accent uppercase tracking-widest">LIVE</span>
               <span className="chat-live-separator text-sm claudio-theme-accent">·</span>
-              <button
-                onClick={handleVoicePresetToggle}
+              <VoicePresetSelect
+                className="chat-voice-switch"
+                value={voicePreset}
                 disabled={isUpdatingVoicePreset}
-                className={`chat-voice-switch ${isUpdatingVoicePreset ? "chat-voice-switch-pending" : ""}`}
-                title={`Switch voice preset from ${voicePreset}`}
-              >
-                {voicePreset}
-              </button>
+                onChange={onVoicePresetChange}
+              />
             </div>
           )}
           <button 

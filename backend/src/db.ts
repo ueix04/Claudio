@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
 import { dataDir } from "./runtime.js";
+import { normalizeTtsPresetName } from "./dj-language.js";
 
 export type AppStatus = "idle" | "thinking" | "speaking" | "playing" | "error";
 
@@ -263,7 +264,7 @@ const defaultState = (): AppState => ({
   discoveryCandidates: [],
   listenChecks: [],
   djProfile: {
-    voice: "冰糖",
+    voice: normalizeTtsPresetName(),
     style: "情感电台",
     name: "Claudio",
   },

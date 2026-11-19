@@ -9,7 +9,8 @@ vi.mock("node:fs/promises");
 
 import fs from "node:fs/promises";
 import { fetch as undiciFetch, ProxyAgent } from "undici";
-import { cacheAudio, getCachedAudio, normalizeTtsPresetName, speak, synthesize } from "./tts.js";
+import { normalizeTtsPresetName, resolveDjCopyLanguage } from "./dj-language.js";
+import { cacheAudio, getCachedAudio, speak, synthesize } from "./tts.js";
 
 describe("TTS Module", () => {
   const originalEnv = process.env;
@@ -32,6 +33,7 @@ describe("TTS Module", () => {
 
   describe("synthesize", () => {
     it("should successfully synthesize audio with MiMo", async () => {
+      process.env.MIMO_TTS_VOICE = "茉莉";
       const base64Audio = Buffer.from("mimo-audio").toString("base64");
       vi.mocked(fetch).mockResolvedValue({
         ok: true,
@@ -52,6 +54,7 @@ describe("TTS Module", () => {
           style: "情感电台",
           name: "Claudio",
         },
+        direction: "第一句轻快。\n‘hello’稍带笑意。",
       });
 
       expect(Buffer.from(result.audioBuffer).toString()).toBe("mimo-audio");
@@ -73,15 +76,14 @@ describe("TTS Module", () => {
         model: "mimo-v2.5-tts",
         audio: {
           format: "wav",
-          voice: "冰糖",
+          voice: "茉莉",
         },
       });
       expect(body.messages[0].role).toBe("user");
-      expect(body.messages[0].content).toContain("CHARACTER");
-      expect(body.messages[0].content).toContain("SCENE");
-      expect(body.messages[0].content).toContain("DIRECTION");
-      expect(body.messages[0].content).toContain("使用正确音色：冰糖");
+      expect(body.messages[0].content).toContain("正常聊天语速");
+      expect(body.messages[0].content).toContain("声音气质 — 温暖");
       expect(body.messages[0].content).toContain("情感电台");
+      expect(body.messages[0].content).toContain("本句导演提示 — 第一句轻快。 ‘hello’稍带笑意。");
       expect(body.messages[1]).toMatchObject({
         role: "assistant",
         content: "hello",
@@ -93,7 +95,7 @@ describe("TTS Module", () => {
       await expect(synthesize("hello")).rejects.toThrow("MIMO_API_KEY is missing");
     });
 
-    it("should use English prompt copy for Dean preset", async () => {
+    it.each(["Dean", "Chloe"])("should use English delivery for %s", async (voice) => {
       const base64Audio = Buffer.from("dean-audio").toString("base64");
       vi.mocked(fetch).mockResolvedValue({
         ok: true,
@@ -110,7 +112,7 @@ describe("TTS Module", () => {
 
       await synthesize("hello", {
         profile: {
-          voice: "Dean",
+          voice,
           style: "late-night radio",
           name: "Claudio",
         },
@@ -118,17 +120,16 @@ describe("TTS Module", () => {
       });
 
       const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
-      expect(body.audio.voice).toBe("Dean");
-      expect(body.messages[0].content).toContain("Use preset voice: Dean");
-      expect(body.messages[0].content).toContain("Persona name: Claudio");
-      expect(body.messages[0].content).toContain("Show style: late-night radio");
-      expect(body.messages[0].content).toContain("Atmosphere note: city lights after midnight");
-      expect(body.messages[0].content).not.toContain("使用正确音色");
-      expect(body.messages[0].content).not.toContain("角色名：");
+      expect(body.audio.voice).toBe(voice);
+      expect(body.messages[0].content).toContain("conversational speed");
+      expect(body.messages[0].content).toContain("Host name — Claudio");
+      expect(body.messages[0].content).toContain("Show style — late-night radio");
+      expect(body.messages[0].content).toContain("Atmosphere — city lights after midnight");
     });
 
-    it("should throw when VoiceDesign has no prompt source", async () => {
+    it("uses the VoiceDesign description and scene while reading the original line", async () => {
       process.env.MIMO_TTS_MODEL = "mimo-v2.5-tts-voicedesign";
+      process.env.MIMO_TTS_VOICE_PROMPT = "声线偏中音，吐字松弛清楚。";
       const base64Audio = Buffer.from("voice-design-audio").toString("base64");
       vi.mocked(fetch).mockResolvedValue({
         ok: true,
@@ -143,9 +144,41 @@ describe("TTS Module", () => {
         }),
       } as Response);
 
-      await expect(synthesize("hello")).resolves.toMatchObject({
+      await expect(synthesize("接下来听首歌。", { scene: "segue" })).resolves.toMatchObject({
         format: "wav",
       });
+      const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+      expect(body.audio).toEqual({ format: "wav", optimize_text_preview: false });
+      expect(body.messages[0].content).toContain(process.env.MIMO_TTS_VOICE_PROMPT);
+      expect(body.messages[0].content).toContain("接歌短而顺");
+      expect(body.messages[1]).toEqual({ role: "assistant", content: "接下来听首歌。" });
+    });
+
+    it("uses the sample as the VoiceClone voice and the scene as delivery guidance", async () => {
+      process.env.MIMO_TTS_MODEL = "mimo-v2.5-tts-voiceclone";
+      process.env.MIMO_TTS_VOICE_SAMPLE_PATH = "sample.mp3";
+      const sample = Buffer.from("test-sample").toString("base64");
+      vi.mocked(fs.readFile).mockResolvedValueOnce(Buffer.from("test-sample"));
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ choices: [{ message: { audio: { data: sample } } }] }),
+      } as Response);
+
+      await synthesize("接下来听首歌。", { scene: "chat_reply", profile: { voice: "茉莉" } });
+
+      const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+      expect(body.audio).toEqual({ format: "wav", voice: `data:audio/mpeg;base64,${sample}` });
+      expect(body.messages[0].content).toContain("像听完对方的话马上接一句");
+      expect(body.messages[0].content).not.toContain("茉莉");
+    });
+
+    it("rejects samples that exceed the VoiceClone limit before making a request", async () => {
+      process.env.MIMO_TTS_MODEL = "mimo-v2.5-tts-voiceclone";
+      process.env.MIMO_TTS_VOICE_SAMPLE_PATH = "sample.wav";
+      vi.mocked(fs.readFile).mockResolvedValueOnce(Buffer.alloc(7_500_001));
+
+      await expect(synthesize("hello")).rejects.toThrow("at most 10 MB");
+      expect(fetch).not.toHaveBeenCalled();
     });
 
     it("should propagate API errors", async () => {
@@ -155,7 +188,7 @@ describe("TTS Module", () => {
         text: async () => "Unauthorized",
       } as Response);
 
-      await expect(synthesize("hello")).rejects.toThrow("MiMo API error: 401 Unauthorized");
+      await expect(synthesize("hello")).rejects.toThrow("MiMo API error: HTTP 401");
     });
 
     it("should retry via proxy on network failures", async () => {
@@ -198,6 +231,62 @@ describe("TTS Module", () => {
   });
 
   describe("speak", () => {
+    const frame = (pcm: string) => `data: ${JSON.stringify({ choices: [{ delta: { audio: { data: pcm } } }] })}\r\n\r\n`;
+
+    it("delivers PCM before the stream finishes and caches a replayable WAV", async () => {
+      vi.mocked(fs.access).mockRejectedValueOnce(new Error("not found"));
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({ start: (value) => { controller = value; } });
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(body, { headers: { "Content-Type": "text/event-stream" } }));
+
+      const onPcmChunk = vi.fn();
+      const result = speak("live", { onPcmChunk });
+      const encoder = new TextEncoder();
+      const first = frame("AAA=");
+      controller.enqueue(encoder.encode(first.slice(0, -2)));
+      controller.enqueue(encoder.encode(first.slice(-2)));
+      await vi.waitFor(() => expect(onPcmChunk).toHaveBeenCalledWith("AAA="));
+      expect(fs.writeFile).not.toHaveBeenCalled();
+
+      controller.enqueue(encoder.encode(frame("AQI=") + "data: [DONE]\r\n\r\n"));
+      controller.close();
+      const wav = Buffer.from((await result).audioBuffer);
+      expect(wav.toString("ascii", 0, 4)).toBe("RIFF");
+      expect(wav.readUInt32LE(24)).toBe(24_000);
+      expect(wav.subarray(44)).toEqual(Buffer.from([0, 0, 1, 2]));
+      expect(fs.writeFile).toHaveBeenCalledOnce();
+      const requestBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+      expect(requestBody).toMatchObject({ stream: true, audio: { format: "pcm16", voice: "冰糖" } });
+    });
+
+    it("falls back to WAV when streaming fails before the first chunk", async () => {
+      vi.mocked(fs.access).mockRejectedValueOnce(new Error("not found"));
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 502 }));
+      vi.mocked(fetch).mockResolvedValueOnce(Response.json({
+        choices: [{ message: { audio: { data: "AAA=" } } }],
+      }));
+      const onPcmChunk = vi.fn();
+
+      await expect(speak("fallback", { onPcmChunk })).resolves.toMatchObject({ format: "wav" });
+      expect(onPcmChunk).not.toHaveBeenCalled();
+      const requestBody = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body));
+      expect(requestBody.audio.format).toBe("wav");
+      expect(requestBody.stream).toBeUndefined();
+    });
+
+    it("keeps an interrupted stream out of the cache and does not restart the line", async () => {
+      vi.mocked(fs.access).mockRejectedValueOnce(new Error("not found"));
+      vi.mocked(fetch).mockResolvedValueOnce(new Response(frame("AAA="), {
+        headers: { "Content-Type": "text/event-stream" },
+      }));
+      const onPcmChunk = vi.fn();
+
+      await expect(speak("interrupted", { onPcmChunk })).rejects.toThrow("without complete audio");
+      expect(onPcmChunk).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it("should return cached audio if available", async () => {
       const mockBuffer = Buffer.from("cached-audio");
       vi.mocked(fs.access).mockResolvedValue(undefined);
@@ -241,8 +330,7 @@ describe("TTS Module", () => {
 
       const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
       expect(body.messages[0].content).toContain("晨间简报");
-      expect(body.messages[0].content).toContain("CHARACTER");
-      expect(body.messages[0].content).toContain("补充声音气质：清醒");
+      expect(body.messages[0].content).toContain("声音气质 — 清醒");
     });
   });
 
@@ -250,5 +338,7 @@ describe("TTS Module", () => {
     expect(normalizeTtsPresetName("Dean")).toBe("Dean");
     expect(normalizeTtsPresetName("冰糖")).toBe("冰糖");
     expect(normalizeTtsPresetName("温暖")).toBe("冰糖");
+    expect(resolveDjCopyLanguage({ voice: "Milo" })).toBe("en");
+    expect(resolveDjCopyLanguage({ voice: "白桦" })).toBe("zh");
   });
 });

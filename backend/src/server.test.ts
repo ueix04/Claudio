@@ -1203,6 +1203,59 @@ describe("WebSocket Server", () => {
     ws.close();
   });
 
+  it("在合成时给发起聊天的客户端推送音频，并在生成完成后提供重播", async () => {
+    const claude = await import("./claude.js");
+    const tts = await import("./tts.js");
+    const direction = "招呼时带一点笑意，下一句语气平静。";
+    vi.mocked(claude.callJsonLLM).mockResolvedValue({
+      say: "你好。今晚想听什么？",
+      ttsDirection: direction,
+    });
+
+    let finish!: () => void;
+    const ready = new Promise<void>((resolve) => { finish = resolve; });
+    vi.mocked(tts.speak).mockImplementation(async (_, options) => {
+      options?.onPcmChunk?.("AAA=");
+      await ready;
+      return { audioBuffer: new ArrayBuffer(0), format: "wav", cached: false, cachePath: "data/audio/live.wav" };
+    });
+
+    const { WebSocket } = await import("ws");
+    const live = new WebSocket(`ws://localhost:${port}/ws`);
+    const legacy = new WebSocket(`ws://localhost:${port}/ws`);
+    const liveMessages: Array<Record<string, any>> = [];
+    const legacyMessages: Array<Record<string, any>> = [];
+    live.on("message", (data) => liveMessages.push(JSON.parse(data.toString())));
+    legacy.on("message", (data) => legacyMessages.push(JSON.parse(data.toString())));
+
+    try {
+      await Promise.all([live, legacy].map((ws) => new Promise<void>((resolve) => ws.once("open", resolve))));
+      live.send(JSON.stringify({ type: "chat", data: { text: "你好", streamTts: true } }));
+      await vi.waitFor(() => expect(liveMessages.some((m) => m.type === "tts_chunk")).toBe(true));
+
+      const message = liveMessages.find((m) => m.type === "dj_message")!;
+      expect(message.data.ttsStreamId).toBeTruthy();
+      expect(liveMessages.find((m) => m.type === "tts_chunk")?.data).toEqual({ streamId: message.data.ttsStreamId, pcm: "AAA=" });
+      expect(legacyMessages.some((m) => m.type === "tts_chunk" || m.type === "dj_message")).toBe(false);
+      expect(tts.speak).toHaveBeenCalledWith(message.data.text, expect.objectContaining({ direction }));
+      expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.stringContaining("ttsDirection"), 20_000);
+
+      finish();
+      await vi.waitFor(() => {
+        expect(liveMessages.find((m) => m.type === "tts_complete")?.data).toEqual({
+          streamId: message.data.ttsStreamId,
+          ttsAudioPath: "data/audio/live.wav",
+        });
+        expect(legacyMessages.find((m) => m.type === "dj_message")?.data.ttsAudioPath).toBe("data/audio/live.wav");
+      });
+      expect(liveMessages.filter((m) => m.type === "dj_message")).toHaveLength(1);
+    } finally {
+      finish();
+      live.terminate();
+      legacy.terminate();
+    }
+  });
+
   it("chat 里明确问天气时才会调用天气并回答天气", async () => {
     const db = await import("./db.js");
     const claude = await import("./claude.js");
