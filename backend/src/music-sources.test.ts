@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as netease from "./netease.js";
+import { fetchSourceJson, fetchSourceText } from "./music-sources/http-client.js";
 import {
   LOCAL_LIBRARY_SOURCE_ID,
   NETEASE_LEGACY_SOURCE_ID,
@@ -22,6 +23,7 @@ import {
 } from "./music-sources/index.js";
 
 vi.mock("./netease.js");
+vi.mock("./music-sources/http-client.js");
 
 describe("music source adapters", () => {
   const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
@@ -81,6 +83,8 @@ describe("music source adapters", () => {
     expect(ids).toContain(LOCAL_LIBRARY_SOURCE_ID);
     expect(ids).toContain(NETEASE_LEGACY_SOURCE_ID);
     expect(ids).toContain(UNBLOCK_NETEASE_SOURCE_ID);
+    expect(ids).toContain("qq");
+    expect(ids).toContain("kuwo");
   });
 
   it("summarizes the runtime source order and fallback chain", async () => {
@@ -94,7 +98,7 @@ describe("music source adapters", () => {
 
     expect(status.searchOrder).toEqual([LOCAL_LIBRARY_SOURCE_ID, NETEASE_LEGACY_SOURCE_ID]);
     expect(status.playableUrlFallbacks).toEqual([
-      { source: NETEASE_LEGACY_SOURCE_ID, fallbacks: [UNBLOCK_NETEASE_SOURCE_ID] },
+      { source: NETEASE_LEGACY_SOURCE_ID, fallbacks: [UNBLOCK_NETEASE_SOURCE_ID, "qq", "kuwo", LOCAL_LIBRARY_SOURCE_ID] },
     ]);
     expect(status.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -195,6 +199,116 @@ describe("music source adapters", () => {
       urlSource: NETEASE_LEGACY_SOURCE_ID,
     });
     expect(track.urlExpiresAt).toBeGreaterThan(Date.now());
+  });
+
+  it("prefers validated anonymous Netease audio and preserves the upstream expiry", async () => {
+    const refreshedAt = Date.now();
+    const openUrl = "https://m701.music.126.net/free.mp3";
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValueOnce({
+      url: openUrl, refreshedAt, expiresAt: refreshedAt + 1_200_000,
+    });
+
+    const track = await resolveKnownTrack({
+      source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId: "123", title: "Song", artist: "Artist",
+    });
+
+    expect(track).toMatchObject({ url: openUrl, urlExpiresAt: refreshedAt + 1_200_000, urlSource: NETEASE_LEGACY_SOURCE_ID });
+    expect(netease.getPlayableUrl).not.toHaveBeenCalled();
+  });
+
+  it("tries authenticated Netease playback if the anonymous CDN cannot serve audio", async () => {
+    const refreshedAt = Date.now();
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValueOnce({
+      url: "https://m701.music.126.net/public.mp3", refreshedAt, expiresAt: refreshedAt + 1_200_000,
+    });
+    vi.mocked(netease.getPlayableUrl).mockResolvedValueOnce("https://m801.music.126.net/account.mp3");
+    vi.stubEnv("NODE_ENV", "production");
+    const media = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(new Response("ID3fixture", { status: 206, headers: { "Content-Type": "audio/mpeg" } }));
+    try {
+      const track = await resolveKnownTrack({
+        source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId: "307", title: "Song", artist: "Artist",
+      });
+      expect(track.url).toBe("https://m801.music.126.net/account.mp3");
+      expect(media).toHaveBeenCalledTimes(2);
+      expect(netease.getPlayableUrl).toHaveBeenCalledTimes(1);
+    } finally {
+      media.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("matches free QQ audio without replacing the stored track identity or changing versions", async () => {
+    vi.mocked(netease.getPlayableUrl).mockRejectedValueOnce(new Error("unplayable"));
+    const candidate = { songname: "Song", singer: [{ name: "Artist" }], interval: 180, pay: { payplay: 0 } };
+    vi.mocked(fetchSourceJson).mockResolvedValueOnce({
+      code: 0,
+      data: { song: { list: [
+        { ...candidate, songmid: "vip", pay: { payplay: 1 } },
+        { ...candidate, songmid: "live", songname: "Song (Live)" },
+        { ...candidate, songmid: "cover", singer: [{ name: "Another artist" }] },
+        { ...candidate, songmid: "wrongduration", interval: 198 },
+        { ...candidate, songmid: "sameversion", interval: 182 },
+      ] } },
+    }).mockResolvedValueOnce({
+      code: 0,
+      playback: { code: 0, data: {
+        sip: ["https://aqqmusic.tc.qq.com/"],
+        midurlinfo: [{ songmid: "sameversion", result: 0, purl: "same.m4a" }],
+      } },
+    });
+
+    const restored = await refreshStoredTrackPlayableUrl({
+      id: "123", name: "Song", artist: "Artist", duration: 180_000, url: "expired-url",
+    });
+
+    expect(restored).toMatchObject({
+      id: "123", source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId: "123",
+      urlSource: "qq", url: "https://aqqmusic.tc.qq.com/same.m4a", playbackHealth: "fallback",
+    });
+    expect(restored.lastResolveError).toBeUndefined();
+    const vkeyRequest = vi.mocked(fetchSourceJson).mock.calls[1][0];
+    expect(JSON.parse(vkeyRequest.searchParams.get("data") ?? "{}").playback.param).toMatchObject({
+      songmid: ["sameversion"], loginflag: 0, uin: "0",
+    });
+  });
+
+  it("tries Kuwo after QQ returns no stream and skips Kuwo previews", async () => {
+    vi.mocked(netease.getPlayableUrl).mockRejectedValueOnce(new Error("unplayable"));
+    const payInfo = { cannotOnlinePlay: "0", listen_fragment: "0", feeType: { album: "0", song: "0", vip: "0" } };
+    vi.mocked(fetchSourceJson).mockResolvedValueOnce({
+      code: 0,
+      data: { song: { list: [{ songmid: "empty", songname: "Song", singer: [{ name: "Artist" }], interval: 180, pay: { payplay: 0 } }] } },
+    }).mockResolvedValueOnce({
+      code: 0, playback: { code: 0, data: { midurlinfo: [{ songmid: "empty", result: 0, purl: "" }] } },
+    }).mockResolvedValueOnce({ content: [{ musicpage: { abslist: [
+      { MUSICRID: "MUSIC_1", SONGNAME: "Song", ARTIST: "Artist", DURATION: "180", PAY: "0", payInfo: { ...payInfo, listen_fragment: "1" } },
+      { MUSICRID: "MUSIC_2", SONGNAME: "Song", ARTIST: "Artist", DURATION: "181", PAY: "0", payInfo },
+    ] } }] });
+    vi.mocked(fetchSourceText).mockResolvedValueOnce("https://kw-lv.kuwo.cn/recording.mp3");
+
+    const track = await resolveKnownTrack({
+      source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId: "245", title: "Song", artist: "Artist", duration: 180_000,
+    });
+
+    expect(track).toMatchObject({ id: 245, sourceTrackId: "245", urlSource: "kuwo", url: "https://kw-lv.kuwo.cn/recording.mp3" });
+    const streamRequest = vi.mocked(fetchSourceText).mock.calls[0][0];
+    expect(streamRequest.searchParams.get("rid")).toBe("MUSIC_2");
+  });
+
+  it("uses the enabled local library after online sources fail when the exact file has no duration", async () => {
+    const file = await createTempMusicFile("Artist - Song.mp3");
+    process.env.LOCAL_MUSIC_ENABLED = "true";
+    process.env.LOCAL_MUSIC_DIRS = path.dirname(file);
+    vi.mocked(netease.getPlayableUrl).mockRejectedValueOnce(new Error("unplayable"));
+
+    const track = await resolveKnownTrack({
+      source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId: "309", title: "Song", artist: "Artist", duration: 180_000,
+    });
+
+    expect(track).toMatchObject({ id: 309, sourceTrackId: "309", urlSource: LOCAL_LIBRARY_SOURCE_ID });
+    expect(track.url).toMatch(/^\/api\/audio\/local\//);
   });
 
   it("falls back to UnblockNeteaseMusic when the primary URL resolver fails", async () => {

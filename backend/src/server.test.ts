@@ -10,6 +10,7 @@ vi.mock("./pipeline.js");
 vi.mock("./claude.js");
 vi.mock("./tts.js");
 vi.mock("./netease.js");
+vi.mock("./music-sources/http-client.js");
 vi.mock("./taste-profile.js");
 vi.mock("./weather.js");
 
@@ -291,7 +292,7 @@ describe("API Server", () => {
     };
     expect(body.searchOrder).toEqual(["local_library", "netease_legacy"]);
     expect(body.playableUrlFallbacks).toEqual([
-      { source: "netease_legacy", fallbacks: ["unblock_netease"] },
+      { source: "netease_legacy", fallbacks: ["unblock_netease", "qq", "kuwo", "local_library"] },
     ]);
     expect(body.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "local_library", role: "library", enabled: true, ok: true }),

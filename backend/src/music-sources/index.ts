@@ -1,12 +1,19 @@
 import type { Track } from "../db.js";
 import type { TasteProfile } from "../taste-profile.js";
 import { fetchMusicAudio, parseMusicAudioUrl } from "./audio-http.js";
+import { KUWO_SOURCE_ID, kuwoAdapter } from "./kuwo.js";
+import { QQ_SOURCE_ID, qqAdapter } from "./qq.js";
 import {
   LOCAL_LIBRARY_SOURCE_ID,
   isLocalLibraryEnabled,
   localLibraryAdapter,
 } from "./local-library.js";
-import { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter, toPlayableTrack } from "./netease-legacy.js";
+import {
+  NETEASE_LEGACY_SOURCE_ID,
+  neteaseLegacyAdapter,
+  resolveNeteaseOpenPlayableUrl,
+  toPlayableTrack,
+} from "./netease-legacy.js";
 import {
   UNBLOCK_NETEASE_SOURCE_ID,
   isUnblockNeteaseEnabled,
@@ -48,10 +55,12 @@ const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
   [localLibraryAdapter.id, localLibraryAdapter],
   [neteaseLegacyAdapter.id, neteaseLegacyAdapter],
   [unblockNeteaseAdapter.id, unblockNeteaseAdapter],
+  [qqAdapter.id, qqAdapter],
+  [kuwoAdapter.id, kuwoAdapter],
 ]);
 
 const PLAYABLE_URL_FALLBACKS: Partial<Record<MusicSourceId, MusicSourceId[]>> = {
-  [NETEASE_LEGACY_SOURCE_ID]: [UNBLOCK_NETEASE_SOURCE_ID],
+  [NETEASE_LEGACY_SOURCE_ID]: [UNBLOCK_NETEASE_SOURCE_ID, QQ_SOURCE_ID, KUWO_SOURCE_ID, LOCAL_LIBRARY_SOURCE_ID],
 };
 const PLAYABLE_URL_VALIDATION_TIMEOUT_MS = 5_000;
 const PLAYABLE_URL_VALIDATION_BYTES = "bytes=0-4095";
@@ -107,13 +116,7 @@ export function listMusicSourceAdapters(): MusicSourceAdapter[] {
 }
 
 function getPlayableUrlFallbacks(source: MusicSourceId): MusicSourceId[] {
-  return (PLAYABLE_URL_FALLBACKS[source] ?? [])
-    .filter((fallbackSource) => {
-      if (fallbackSource === UNBLOCK_NETEASE_SOURCE_ID) {
-        return isUnblockNeteaseEnabled();
-      }
-      return true;
-    });
+  return (PLAYABLE_URL_FALLBACKS[source] ?? []).filter(isSourceEnabled);
 }
 
 function getRuntimeSearchOrder(): MusicSourceId[] {
@@ -125,8 +128,7 @@ function getRuntimeSearchOrder(): MusicSourceId[] {
 
 function getSourceRole(source: MusicSourceId): "library" | "primary" | "fallback" {
   if (source === LOCAL_LIBRARY_SOURCE_ID) return "library";
-  if (source === UNBLOCK_NETEASE_SOURCE_ID) return "fallback";
-  return "primary";
+  return source === NETEASE_LEGACY_SOURCE_ID ? "primary" : "fallback";
 }
 
 function isSourceEnabled(source: MusicSourceId): boolean {
@@ -347,17 +349,63 @@ export async function resolveKnownTrack(
     forceRefresh?: boolean;
   },
 ): Promise<PlayableTrack> {
-  const playableUrl = await resolvePlayableUrlWithFallback(track.source, track.sourceTrackId, options);
+  const playableUrl = await resolvePlayableUrlWithFallback(track, options);
   return toPlayableTrack(track, playableUrl);
 }
 
+function normalizeMatchName(value: string | undefined): string {
+  return (value ?? "").normalize("NFKC").toLowerCase().replace(/[\p{P}\s]/gu, "");
+}
+
+function normalizeMatchArtists(value: string): string {
+  return value.split(/[,;、]|\s+[&/]\s+/u).map(normalizeMatchName).filter(Boolean).sort().join("|");
+}
+
+async function findMatchedTrackId(adapter: MusicSourceAdapter, track: MusicSourceTrack): Promise<string | undefined> {
+  const duration = track.duration ?? 0;
+  const title = normalizeMatchName(track.title);
+  const artists = normalizeMatchArtists(track.artist);
+  const isLocal = adapter.id === LOCAL_LIBRARY_SOURCE_ID;
+  if (!title || !artists || (!isLocal && (!Number.isFinite(duration) || duration <= 0))) return;
+
+  // Keep version words such as Live and Acoustic in the title when matching.
+  const album = normalizeMatchName(track.album);
+  const matches = await adapter.search({ keyword: `${track.title} ${track.artist}`, limit: 8 });
+  const candidates = matches.filter((candidate) =>
+    normalizeMatchName(candidate.title) === title && normalizeMatchArtists(candidate.artist) === artists,
+  );
+  // The local library can know the filename and artist before it has a duration.
+  if (isLocal) return candidates.length === 1 ? candidates[0].sourceTrackId : undefined;
+
+  const sameDuration = candidates.filter((candidate) =>
+    (candidate.duration ?? 0) > 0 && Math.abs((candidate.duration ?? 0) - duration) <= 5_000,
+  );
+  sameDuration.sort((left, right) => {
+    const leftAlbum = Number(Boolean(album) && normalizeMatchName(left.album) === album);
+    const rightAlbum = Number(Boolean(album) && normalizeMatchName(right.album) === album);
+    return rightAlbum - leftAlbum
+      || Math.abs((left.duration ?? 0) - duration) - Math.abs((right.duration ?? 0) - duration);
+  });
+  return sameDuration[0]?.sourceTrackId;
+}
+
 async function resolvePlayableUrlWithFallback(
-  source: MusicSourceId,
-  sourceTrackId: string,
+  track: MusicSourceTrack,
   options?: {
     forceRefresh?: boolean;
   },
 ): Promise<PlayableUrlResult> {
+  const { source, sourceTrackId } = track;
+  if (source === NETEASE_LEGACY_SOURCE_ID) {
+    try {
+      const publicUrl = await resolveNeteaseOpenPlayableUrl(sourceTrackId);
+      if (publicUrl) return await validatePlayableUrlResult(publicUrl);
+    } catch (error) {
+      const normalized = normalizeMusicSourceError(source, error);
+      console.warn(`[music-source] Netease public playback failed for ${sourceTrackId}: ${normalized.code}`);
+    }
+  }
+
   try {
     const adapter = getMusicSourceAdapter(source);
     const result = await adapter.resolvePlayableUrl(sourceTrackId, options);
@@ -369,7 +417,11 @@ async function resolvePlayableUrlWithFallback(
     for (const fallbackSource of fallbackSources) {
       try {
         const fallbackAdapter = getMusicSourceAdapter(fallbackSource);
-        const fallbackResult = await fallbackAdapter.resolvePlayableUrl(sourceTrackId, {
+        const fallbackTrackId = fallbackSource === UNBLOCK_NETEASE_SOURCE_ID
+          ? sourceTrackId
+          : await findMatchedTrackId(fallbackAdapter, track);
+        if (!fallbackTrackId) continue;
+        const fallbackResult = await fallbackAdapter.resolvePlayableUrl(fallbackTrackId, {
           forceRefresh: options?.forceRefresh ?? true,
         });
         return await validatePlayableUrlResult(fallbackResult);

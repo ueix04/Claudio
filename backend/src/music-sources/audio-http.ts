@@ -6,6 +6,8 @@ const MUSIC_AUDIO_DOMAINS = [
   "kugou.com",
   "kgimg.com",
   "migu.cn",
+  "aqqmusic.tc.qq.com",
+  "stream.qqmusic.qq.com",
 ];
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_AUDIO_REDIRECTS = 5;

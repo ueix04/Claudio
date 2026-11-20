@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { fetchSourceJson } from "./music-sources/http-client.js";
 import "./runtime.js";
 
 const require = createRequire(import.meta.url);
@@ -155,6 +156,44 @@ export async function searchSongs(
     tracks,
     total: data.result?.songCount ?? tracks.length,
   };
+}
+
+interface NeteasePublicPlayback {
+  url: string;
+  expiresAt: number;
+  refreshedAt: number;
+}
+
+export async function getOpenPlayableUrl(trackId: number): Promise<NeteasePublicPlayback | null> {
+  if (!Number.isSafeInteger(trackId) || trackId <= 0) return null;
+
+  const detailUrl = new URL("https://music.163.com/api/v3/song/detail");
+  detailUrl.searchParams.set("c", JSON.stringify([{ id: trackId }]));
+  const detail = await fetchSourceJson<{
+    code: number;
+    privileges?: Array<{ id: number; st: number; fee: number; pl: number }>;
+  }>(detailUrl);
+  const access = detail.privileges?.find((entry) => entry.id === trackId);
+  if (detail.code !== 200 || !access || access.st !== 0 || ![0, 8].includes(access.fee)
+    || !Number.isFinite(access.pl) || access.pl <= 0) {
+    return null;
+  }
+
+  const refreshedAt = Date.now();
+  const result = await fetchSourceJson<{
+    code: number;
+    data?: Array<{ id: number; code: number; url?: string; expi: number; fee: number; freeTrialInfo?: unknown }>;
+  }>(new URL("https://music.163.com/api/song/enhance/player/url"), {
+    method: "POST",
+    body: new URLSearchParams({ ids: JSON.stringify([trackId]), br: String(Math.min(320_000, access.pl)) }),
+  });
+  const track = result.data?.find((entry) => entry.id === trackId);
+  if (result.code !== 200 || track?.code !== 200 || typeof track.url !== "string" || !track.url
+    || ![0, 8].includes(track.fee) || track.freeTrialInfo || !Number.isFinite(track.expi) || track.expi <= 0) {
+    return null;
+  }
+
+  return { url: track.url, refreshedAt, expiresAt: refreshedAt + track.expi * 1000 };
 }
 
 export async function getPlayableUrl(

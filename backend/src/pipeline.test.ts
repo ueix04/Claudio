@@ -14,6 +14,7 @@ import * as weather from "./weather.js";
 vi.mock("./db.js");
 vi.mock("./claude.js");
 vi.mock("./netease.js");
+vi.mock("./music-sources/http-client.js");
 vi.mock("./taste-profile.js");
 vi.mock("./tts.js");
 vi.mock("./weather.js");

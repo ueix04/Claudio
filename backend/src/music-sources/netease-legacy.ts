@@ -11,6 +11,11 @@ import {
 export const NETEASE_LEGACY_SOURCE_ID = "netease_legacy" as const;
 const NETEASE_LEGACY_URL_TTL_MS = 8 * 60 * 1000;
 
+export async function resolveNeteaseOpenPlayableUrl(sourceTrackId: string): Promise<PlayableUrlResult | null> {
+  const playback = await netease.getOpenPlayableUrl(Number(sourceTrackId));
+  return playback ? { ...playback, source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId } : null;
+}
+
 function toSourceTrack(track: netease.NeteaseTrack): MusicSourceTrack {
   return {
     source: NETEASE_LEGACY_SOURCE_ID,

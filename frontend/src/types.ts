@@ -331,7 +331,7 @@ export type LocalLibraryTasteMatchSummary = {
   message: string;
 };
 
-export type MusicSourceId = "local_library" | "netease_legacy" | "unblock_netease";
+export type MusicSourceId = "local_library" | "netease_legacy" | "unblock_netease" | "qq" | "kuwo";
 
 export type MusicSourceRuntimeStatus = {
   generatedAt: number;
