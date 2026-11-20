@@ -4,13 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import http from "node:http";
-import { Readable } from "node:stream";
+import { pipeline as streamPipeline } from "node:stream/promises";
 import { WebSocket, WebSocketServer } from "ws";
 import * as db from "./db.js";
 import * as pipeline from "./pipeline.js";
 import * as claude from "./claude.js";
 import * as djLanguage from "./dj-language.js";
 import * as musicSources from "./music-sources/index.js";
+import { fetchMusicAudio, parseMusicAudioUrl } from "./music-sources/audio-http.js";
 import * as netease from "./netease.js";
 import { auditProgramExperience } from "./program-audit.js";
 import { summarizeListenAcceptance } from "./listen-acceptance.js";
@@ -315,46 +316,52 @@ app.get("/api/audio/local/:sourceTrackId", async (req, res) => {
   }
 });
 
-app.get("/api/audio/music", (req, res) => {
+app.get("/api/audio/music", async (req, res) => {
   const { url } = req.query;
-  if (typeof url === "string" && /^https?:\/\//i.test(url)) {
-    void (async () => {
-      try {
-        const rangeHeader = typeof req.headers.range === "string" ? req.headers.range : undefined;
-        const upstream = await fetch(url, {
-          headers: {
-            // Some providers are stricter when the request looks like a generic server fetch.
-            "User-Agent": "Mozilla/5.0 Claudio/1.0",
-            "Accept": "audio/*,*/*;q=0.9",
-            ...(rangeHeader ? { Range: rangeHeader } : {}),
-          },
-        });
-
-        if (!upstream.ok || !upstream.body) {
-          res.status(502).json({ error: `Upstream audio request failed: ${upstream.status}` });
-          return;
-        }
-
-        const contentType = upstream.headers.get("content-type");
-        const contentLength = upstream.headers.get("content-length");
-        const acceptRanges = upstream.headers.get("accept-ranges");
-        const contentRange = upstream.headers.get("content-range");
-
-        res.status(upstream.status);
-        if (contentType) res.setHeader("Content-Type", contentType);
-        if (contentLength) res.setHeader("Content-Length", contentLength);
-        if (acceptRanges) res.setHeader("Accept-Ranges", acceptRanges);
-        if (contentRange) res.setHeader("Content-Range", contentRange);
-        res.setHeader("Cache-Control", "no-store");
-
-        Readable.fromWeb(upstream.body as any).pipe(res);
-      } catch (error) {
-        res.status(502).json({ error: getErrorMessage(error) });
-      }
-    })();
+  const audioUrl = typeof url === "string" ? parseMusicAudioUrl(url) : null;
+  if (!audioUrl) {
+    res.status(400).json({ error: "Invalid music URL" });
     return;
   }
-  res.status(400).json({ error: "Invalid music URL" });
+
+  const controller = new AbortController();
+  const abortUpstream = () => controller.abort();
+  const responseTimeout = setTimeout(abortUpstream, 10_000);
+  res.once("close", abortUpstream);
+
+  try {
+    const range = typeof req.headers.range === "string" ? req.headers.range : undefined;
+    const upstream = await fetchMusicAudio(audioUrl, { range, signal: controller.signal });
+    clearTimeout(responseTimeout);
+
+    if (!upstream.ok || !upstream.body) {
+      await upstream.body?.cancel().catch(() => {});
+      res.status(502).json({ error: `Upstream audio request failed: ${upstream.status}` });
+      return;
+    }
+
+    const contentType = upstream.headers.get("content-type") ?? "";
+    const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
+    const safeContentType = mediaType.startsWith("audio/") || mediaType === "video/mp4"
+      ? contentType
+      : "application/octet-stream";
+    res.status(upstream.status);
+    res.setHeader("Content-Type", safeContentType);
+    for (const header of ["Content-Length", "Accept-Ranges", "Content-Range"]) {
+      const value = upstream.headers.get(header);
+      if (value) res.setHeader(header, value);
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    await streamPipeline(upstream.body, res);
+  } catch {
+    if (!res.destroyed && !res.headersSent) {
+      res.status(502).json({ error: "Upstream audio request failed" });
+    }
+  } finally {
+    clearTimeout(responseTimeout);
+    res.off("close", abortUpstream);
+  }
 });
 
 // Playlist management

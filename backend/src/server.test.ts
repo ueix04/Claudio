@@ -75,6 +75,75 @@ describe("API Server", () => {
     expect(typeof body.timestamp).toBe("number");
   });
 
+  it("音频代理拒绝不受支持的域名", async () => {
+    const request = globalThis.fetch;
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 500 }));
+    try {
+      const url = encodeURIComponent("https://music.126.net.example/audio.mp3");
+      const res = await request(`http://localhost:${port}/api/audio/music?url=${url}`);
+      expect(res.status).toBe(400);
+      expect(upstream).not.toHaveBeenCalled();
+    } finally {
+      upstream.mockRestore();
+    }
+  });
+
+  it("音频代理跟随受支持的重定向并保留分段播放响应", async () => {
+    const request = globalThis.fetch;
+    const audio = "ID3fixture";
+    const upstream = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, {
+        status: 302,
+        headers: { Location: "https://m10.music.126.net/file.mp3" },
+      }))
+      .mockResolvedValueOnce(new Response(audio, {
+        status: 206,
+        headers: {
+          "Content-Type": "audio/mpeg",
+          "Content-Length": String(audio.length),
+          "Accept-Ranges": "bytes",
+          "Content-Range": "bytes 0-9/100",
+        },
+      }));
+    try {
+      const url = encodeURIComponent("https://m701.music.126.net/file.mp3");
+      const res = await request(`http://localhost:${port}/api/audio/music?url=${url}`, {
+        headers: { Range: "bytes=0-9" },
+      });
+      expect(res.status).toBe(206);
+      expect(res.headers.get("content-type")).toBe("audio/mpeg");
+      expect(res.headers.get("content-range")).toBe("bytes 0-9/100");
+      expect(await res.text()).toBe(audio);
+      expect(upstream.mock.calls.map(([target, init]) => ({
+        host: new URL(String(target)).hostname,
+        range: new Headers(init?.headers).get("range"),
+        redirect: init?.redirect,
+      }))).toEqual([
+        { host: "m701.music.126.net", range: "bytes=0-9", redirect: "manual" },
+        { host: "m10.music.126.net", range: "bytes=0-9", redirect: "manual" },
+      ]);
+    } finally {
+      upstream.mockRestore();
+    }
+  });
+
+  it("音频代理不访问重定向到的未批准域名", async () => {
+    const request = globalThis.fetch;
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, {
+      status: 302,
+      headers: { Location: "https://untrusted.example/audio.mp3" },
+    }));
+    try {
+      const url = encodeURIComponent("https://bd-lv.kuwo.cn/file.mp3");
+      const res = await request(`http://localhost:${port}/api/audio/music?url=${url}`);
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ error: "Upstream audio request failed" });
+      expect(upstream).toHaveBeenCalledTimes(1);
+    } finally {
+      upstream.mockRestore();
+    }
+  });
+
   it("批量补齐旧队列中缺失的网易云时长，包括使用备用音源的歌曲", async () => {
     const db = await import("./db.js");
     const netease = await import("./netease.js");

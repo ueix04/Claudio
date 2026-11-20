@@ -1,5 +1,6 @@
 import type { Track } from "../db.js";
 import type { TasteProfile } from "../taste-profile.js";
+import { fetchMusicAudio, parseMusicAudioUrl } from "./audio-http.js";
 import {
   LOCAL_LIBRARY_SOURCE_ID,
   isLocalLibraryEnabled,
@@ -166,19 +167,21 @@ async function validatePlayableUrlResult(result: PlayableUrlResult): Promise<Pla
     return result;
   }
 
+  const audioUrl = parseMusicAudioUrl(result.url);
+  if (!audioUrl) {
+    throw new MusicSourceError(result.source, "unplayable", "Unapproved music audio URL");
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PLAYABLE_URL_VALIDATION_TIMEOUT_MS);
   try {
-    const response = await fetch(result.url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 Claudio/1.0",
-        "Accept": "audio/*,*/*;q=0.9",
-        "Range": PLAYABLE_URL_VALIDATION_BYTES,
-      },
+    const response = await fetchMusicAudio(audioUrl, {
+      range: PLAYABLE_URL_VALIDATION_BYTES,
       signal: controller.signal,
     });
 
     if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => {});
       throw new MusicSourceError(
         result.source,
         response.status >= 500 ? "source_502" : "unplayable",
@@ -427,18 +430,25 @@ export async function refreshStoredTrackPlayableUrl(
   }
 
   try {
-    const playableUrl = await resolvePlayableUrlWithFallback(identity.source, identity.sourceTrackId, {
+    const refreshed = await resolveKnownTrack({
+      ...identity,
+      title: track.name,
+      artist: track.artist,
+      album: track.album,
+      picUrl: track.picUrl,
+      duration: track.duration,
+    }, {
       forceRefresh: options?.forceRefresh ?? true,
     });
+    const { url, urlSource, urlExpiresAt, urlRefreshedAt } = refreshed;
     return {
       ...track,
-      source: identity.source,
-      sourceTrackId: identity.sourceTrackId,
-      urlSource: playableUrl.source,
-      url: playableUrl.url,
-      urlExpiresAt: playableUrl.expiresAt,
-      urlRefreshedAt: playableUrl.refreshedAt,
-      playbackHealth: playableUrl.source !== identity.source ? "fallback" : "ready",
+      ...identity,
+      urlSource,
+      url,
+      urlExpiresAt,
+      urlRefreshedAt,
+      playbackHealth: urlSource !== identity.source ? "fallback" : "ready",
       lastPlaybackIssue: undefined,
       lastResolveError: undefined,
     };
