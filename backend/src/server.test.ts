@@ -1205,10 +1205,18 @@ describe("WebSocket Server", () => {
 
   it("在合成时给发起聊天的客户端推送音频，并在生成完成后提供重播", async () => {
     const claude = await import("./claude.js");
+    const db = await import("./db.js");
     const tts = await import("./tts.js");
-    const direction = "招呼时带一点笑意，下一句语气平静。";
+    const state = await db.getState();
+    vi.mocked(db.getState).mockResolvedValue({
+      ...state,
+      djProfile: { ...state.djProfile, voice: "茉莉" },
+    });
+
+    const direction = "招呼时带一点笑意。到‘今晚’时停一拍，问句语气轻轻上扬。";
     vi.mocked(claude.callJsonLLM).mockResolvedValue({
       say: "你好。今晚想听什么？",
+      ttsText: "你好呀。今晚想听什么？",
       ttsDirection: direction,
     });
 
@@ -1237,8 +1245,12 @@ describe("WebSocket Server", () => {
       expect(message.data.ttsStreamId).toBeTruthy();
       expect(liveMessages.find((m) => m.type === "tts_chunk")?.data).toEqual({ streamId: message.data.ttsStreamId, pcm: "AAA=" });
       expect(legacyMessages.some((m) => m.type === "tts_chunk" || m.type === "dj_message")).toBe(false);
-      expect(tts.speak).toHaveBeenCalledWith(message.data.text, expect.objectContaining({ direction }));
-      expect(claude.callJsonLLM).toHaveBeenCalledWith(expect.stringContaining("ttsDirection"), 20_000);
+      expect(message.data.text).toBe("你好。今晚想听什么？");
+      expect(tts.speak).toHaveBeenCalledWith("你好呀。今晚想听什么？", expect.objectContaining({ direction }));
+      const [prompt, timeout] = vi.mocked(claude.callJsonLLM).mock.calls[0];
+      expect(timeout).toBe(20_000);
+      expect(prompt).toContain("把演绎指令写进 ttsDirection");
+      expect(prompt).toContain("示例台词「刚才那段钢琴收得很轻。接下来这首，留意开头的鼓点。」");
 
       finish();
       await vi.waitFor(() => {
@@ -1415,6 +1427,7 @@ describe("WebSocket Server", () => {
     expect(prompt).toContain("warm, conversational English");
     expect(prompt).toContain('action: "reply_only"');
     expect(prompt).toContain("end where the thought naturally lands");
+    expect(prompt).toContain("Lift slightly on ‘this next track,’ pause before ‘drums,’");
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
 
     ws.close();

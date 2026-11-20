@@ -357,8 +357,7 @@ Rules:
 
 Return JSON only:
 - say: naturally tell the listener in English what nearby direction you are about to explore. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning, normal conversational pace, no slow/deep/whisper/theatrical tags
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 - directions: array of objects with query, direction, reason, risk ("adjacent" or "small_adventure")
 - reason: short explanation of the exploration strategy`;
   }
@@ -387,8 +386,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 
 只输出 JSON：
 - say: 用中文口语告诉听众接下来想试哪个相邻方向。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 语义相同，正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 - directions: 数组，每项包含 query、direction、reason、risk（"adjacent" 或 "small_adventure"）
 - reason: 简短说明这次探索策略`;
 }
@@ -803,8 +801,7 @@ Return JSON only. Required fields:
 - mood: the overall mood of this session
 - plannedMinutes: target duration, an integer from 20 to 40
 - say: open the show in natural spoken English and lead into the first track. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
 - reason: why this set is arranged this way, natural English, 14-30 words
@@ -838,8 +835,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - mood: 这段节目的整体氛围
 - plannedMinutes: 目标时长，20 到 40 之间的整数
 - say: 用中文口语打开这段节目，顺势引入第一首歌。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
 - reason: 说明这档节目为什么这么编排，中文 30-80 字
@@ -885,8 +881,7 @@ Return JSON only. Required fields:
 - mood: the overall mood of this session
 - plannedMinutes: target duration, an integer from 20 to 40
 - say: introduce the new set to the listener in natural spoken English, with details that fit this moment. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - speechPlan: optional array. Each item includes beforeTrackIndex (0-based), type ("intro", "short_say", "bumper", or "closing"), note (optional)
 - reason: why this set is arranged this way, natural English, 14-30 words
@@ -919,8 +914,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 - mood: 这段节目的整体氛围
 - plannedMinutes: 目标时长，20 到 40 之间的整数
 - say: 用中文口语向听众介绍这组歌，聊聊和当下有关的具体细节。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - speechPlan: 可选数组，每项包含 beforeTrackIndex（从 0 开始）、type（"intro"、"short_say"、"bumper" 或 "closing"）、note（可选）
 - reason: 说明这档节目为什么这么编排，中文 30-80 字
@@ -966,8 +960,7 @@ The listener wants to reshape the current set through chat. Build a tighter mini
 Return JSON only. Required fields:
 - title: optional show title
 - say: the DJ's reply to the listener in natural spoken English. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 - lineup: an array of songs. Each item includes title (required), artist (optional), id (required for numeric Netease candidates), mood (optional), reason (optional)
 - reason: why this switch works, natural English, 12-28 words
 `;
@@ -999,8 +992,7 @@ ${candidateContext ? `\n\n在线候选池：\n${candidateContext}` : ""}
 只输出 JSON，对象字段必须是：
 - title: 节目标题，可选
 - say: DJ 用中文口语回应听众。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 - lineup: 歌曲数组，每项包含 title（必填）、artist（选填）、id（命中网易云数字 id 候选时必填）、mood（选填）、reason（选填）
 - reason: 说明这次为什么这么换歌，中文 30-80 字
 `;

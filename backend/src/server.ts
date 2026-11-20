@@ -1786,8 +1786,7 @@ No weather context is provided because this is not a weather request. Do not men
 Return JSON only. Required fields:
 - action: "reply_only"
 - say: respond to the listener in warm, conversational English without inline audio tags. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 
 If the intent is recommendation_reason, explain the current track using only the current track and current program notes. Do not invent private listener data.
 If the intent is emotion_expression, acknowledge what the listener shared in your own words and keep the show moving gently.
@@ -1808,8 +1807,7 @@ ${recentHistory || "无"}
 请输出 JSON，不要 Markdown，不要额外说明。字段必须是：
 - action: "reply_only"
 - say: 用温柔自然的中文口语回应听众，不包含音频标签。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 
 如果 intent 是 recommendation_reason，只能基于当前歌曲和当前节目说明推荐原因，不要编造用户隐私或不存在的资料。
 如果 intent 是 emotion_expression，先轻轻承接情绪，再自然把后面的音乐接住。
@@ -1835,8 +1833,7 @@ ${recentHistory || "none"}
 You are Claudio, an AI emotional radio DJ. Return JSON only.
 - action: "answer_weather"
 - say: answer the listener's question in natural spoken English, using only the weather context above. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical stage directions
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 
 If the weather context is unavailable, say you cannot get the latest weather right now.
 `;
@@ -1853,8 +1850,7 @@ ${recentHistory || "无"}
 你是 Claudio，AI 情感电台 DJ。请输出 JSON，不要 Markdown，不要额外说明。
 - action: "answer_weather"
 - say: 用中文口语回答听众的问题，只依据上面的天气信息。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 给 MiMo TTS 朗读的文本，语义必须与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 
 如果天气上下文不可用，就说明现在拿不到最新天气，不要编造。
 `;
@@ -2025,8 +2021,7 @@ ${recentDjLines ? `A few recent DJ lines you already said:\n${recentDjLines}` : 
 
 Return JSON only. No markdown, no extra explanation.
 - say: connect the tracks in natural spoken English, as a DJ talking to a listener. ${djLanguage.DJ_SPEECH_GUIDANCE.en}
-- ttsText: same meaning as say, normal conversational pace, no slow/deep/whisper/theatrical performance tags
-${djLanguage.TTS_DIRECTION_FIELD.en}
+${djLanguage.TTS_SCRIPT_FIELDS.en}
 
 Extra constraints:
 - Do not reintroduce yourself
@@ -2051,8 +2046,7 @@ ${recentDjLines ? `最近几句你刚说过的话：\n${recentDjLines}` : ""}
 
 请输出 JSON，不要 markdown，不要额外说明：
 - say: 用中文口语在两首歌之间自然接话，像 DJ 在和听众聊天。${djLanguage.DJ_SPEECH_GUIDANCE.zh}
-- ttsText: 给 TTS 的版本，语义与 say 一致，保持正常聊天语速，不要加入低声、语速放慢、故作深沉或表演化标签
-${djLanguage.TTS_DIRECTION_FIELD.zh}
+${djLanguage.TTS_SCRIPT_FIELDS.zh}
 
 额外限制：
 - 不要重新自我介绍
