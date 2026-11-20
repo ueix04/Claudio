@@ -650,7 +650,7 @@ async function resolvePlayableTracksFromRequests(
             title: candidate.title,
             artist: candidate.artist,
             album: candidate.album,
-            duration: 0,
+            duration: candidate.duration,
           });
         } catch {
           // fall through to search-based resolution

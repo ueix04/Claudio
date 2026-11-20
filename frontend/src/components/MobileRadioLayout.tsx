@@ -65,10 +65,6 @@ const formatPlaybackTime = (timeInSeconds: number) => {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 };
 
-const normalizeDurationSeconds = (duration: number) => (
-  Number.isFinite(duration) && duration > 1000 ? duration / 1000 : duration
-);
-
 const formatDayLabel = (date: Date) =>
   date.toLocaleDateString("en-US", { weekday: "long" });
 
@@ -148,17 +144,14 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
 
   const currentTrack = playerState.currentTrack;
   const currentTrackId = currentTrack?.id ?? currentTrack?.url ?? "";
-  const durationSeconds = normalizeDurationSeconds(playerState.duration);
-  const currentTimeSeconds = playerState.currentTime > durationSeconds && playerState.currentTime > 1000
-    ? playerState.currentTime / 1000
-    : playerState.currentTime;
+  const { currentTime, duration } = playerState;
+  const playbackPosition = Math.min(currentTime, duration);
+  const durationLabel = duration > 0 ? formatPlaybackTime(Math.round(duration)) : "--:--";
   const isCurrentFavorite = Boolean(
     currentTrack?.isFavorite
       || favoriteTracks.some((track) => track.id === currentTrackId || track.url === currentTrack?.url),
   );
-  const progressPercent = durationSeconds > 0
-    ? Math.min(100, Math.max(0, (currentTimeSeconds / durationSeconds) * 100))
-    : 0;
+  const progressPercent = duration > 0 ? (playbackPosition / duration) * 100 : 0;
   const queueCount = playerState.queueCount || playerState.playlist.length;
   const readyDiscoveryCount = discoveryCandidates.filter((item) => item.health === "ready").length;
 
@@ -173,13 +166,6 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
     if (event.key !== "Enter") return;
     event.preventDefault();
     handleSend();
-  };
-
-  const handleProgressClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!durationSeconds) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    onSeek(durationSeconds * ratio);
   };
 
   const handleVoiceAction = () => {
@@ -476,12 +462,26 @@ export const MobileRadioLayout: React.FC<MobileRadioLayoutProps> = ({
           </button>
         </div>
 
-        <div className="mobile-progress-row" onClick={handleProgressClick}>
-          <span>{formatPlaybackTime(currentTimeSeconds)}</span>
-          <div className="mobile-progress-rail">
-            <div className="mobile-progress-fill" style={{ width: `${progressPercent}%` }}></div>
+        <div className="mobile-progress-row">
+          <span>{formatPlaybackTime(currentTime)}</span>
+          <div className="mobile-progress-track">
+            <div className="mobile-progress-rail" aria-hidden="true">
+              <div className="mobile-progress-fill" style={{ width: `${progressPercent}%` }}></div>
+            </div>
+            <input
+              type="range"
+              className="playback-seek-input"
+              aria-label="Playback position"
+              aria-valuetext={`${formatPlaybackTime(currentTime)} / ${durationLabel}`}
+              min={0}
+              max={duration || 1}
+              step="any"
+              value={playbackPosition}
+              disabled={!duration}
+              onChange={(event) => onSeek(event.currentTarget.valueAsNumber)}
+            />
           </div>
-          <span>{formatPlaybackTime(durationSeconds)}</span>
+          <span>{durationLabel}</span>
         </div>
 
         <div className="mobile-controls-row">

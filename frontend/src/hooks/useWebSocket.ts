@@ -62,16 +62,6 @@ function chatEntryKey(entry: Pick<ChatEntry, "role" | "text" | "timestamp">): st
   return JSON.stringify([entry.timestamp, entry.role, entry.text]);
 }
 
-type PlayableTrackInfo = TrackInfo & {
-  id?: string;
-};
-
-type PreloadedTrack = {
-  key: string;
-  url: string;
-  ready: boolean;
-};
-
 type QueueStepReason = "manual_skip" | "track_complete";
 type QueueStepPayload = {
   reason?: QueueStepReason;
@@ -87,17 +77,15 @@ type ClientPlaybackIssueCode = "client_silent_audio" | "audio_error";
 const getTrackPlaybackKey = (track?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null) =>
   track?.id || track?.url || "";
 
-const isSamePlaybackTrack = (
-  a?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null,
-  b?: Pick<TrackInfo, "id" | "url"> | Pick<PlaylistTrack, "id" | "url"> | null,
-) => Boolean(
-  a
-    && b
-    && (
-      (a.id && b.id && a.id === b.id)
-      || a.url === b.url
-    ),
-);
+function positiveDuration(duration?: number): number | undefined {
+  return typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : undefined;
+}
+
+function normalizeTrackDuration(duration?: number): number | undefined {
+  const value = positiveDuration(duration);
+  // NetEase sends milliseconds. Older saved queues can contain seconds.
+  return value && value > 1000 ? value / 1000 : value;
+}
 
 export function useWebSocket() {
   const [hasHydratedState, setHasHydratedState] = useState(false);
@@ -151,9 +139,9 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const ttsPlayingRef = useRef(false);
   const prefetchedTrackKeyRef = useRef<string | null>(null);
-  const preloadedTrackRef = useRef<PreloadedTrack | null>(null);
   const activeMusicAudioRef = useRef<HTMLAudioElement | null>(null);
-  const standbyMusicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const outgoingMusicAudioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackAttemptRef = useRef(0);
   const audioRecoveryRef = useRef<{ trackKey?: string; url?: string; attempts: number }>({ attempts: 0 });
   const silentAudioRecoveryRef = useRef<{
     trackKey?: string;
@@ -167,7 +155,7 @@ export function useWebSocket() {
     lastActionAt: 0,
   });
   const userVolumeRef = useRef(0.8);
-  const fadeFramesRef = useRef<WeakMap<HTMLAudioElement, number>>(new WeakMap());
+  const audioFadesRef = useRef(new Map<HTMLAudioElement, { frame: number; finish: () => void }>());
   const playerStateRef = useRef(playerState);
   const favoriteIdsRef = useRef<string[]>([]);
   const trackCatalogRef = useRef<Map<string, TrackInfo>>(new Map());
@@ -239,46 +227,54 @@ export function useWebSocket() {
   }, []);
 
   const getStandbyMusicAudio = useCallback(() => {
-    const primary = audioRef.current;
-    const secondary = nextAudioRef.current;
-    const active = getActiveMusicAudio();
-    const standby = active === primary ? secondary : primary;
-    standbyMusicAudioRef.current = standby ?? null;
-    return standby ?? null;
+    return getActiveMusicAudio() === audioRef.current ? nextAudioRef.current : audioRef.current;
   }, [getActiveMusicAudio]);
 
   const getEffectiveMusicVolume = useCallback(() => (
     userVolumeRef.current * (ttsPlayingRef.current ? TTS_DUCK_RATIO : 1)
   ), []);
 
-  const fadeAudioVolume = useCallback((audio: HTMLAudioElement, targetVolume: number, duration = MUSIC_FADE_MS) => {
-    const frame = fadeFramesRef.current.get(audio);
-    if (frame !== undefined) {
-      window.cancelAnimationFrame(frame);
-      fadeFramesRef.current.delete(audio);
+  const fadeAudioVolume = useCallback((
+    audio: HTMLAudioElement,
+    targetVolume: number,
+    duration = MUSIC_FADE_MS,
+    onComplete?: () => void,
+  ) => {
+    const fades = audioFadesRef.current;
+    const previousFade = fades.get(audio);
+    if (previousFade) {
+      window.cancelAnimationFrame(previousFade.frame);
+      fades.delete(audio);
     }
 
     const boundedTarget = Math.min(1, Math.max(0, targetVolume));
-    if (duration <= 0) {
+    // Background tabs suspend animation frames, including one that would raise music from zero.
+    if (document.hidden || duration <= 0 || audio.volume === boundedTarget) {
       audio.volume = boundedTarget;
+      onComplete?.();
       return;
     }
 
     const startVolume = audio.volume;
     const startedAt = performance.now();
+    const finish = () => {
+      window.cancelAnimationFrame(fade.frame);
+      fades.delete(audio);
+      audio.volume = boundedTarget;
+      onComplete?.();
+    };
     const step = (now: number) => {
       const progress = Math.min(1, (now - startedAt) / duration);
-      audio.volume = startVolume + ((boundedTarget - startVolume) * progress);
       if (progress < 1) {
-        const nextFrame = window.requestAnimationFrame(step);
-        fadeFramesRef.current.set(audio, nextFrame);
+        audio.volume = startVolume + ((boundedTarget - startVolume) * progress);
+        fade.frame = window.requestAnimationFrame(step);
       } else {
-        fadeFramesRef.current.delete(audio);
+        finish();
       }
     };
 
-    const nextFrame = window.requestAnimationFrame(step);
-    fadeFramesRef.current.set(audio, nextFrame);
+    const fade = { frame: window.requestAnimationFrame(step), finish };
+    fades.set(audio, fade);
   }, []);
 
   const applyActiveMusicVolume = useCallback((duration = 180) => {
@@ -288,6 +284,38 @@ export function useWebSocket() {
     }
   }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume]);
 
+  useEffect(() => {
+    const fades = audioFadesRef.current;
+    const onVisibilityChange = () => {
+      if (!document.hidden) return;
+      for (const fade of [...fades.values()]) fade.finish();
+      applyActiveMusicVolume(0);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      for (const fade of fades.values()) window.cancelAnimationFrame(fade.frame);
+      fades.clear();
+    };
+  }, [applyActiveMusicVolume]);
+
+  const releaseMusicAudio = useCallback((audio: HTMLAudioElement) => {
+    fadeAudioVolume(audio, 0, 0);
+    audio.pause();
+    audio.removeAttribute("src");
+    delete audio.dataset.loadedUrl;
+    delete audio.dataset.playbackKey;
+    delete audio.dataset.preloadKey;
+    audio.load();
+  }, [fadeAudioVolume]);
+
+  const finishTrackTransition = useCallback(() => {
+    const outgoing = outgoingMusicAudioRef.current;
+    if (!outgoing) return;
+    outgoingMusicAudioRef.current = null;
+    releaseMusicAudio(outgoing);
+  }, [releaseMusicAudio]);
+
   const findNextPlaylistTrack = useCallback((): PlaylistTrack | null => {
     const state = playerStateRef.current;
     const playlist = state.playlist;
@@ -296,9 +324,7 @@ export function useWebSocket() {
     }
 
     const currentKey = getTrackPlaybackKey(state.currentTrack);
-    const currentIndex = playlist.findIndex((track) =>
-      track.isPlaying || track.id === currentKey || track.url === state.currentTrack?.url,
-    );
+    const currentIndex = playlist.findIndex((track) => track.id === currentKey);
     if (currentIndex === -1) {
       return null;
     }
@@ -312,6 +338,10 @@ export function useWebSocket() {
   }, []);
 
   const preloadNextPlaylistTrack = useCallback(() => {
+    if (outgoingMusicAudioRef.current) return;
+    const active = getActiveMusicAudio();
+    if (active?.dataset.playbackKey !== getTrackPlaybackKey(playerStateRef.current.currentTrack)) return;
+
     const standby = getStandbyMusicAudio();
     const nextTrack = findNextPlaylistTrack();
     if (!standby || !nextTrack?.url) {
@@ -319,36 +349,17 @@ export function useWebSocket() {
     }
 
     const key = getTrackPlaybackKey(nextTrack);
-    const existing = preloadedTrackRef.current;
-    if (
-      existing
-      && existing.key === key
-      && existing.url === nextTrack.url
-      && standby.dataset.preloadKey === key
-    ) {
+    if (standby.dataset.preloadKey === key && standby.dataset.loadedUrl === nextTrack.url) {
       return;
     }
 
     standby.pause();
     standby.volume = 0;
-    standby.preload = "auto";
+    delete standby.dataset.playbackKey;
     standby.dataset.preloadKey = key;
-    standby.dataset.playbackUrl = nextTrack.url;
-    if (standby.dataset.loadedUrl !== nextTrack.url) {
-      standby.src = nextTrack.url;
-      standby.dataset.loadedUrl = nextTrack.url;
-    }
-    preloadedTrackRef.current = {
-      key,
-      url: nextTrack.url,
-      ready: standby.readyState >= PRELOAD_READY_STATE,
-    };
-    try {
-      standby.load();
-    } catch {
-      // Some browsers throw if load is called while the media element is being torn down.
-    }
-  }, [findNextPlaylistTrack, getStandbyMusicAudio]);
+    standby.dataset.loadedUrl = nextTrack.url;
+    standby.src = nextTrack.url;
+  }, [findNextPlaylistTrack, getActiveMusicAudio, getStandbyMusicAudio]);
 
   const rememberTrack = useCallback((track: TrackInfo) => {
     const next = new Map(trackCatalogRef.current);
@@ -381,71 +392,16 @@ export function useWebSocket() {
       artist: data.artist,
       album: data.album,
       url: proxiedUrl,
-      duration: data.duration,
+      duration: normalizeTrackDuration(data.duration),
     };
   }, [toPlayableUrl]);
 
-  const startPreloadedTrack = useCallback((track: PlayableTrackInfo) => {
-    const incoming = getStandbyMusicAudio();
-    const outgoing = getActiveMusicAudio();
-    const key = getTrackPlaybackKey(track);
-    const preloaded = preloadedTrackRef.current;
-    if (
-      !incoming
-      || !outgoing
-      || !preloaded
-      || preloaded.key !== key
-      || preloaded.url !== track.url
-      || incoming.dataset.preloadKey !== key
-      || (!preloaded.ready && incoming.readyState < PRELOAD_READY_STATE)
-    ) {
-      return false;
-    }
-
-    activeMusicAudioRef.current = incoming;
-    standbyMusicAudioRef.current = outgoing;
-    preloadedTrackRef.current = null;
-    incoming.dataset.playbackKey = key;
-    incoming.dataset.playbackUrl = track.url;
-    incoming.volume = 0;
-
-    incoming.play()
-      .then(() => {
-        fadeAudioVolume(incoming, getEffectiveMusicVolume(), MUSIC_FADE_MS);
-        fadeAudioVolume(outgoing, 0, MUSIC_FADE_MS);
-        window.setTimeout(() => {
-          if (standbyMusicAudioRef.current === outgoing) {
-            outgoing.pause();
-            outgoing.removeAttribute("src");
-            delete outgoing.dataset.loadedUrl;
-            delete outgoing.dataset.preloadKey;
-            try {
-              outgoing.load();
-            } catch {}
-          }
-        }, MUSIC_FADE_MS + 80);
-      })
-      .catch((error) => {
-        console.error(error);
-        activeMusicAudioRef.current = outgoing;
-        standbyMusicAudioRef.current = incoming;
-        incoming.pause();
-        preloadedTrackRef.current = null;
-        if (outgoing.dataset.loadedUrl !== track.url) {
-          outgoing.src = track.url;
-          outgoing.dataset.loadedUrl = track.url;
-        }
-        outgoing.play().catch(console.error);
-        fadeAudioVolume(outgoing, getEffectiveMusicVolume(), MUSIC_FADE_MS);
-      });
-
-    return true;
-  }, [fadeAudioVolume, getActiveMusicAudio, getEffectiveMusicVolume, getStandbyMusicAudio]);
-
-  const playMusic = useCallback((url: string, title: string, artist: string, album?: string, id?: string, duration?: number) => {
-    const a = getActiveMusicAudio();
-    if (!a) return;
-    const track: PlayableTrackInfo = { id, url, title, artist, album, duration };
+  const playMusic = useCallback((track: TrackInfo, autoplay = true) => {
+    const active = getActiveMusicAudio();
+    if (!active) return;
+    const attempt = ++playbackAttemptRef.current;
+    finishTrackTransition();
+    const { id, url } = track;
     const trackKey = getTrackPlaybackKey(track);
     const recovery = audioRecoveryRef.current;
     if (recovery.trackKey !== trackKey || recovery.url !== url) {
@@ -453,66 +409,85 @@ export function useWebSocket() {
     }
 
     prefetchedTrackKeyRef.current = null;
-    const usedPreloadedAudio = startPreloadedTrack(track);
-    if (!usedPreloadedAudio) {
-      a.pause();
-      a.volume = 0;
-      a.dataset.playbackKey = trackKey;
-      a.dataset.playbackUrl = url;
-      if (a.dataset.loadedUrl !== url) {
-        a.src = url;
-        a.dataset.loadedUrl = url;
+    const standby = getStandbyMusicAudio();
+    const preloaded = autoplay && standby?.dataset.preloadKey === trackKey
+      && standby.dataset.loadedUrl === url && standby.readyState >= PRELOAD_READY_STATE ? standby : null;
+    const audio = preloaded ?? active;
+    activeMusicAudioRef.current = audio;
+    outgoingMusicAudioRef.current = preloaded ? active : null;
+    const mediaDuration = audio.dataset.loadedUrl === url && !audio.error
+      ? positiveDuration(audio.duration)
+      : undefined;
+
+    const loadTrack = (element: HTMLAudioElement) => {
+      delete element.dataset.preloadKey;
+      element.dataset.playbackKey = trackKey;
+      if (element.dataset.loadedUrl !== url || element.error) {
+        element.dataset.loadedUrl = url;
+        element.src = url;
       }
-      a.currentTime = 0;
-      a.play().catch(console.error);
-      fadeAudioVolume(a, getEffectiveMusicVolume(), MUSIC_FADE_MS);
-    }
+      if (element.currentTime !== 0) element.currentTime = 0;
+    };
+    if (!preloaded) audio.pause();
+    loadTrack(audio);
 
     const isFavorite = id ? favoriteIdsRef.current.includes(id) : false;
-    setPlayerState((p) => ({
-      ...p,
-      currentTrack: { id, url, title, artist, album, duration, isFavorite },
-      isPlaying: true,
-      currentTime: 0,
-      duration: duration ?? 0,
-      audioSignalLevel: null,
-    }));
-    setStatus("playing");
-    rememberTrack({ id, url, title, artist, album, duration, isFavorite });
-    window.setTimeout(() => {
+    const currentTrack = { ...track, duration: mediaDuration ?? track.duration, isFavorite };
+    setPlayerState((p) => {
+      const queuedTrack = p.playlist.find((item) => item.id === trackKey);
+      const duration = mediaDuration ?? queuedTrack?.duration ?? track.duration;
+      const playlist = p.playlist.map((item) => item.id === trackKey
+        ? { ...currentTrack, id: trackKey, duration, isPlaying: true }
+        : { ...item, isPlaying: false });
+      if (!queuedTrack) playlist.push({ ...currentTrack, id: trackKey, duration, isPlaying: true });
+      return {
+        ...p,
+        currentTrack: { ...currentTrack, duration },
+        playlist,
+        queueCount: playlist.length,
+        isPlaying: false,
+        currentTime: 0,
+        duration: duration ?? 0,
+        audioSignalLevel: null,
+      };
+    });
+    rememberTrack(currentTrack);
+
+    if (!autoplay) return;
+
+    const startAudio = async (element: HTMLAudioElement) => {
+      fadeAudioVolume(element, document.hidden ? getEffectiveMusicVolume() : 0, 0);
+      await element.play();
+      if (playbackAttemptRef.current !== attempt) return;
+      fadeAudioVolume(element, getEffectiveMusicVolume());
+      if (outgoingMusicAudioRef.current === active) {
+        fadeAudioVolume(active, 0, MUSIC_FADE_MS, () => {
+          finishTrackTransition();
+          preloadNextPlaylistTrack();
+        });
+      }
+    };
+
+    void startAudio(audio).catch(() => {
+      if (playbackAttemptRef.current !== attempt || !preloaded) return;
+      activeMusicAudioRef.current = active;
+      outgoingMusicAudioRef.current = null;
+      releaseMusicAudio(audio);
+      active.pause();
+      loadTrack(active);
+      void startAudio(active).catch(() => {});
       preloadNextPlaylistTrack();
-    }, 0);
+    });
   }, [
     fadeAudioVolume,
+    finishTrackTransition,
     getActiveMusicAudio,
     getEffectiveMusicVolume,
+    getStandbyMusicAudio,
     preloadNextPlaylistTrack,
+    releaseMusicAudio,
     rememberTrack,
-    startPreloadedTrack,
   ]);
-
-  const resolveAndPlayTrack = useCallback((data: WSTrackPayload) => {
-    const normalized = normalizeTrack(data);
-    const id = normalized.id;
-    rememberTrack({
-      id,
-      url: normalized.url,
-      title: normalized.title,
-      artist: normalized.artist,
-      album: normalized.album,
-      duration: normalized.duration,
-      isFavorite: favoriteIdsRef.current.includes(id),
-    });
-    setPlayerState((p) => {
-      const exists = p.playlist.some((t) => t.id === id);
-      const pl: PlaylistTrack[] = exists
-        ? p.playlist
-        : [...p.playlist, { id, title: normalized.title, artist: normalized.artist, album: normalized.album, duration: normalized.duration, isPlaying: false, url: normalized.url }];
-      const finalPl = pl.map((t) => ({ ...t, isPlaying: t.id === id }));
-      return { ...p, playlist: finalPl, queueCount: finalPl.length, status: "playing" as AppStatus };
-    });
-    playMusic(normalized.url, normalized.title, normalized.artist, normalized.album, id, normalized.duration);
-  }, [normalizeTrack, playMusic, rememberTrack]);
 
   const requestUpcomingPrefetch = useCallback(() => {
     const ws = wsRef.current;
@@ -586,8 +561,7 @@ export function useWebSocket() {
     if (pl.length === 0) return;
     const idx = pl.findIndex((t) => t.isPlaying);
     const target = pl[(idx + step + pl.length) % pl.length];
-    setPlayerState((p) => ({ ...p, playlist: p.playlist.map((t) => ({ ...t, isPlaying: t.id === target.id })) }));
-    playMusic(target.url, target.title, target.artist, target.album, target.id);
+    playMusic(target);
   }, [playMusic]);
 
   const onNext = useCallback(() => {
@@ -645,12 +619,22 @@ export function useWebSocket() {
     if (!a) return;
     const ct = playerStateRef.current.currentTrack;
     if (!ct?.url) return;
-    a.paused ? a.play().catch(console.error) : a.pause();
-  }, [getActiveMusicAudio]);
+    if (a.paused) {
+      applyActiveMusicVolume(0);
+      void a.play().catch(console.error);
+    } else {
+      ++playbackAttemptRef.current;
+      a.pause();
+      finishTrackTransition();
+      preloadNextPlaylistTrack();
+    }
+  }, [applyActiveMusicVolume, finishTrackTransition, getActiveMusicAudio, preloadNextPlaylistTrack]);
 
   const onSeek = useCallback((time: number) => {
     const active = getActiveMusicAudio();
-    if (active) active.currentTime = time;
+    const duration = positiveDuration(active?.duration) ?? playerStateRef.current.duration;
+    if (!active || duration <= 0 || !Number.isFinite(time)) return;
+    active.currentTime = Math.max(0, Math.min(duration, time));
   }, [getActiveMusicAudio]);
 
   const onVolumeChange = useCallback((vol: number) => {
@@ -705,9 +689,7 @@ export function useWebSocket() {
       wsRef.current.send(JSON.stringify({ type: "queue_select", data: { trackId } }));
       return;
     }
-    setPlayerState((p) => ({ ...p, playlist: p.playlist.map((t) => ({ ...t, isPlaying: t.id === trackId })) }));
-    const catalogTrack = trackCatalogRef.current.get(trackId);
-    playMusic(track.url, track.title, track.artist, track.album, track.id, catalogTrack?.duration);
+    playMusic(track);
   }, [playMusic]);
 
   const playSavedTrack = useCallback((trackId: string) => {
@@ -717,38 +699,7 @@ export function useWebSocket() {
       return;
     }
 
-    setPlayerState((p) => {
-      const targetId = catalogTrack.id ?? trackId;
-      const exists = p.playlist.some((track) => track.id === targetId);
-      const playlist = exists
-        ? p.playlist.map((track) => ({ ...track, isPlaying: track.id === targetId }))
-        : [
-            ...p.playlist.map((track) => ({ ...track, isPlaying: false })),
-            {
-              id: targetId,
-              title: catalogTrack.title,
-              artist: catalogTrack.artist,
-              album: catalogTrack.album,
-              duration: catalogTrack.duration,
-              isPlaying: true,
-              url: catalogTrack.url,
-            },
-          ];
-      return {
-        ...p,
-        playlist,
-        queueCount: playlist.length,
-      };
-    });
-
-    playMusic(
-      catalogTrack.url,
-      catalogTrack.title,
-      catalogTrack.artist,
-      catalogTrack.album,
-      catalogTrack.id ?? trackId,
-      catalogTrack.duration,
-    );
+    playMusic({ ...catalogTrack, id: catalogTrack.id ?? trackId });
   }, [playMusic, showUtilityNotice]);
 
   const startDjSpeech = useCallback((text?: string) => {
@@ -1116,6 +1067,38 @@ export function useWebSocket() {
     preloadNextPlaylistTrack,
   ]);
 
+  const queueTrackIds = playerState.playlist.map((track) => track.id).sort().join("|");
+  useEffect(() => {
+    if (!playerStateRef.current.playlist.some((track) => !track.duration)) return;
+
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/radio/queue-durations", { signal: controller.signal });
+        if (!response.ok) return;
+        const durations = await response.json() as Record<string, number>;
+        if (controller.signal.aborted) return;
+        setPlayerState((p) => {
+          const playlist = p.playlist.map((track) => {
+            const durationMs = positiveDuration(durations[track.id]);
+            return track.duration || !durationMs ? track : { ...track, duration: durationMs / 1000 };
+          });
+          const currentTrack = p.currentTrack;
+          const duration = p.duration || playlist.find((track) => track.id === getTrackPlaybackKey(currentTrack))?.duration || 0;
+          return {
+            ...p,
+            playlist,
+            duration,
+            currentTrack: currentTrack && duration !== p.duration ? { ...currentTrack, duration } : currentTrack,
+          };
+        });
+      } catch {
+        // Media metadata remains available when the catalog lookup fails.
+      }
+    })();
+    return () => controller.abort();
+  }, [queueTrackIds]);
+
   useEffect(() => {
     const track = playerState.currentTrack;
     const trackKey = getTrackPlaybackKey(track);
@@ -1229,34 +1212,48 @@ export function useWebSocket() {
     if (!primary || !secondary) return;
 
     activeMusicAudioRef.current = activeMusicAudioRef.current ?? primary;
-    standbyMusicAudioRef.current = standbyMusicAudioRef.current ?? secondary;
     primary.volume = getEffectiveMusicVolume();
     secondary.volume = 0;
 
     const isActiveAudio = (audio: HTMLAudioElement) => audio === getActiveMusicAudio();
 
-    const onTU = (event: Event) => {
+    const onTimeUpdate = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
       if (!isActiveAudio(a)) return;
+      const time = a.currentTime;
       setPlayerState((p) => {
-        if (Math.abs(p.currentTime - a.currentTime) < 0.3) return p;
-        return { ...p, currentTime: a.currentTime };
+        if (getTrackPlaybackKey(p.currentTrack) !== a.dataset.playbackKey
+          || (event.type !== "seeked" && Math.abs(p.currentTime - time) < 0.2)) return p;
+        return { ...p, currentTime: time };
       });
 
-      if (!Number.isFinite(a.duration) || a.duration <= 0) {
-        return;
-      }
+      const duration = positiveDuration(a.duration) ?? playerStateRef.current.duration;
+      if (duration <= 0) return;
 
-      const remaining = a.duration - a.currentTime;
-      const prefetchThreshold = Math.min(90, Math.max(35, a.duration * 0.5));
+      const remaining = duration - time;
+      const prefetchThreshold = Math.min(90, Math.max(35, duration * 0.5));
       if (remaining <= prefetchThreshold) {
         requestUpcomingPrefetch();
       }
     };
-    const onLM = (event: Event) => {
+    const onDurationChange = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
-      if (!isActiveAudio(a)) return;
-      setPlayerState((p) => ({ ...p, duration: a.duration || p.duration }));
+      const active = isActiveAudio(a);
+      const key = active ? a.dataset.playbackKey : a.dataset.preloadKey;
+      const url = a.dataset.loadedUrl;
+      const duration = positiveDuration(a.duration);
+      if (!key || !url || !duration) return;
+
+      setPlayerState((p) => {
+        const playlist = p.playlist.map((track) => track.id === key && track.url === url && track.duration !== duration
+          ? { ...track, duration }
+          : track);
+        const currentTrack = p.currentTrack;
+        if (active && currentTrack && getTrackPlaybackKey(currentTrack) === key && currentTrack.url === url) {
+          return { ...p, playlist, duration, currentTrack: { ...currentTrack, duration } };
+        }
+        return { ...p, playlist };
+      });
     };
     const onEnd = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
@@ -1264,28 +1261,18 @@ export function useWebSocket() {
       prefetchedTrackKeyRef.current = null;
       requestQueueStep("next", () => playRelativeTrackLocally(1), buildQueueStepPayload("track_complete", a));
     };
-    const onPl = (event: Event) => {
+    const onPlaying = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
-      if (!isActiveAudio(a)) return;
-      setPlayerState((p) => ({ ...p, isPlaying: true }));
+      if (!isActiveAudio(a) || a.paused) return;
+      setPlayerState((p) => ({ ...p, isPlaying: true, status: ttsPlayingRef.current ? "speaking" : "playing" }));
       if (!ttsPlayingRef.current) {
         setStatus("playing");
       }
     };
     const onPs = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
-      if (!isActiveAudio(a)) return;
+      if (!isActiveAudio(a) || !a.paused) return;
       setPlayerState((p) => ({ ...p, isPlaying: false }));
-    };
-    const onCanPlay = (event: Event) => {
-      const a = event.currentTarget as HTMLAudioElement;
-      const preloaded = preloadedTrackRef.current;
-      if (preloaded && a.dataset.preloadKey === preloaded.key) {
-        preloadedTrackRef.current = {
-          ...preloaded,
-          ready: true,
-        };
-      }
     };
     const onWaiting = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
@@ -1302,24 +1289,22 @@ export function useWebSocket() {
     const onError = (event: Event) => {
       const a = event.currentTarget as HTMLAudioElement;
       if (isActiveAudio(a)) {
-        handleActiveAudioFailure("error");
+        if (!outgoingMusicAudioRef.current) handleActiveAudioFailure("error");
         return;
       }
 
-      preloadedTrackRef.current = null;
-      delete a.dataset.preloadKey;
-      requestUpcomingPrefetch();
+      if (a.dataset.preloadKey) requestUpcomingPrefetch();
     };
 
     const audioElements = [primary, secondary];
     audioElements.forEach((audio) => {
-      audio.addEventListener("timeupdate", onTU);
-      audio.addEventListener("loadedmetadata", onLM);
+      audio.addEventListener("timeupdate", onTimeUpdate);
+      audio.addEventListener("seeked", onTimeUpdate);
+      audio.addEventListener("loadedmetadata", onDurationChange);
+      audio.addEventListener("durationchange", onDurationChange);
       audio.addEventListener("ended", onEnd);
-      audio.addEventListener("play", onPl);
+      audio.addEventListener("playing", onPlaying);
       audio.addEventListener("pause", onPs);
-      audio.addEventListener("canplay", onCanPlay);
-      audio.addEventListener("canplaythrough", onCanPlay);
       audio.addEventListener("waiting", onWaiting);
       audio.addEventListener("stalled", onStalled);
       audio.addEventListener("error", onError);
@@ -1327,13 +1312,13 @@ export function useWebSocket() {
 
     return () => {
       audioElements.forEach((audio) => {
-        audio.removeEventListener("timeupdate", onTU);
-        audio.removeEventListener("loadedmetadata", onLM);
+        audio.removeEventListener("timeupdate", onTimeUpdate);
+        audio.removeEventListener("seeked", onTimeUpdate);
+        audio.removeEventListener("loadedmetadata", onDurationChange);
+        audio.removeEventListener("durationchange", onDurationChange);
         audio.removeEventListener("ended", onEnd);
-        audio.removeEventListener("play", onPl);
+        audio.removeEventListener("playing", onPlaying);
         audio.removeEventListener("pause", onPs);
-        audio.removeEventListener("canplay", onCanPlay);
-        audio.removeEventListener("canplaythrough", onCanPlay);
         audio.removeEventListener("waiting", onWaiting);
         audio.removeEventListener("stalled", onStalled);
         audio.removeEventListener("error", onError);
@@ -1487,6 +1472,7 @@ export function useWebSocket() {
 
   useEffect(() => {
     let disposed = false;
+    let awaitingInitialState = true;
     let reconnectTimer: number | null = null;
     let pingTimer: number | null = null;
 
@@ -1513,11 +1499,13 @@ export function useWebSocket() {
           case "state": {
             const d = msg.data as {
               status: AppStatus;
-              currentTrack: (TrackInfo & { name?: string }) | null;
+              currentTrack: WSTrackPayload | null;
               chatHistory?: Array<{ role: "user" | "dj"; text: string; timestamp: number }>;
-              radioQueue?: Array<(TrackInfo & { name?: string }) | null>;
+              radioQueue?: Array<WSTrackPayload | null>;
               djProfile?: DjProfile;
             };
+            const shouldRestorePlayback = awaitingInitialState;
+            awaitingInitialState = false;
             setHasHydratedState(true);
             setStatus(d.status ?? "idle");
             if (d.djProfile) {
@@ -1540,51 +1528,39 @@ export function useWebSocket() {
                 return merged;
               });
             }
-            if (Array.isArray(d.radioQueue)) {
-              const playlist = d.radioQueue
+            const normalizedTrack = d.currentTrack?.url ? normalizeTrack(d.currentTrack) : null;
+            const queue = Array.isArray(d.radioQueue)
+              ? d.radioQueue
                 .filter((track): track is NonNullable<typeof track> => Boolean(track?.url && track?.artist))
-                .map((track) => {
-                  const id = track.id ? String(track.id) : `${track.title ?? track.name ?? "Unknown Title"}_${track.artist}`;
-                  return {
-                    id,
-                    title: track.title ?? track.name ?? "Unknown Title",
-                    artist: track.artist,
-                    album: track.album,
-                    duration: track.duration,
-                    isPlaying: d.currentTrack?.id ? String(d.currentTrack.id) === id : false,
-                    url: toPlayableUrl(track.url),
-                  };
-                });
-              setPlayerState((p) => ({
+                .map(normalizeTrack)
+              : null;
+            setPlayerState((p) => {
+              const key = getTrackPlaybackKey(p.currentTrack);
+              const previousDurations = new Map(p.playlist.map((track) => [track.id, track.duration]));
+              const playlist = queue?.map((track) => ({
+                ...track,
+                duration: previousDurations.get(track.id) ?? track.duration,
+                isPlaying: track.id === (key || normalizedTrack?.id),
+              })) ?? p.playlist;
+              const duration = p.duration
+                || playlist.find((track) => track.id === key)?.duration
+                || (normalizedTrack?.id === key ? normalizedTrack.duration : undefined)
+                || 0;
+              return {
                 ...p,
+                currentTrack: p.currentTrack && duration !== p.duration ? { ...p.currentTrack, duration } : p.currentTrack,
+                duration,
                 playlist,
                 queueCount: playlist.length,
-              }));
-            }
-            if (d.currentTrack) {
-              const normalizedTrack = {
-                ...d.currentTrack,
-                id: d.currentTrack.id ? String(d.currentTrack.id) : undefined,
-                url: toPlayableUrl(d.currentTrack.url),
-                title: d.currentTrack.title ?? d.currentTrack.name ?? "Unknown Title",
-                isFavorite: d.currentTrack.id ? favoriteIdsRef.current.includes(String(d.currentTrack.id)) : false,
+                status: d.status ?? "idle",
               };
-              rememberTrack(normalizedTrack);
-              setPlayerState((p) => ({ ...p, currentTrack: normalizedTrack, duration: normalizedTrack.duration ?? 0, status: d.status ?? "idle" }));
-              const activeTrack = playerStateRef.current.currentTrack;
-              const isSameTrack = isSamePlaybackTrack(activeTrack, normalizedTrack);
+            });
+            // The server sends a state snapshot before each explicit track message.
+            // Only restore playback from the connection snapshot.
+            if (shouldRestorePlayback && normalizedTrack) {
               const active = getActiveMusicAudio();
-              const loadedUrl = active?.dataset.loadedUrl ?? activeTrack?.url;
-              const isSameLoadedUrl = loadedUrl === normalizedTrack.url;
-              if (active && normalizedTrack.url && (!active.currentSrc || !isSameTrack || !isSameLoadedUrl)) {
-                active.dataset.playbackKey = getTrackPlaybackKey(normalizedTrack);
-                active.dataset.playbackUrl = normalizedTrack.url;
-                active.src = normalizedTrack.url;
-                active.dataset.loadedUrl = normalizedTrack.url;
-                if ((d.status ?? "idle") === "playing") {
-                  active.play().catch(console.error);
-                  fadeAudioVolume(active, getEffectiveMusicVolume(), MUSIC_FADE_MS);
-                }
+              if (active?.dataset.playbackKey !== normalizedTrack.id || active.error || active.ended) {
+                playMusic(normalizedTrack, d.status === "playing");
               }
             }
             break;
@@ -1659,8 +1635,7 @@ export function useWebSocket() {
             break;
           }
           case "track": {
-            const d = msg.data as WSTrackPayload;
-            resolveAndPlayTrack(d);
+            playMusic(normalizeTrack(msg.data as WSTrackPayload));
             break;
           }
           case "chat": {
@@ -1695,6 +1670,7 @@ export function useWebSocket() {
 
       const ws = new WebSocket(buildWsUrl());
       wsRef.current = ws;
+      awaitingInitialState = true;
 
       ws.onopen = () => {
         if (disposed || wsRef.current !== ws) {
@@ -1713,7 +1689,9 @@ export function useWebSocket() {
         }, 30000);
       };
 
-      ws.onmessage = handleMessage;
+      ws.onmessage = (event) => {
+        if (wsRef.current === ws) handleMessage(event);
+      };
 
       ws.onclose = () => {
         clearPingTimer();
@@ -1750,17 +1728,14 @@ export function useWebSocket() {
     };
   }, [
     cancelSpeechStream,
-    fadeAudioVolume,
     finishDjSpeech,
     getActiveMusicAudio,
-    getEffectiveMusicVolume,
     hideSubtitle,
+    normalizeTrack,
+    playMusic,
     playSpeechFile,
     refreshLibraryData,
-    rememberTrack,
-    resolveAndPlayTrack,
     startDjSpeech,
-    toPlayableUrl,
   ]);
 
   const statusText =

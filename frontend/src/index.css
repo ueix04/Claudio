@@ -1032,22 +1032,35 @@ body {
 .player-dock-shell {
   position: relative;
   flex: 0 0 auto;
+  container-type: inline-size;
 }
 
 .player-dock-progress {
   position: absolute;
   inset: 0 0 auto;
   height: 16px;
-  cursor: pointer;
   z-index: 2;
+}
+
+.playback-seek-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.playback-seek-input:disabled {
+  cursor: default;
 }
 
 .player-dock-progress-rail {
   position: absolute;
   inset-inline: 0;
   top: -1px;
-  height: 2px;
-  overflow: hidden;
+  height: 3px;
   background: color-mix(in srgb, var(--claudio-border) 90%, transparent);
   transition:
     height 0.18s ease,
@@ -1060,6 +1073,10 @@ body {
   background: linear-gradient(90deg, var(--claudio-accent), color-mix(in srgb, var(--claudio-accent) 58%, white));
   box-shadow: 0 0 12px color-mix(in srgb, var(--claudio-accent) 38%, transparent);
   transition: width 0.15s ease;
+}
+
+.player-dock-progress:is(:hover, :focus-within) .player-dock-progress-fill {
+  transition: none;
 }
 
 .player-dock-progress-thumb {
@@ -1077,14 +1094,14 @@ body {
     transform 0.18s ease;
 }
 
-.player-dock-progress:hover .player-dock-progress-rail {
+.player-dock-progress:has(input:enabled):is(:hover, :focus-within) .player-dock-progress-rail {
   top: -2px;
   height: 6px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--claudio-border) 86%, transparent);
 }
 
-.player-dock-progress:hover .player-dock-progress-thumb {
+.player-dock-progress:has(input:enabled):is(:hover, :focus-within) .player-dock-progress-thumb {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
 }
@@ -1096,6 +1113,43 @@ body {
   min-width: 0;
   color: var(--claudio-text-dim);
   font-size: 12px;
+}
+
+@container (max-width: 640px) {
+  .player-dock-inner {
+    padding-inline: 12px;
+  }
+
+  .player-dock-grid {
+    gap: 10px;
+  }
+
+  .player-dock-grid .visualizer-shell {
+    gap: 1px;
+  }
+
+  .player-dock-grid .visualizer-bar {
+    width: 2px;
+  }
+
+  .player-dock-volume .volume-slider {
+    width: 72px;
+  }
+}
+
+@container (max-width: 480px) {
+  .player-dock-grid .visualizer-shell,
+  .player-dock-volume > span {
+    display: none;
+  }
+
+  .player-dock-grid .player-dock-controls {
+    gap: 6px;
+  }
+
+  .player-dock-volume .volume-slider {
+    width: 54px;
+  }
 }
 
 :root[data-theme="light"] .queue-row:hover {
@@ -1588,6 +1642,18 @@ body {
   color: var(--claudio-text-muted);
   font-size: 10px;
   font-weight: 700;
+}
+
+.mobile-progress-track {
+  position: relative;
+  display: grid;
+  align-items: center;
+  height: 18px;
+}
+
+.mobile-progress-track:focus-within .mobile-progress-rail,
+.player-dock-progress:focus-within .player-dock-progress-rail {
+  outline: 2px solid var(--claudio-accent);
 }
 
 .mobile-progress-rail {

@@ -192,16 +192,14 @@ const loadListenCheckState = (): ListenCheckState => {
 };
 
 const formatPlaybackTime = (timeInSeconds: number) => {
-  if (isNaN(timeInSeconds)) return "0:00";
+  if (!Number.isFinite(timeInSeconds) || timeInSeconds <= 0) return "0:00";
   const m = Math.floor(timeInSeconds / 60);
   const s = Math.floor(timeInSeconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
 };
 
 const formatTrackDuration = (duration?: number) => {
-  if (!duration || Number.isNaN(duration)) return "--:--";
-  const seconds = duration > 1000 ? Math.round(duration / 1000) : Math.round(duration);
-  return formatPlaybackTime(seconds);
+  return duration && duration > 0 ? formatPlaybackTime(Math.round(duration)) : "--:--";
 };
 
 const formatHistoryTime = (timestamp: number) =>
@@ -548,15 +546,9 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
     listStageScrollRef.current?.scrollTo({ top: 0, behavior: "auto" });
   }, [displayMode, activeView]);
 
-  const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const percent = (e.clientX - rect.left) / rect.width;
-    onSeek(percent * playerState.duration);
-  };
-
-  const progressPercent = playerState.duration > 0
-    ? (playerState.currentTime / playerState.duration) * 100
-    : 0;
+  const { currentTime, duration } = playerState;
+  const playbackPosition = Math.min(currentTime, duration);
+  const progressPercent = duration > 0 ? (playbackPosition / duration) * 100 : 0;
 
   const currentTrackId = playerState.currentTrack?.id;
   const currentTrackFavorited = playerState.currentTrack?.isFavorite ?? false;
@@ -777,11 +769,23 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
   };
 
   const renderDockProgress = () => (
-    <div className="player-dock-progress" onClick={handleProgressClick}>
-      <div className="player-dock-progress-rail">
+    <div className="player-dock-progress">
+      <div className="player-dock-progress-rail" aria-hidden="true">
         <div className="player-dock-progress-fill" style={{ width: `${progressPercent}%` }}></div>
         <div className="player-dock-progress-thumb" style={{ left: `${progressPercent}%` }}></div>
       </div>
+      <input
+        type="range"
+        className="playback-seek-input"
+        aria-label="Playback position"
+        aria-valuetext={`${formatPlaybackTime(currentTime)} / ${formatTrackDuration(duration)}`}
+        min={0}
+        max={duration || 1}
+        step="any"
+        value={playbackPosition}
+        disabled={!duration}
+        onChange={(event) => onSeek(event.currentTarget.valueAsNumber)}
+      />
     </div>
   );
 
@@ -912,7 +916,7 @@ export const PlayerPanel: React.FC<PlayerPanelProps> = ({
                 <span className="h-1 w-1 rounded-full bg-[color:var(--claudio-border)]"></span>
                 <span className="flex-shrink-0">{formatPlaybackTime(playerState.currentTime)}</span>
                 <span className="flex-shrink-0">/</span>
-                <span className="flex-shrink-0">{formatPlaybackTime(playerState.duration)}</span>
+                <span className="flex-shrink-0">{formatTrackDuration(duration)}</span>
               </div>
             </div>
           </div>

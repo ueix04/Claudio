@@ -747,6 +747,35 @@ app.get("/api/radio/playback-diagnostics", async (_req, res) => {
   }
 });
 
+app.get("/api/radio/queue-durations", async (_req, res) => {
+  const tracks = await db.getRadioQueue();
+  const missing = new Map<string, number>();
+  for (const track of tracks) {
+    if (typeof track.duration === "number" && Number.isFinite(track.duration) && track.duration > 0) continue;
+    const identity = musicSources.inferStoredTrackSource(track);
+    const trackId = Number(identity?.sourceTrackId);
+    if (identity?.source !== musicSources.NETEASE_LEGACY_SOURCE_ID || !Number.isSafeInteger(trackId) || trackId <= 0) continue;
+    missing.set(track.id, trackId);
+  }
+
+  if (!missing.size) {
+    res.json({});
+    return;
+  }
+
+  try {
+    const durations = await netease.getSongDurations([...missing.values()]);
+    const durationMsById: Record<string, number> = {};
+    for (const [id, trackId] of missing) {
+      const duration = durations.get(trackId);
+      if (duration !== undefined) durationMsById[id] = duration;
+    }
+    res.json(durationMsById);
+  } catch {
+    res.status(502).json({ error: "Track durations unavailable" });
+  }
+});
+
 app.get("/api/radio/discovery-candidates", async (req, res) => {
   const parsedLimit = parseQueryNumber(req.query.limit);
   const limit = parsedLimit && parsedLimit > 0

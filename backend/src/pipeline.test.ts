@@ -454,6 +454,7 @@ describe("Pipeline Engine", () => {
         title: "Local Song",
         artist: "Local Artist",
         album: "Album",
+        duration: 215_000,
         sourcePlaylists: ["Snapshot"],
         playlistCount: 1,
         occurrences: 1,
@@ -492,6 +493,7 @@ describe("Pipeline Engine", () => {
       name: "Local Song",
       artist: "Local Artist",
       url: "http://example.com/local.mp3",
+      duration: 215_000,
     });
     expect(result.tracks.length).toBeGreaterThanOrEqual(6);
   });

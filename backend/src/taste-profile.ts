@@ -95,6 +95,7 @@ export interface RecommendationCandidate {
   title: string;
   artist: string;
   album?: string;
+  duration?: number;
   sourcePlaylists: string[];
   playlistCount: number;
   occurrences: number;
@@ -686,6 +687,7 @@ export function buildRecommendationCandidates(
         title: track.name,
         artist: track.artist,
         album: track.album,
+        duration: track.duration,
         sourcePlaylists: [],
         playlistCount: 0,
         occurrences: 0,

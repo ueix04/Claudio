@@ -216,6 +216,7 @@ export interface NeteaseSnapshotPlaylist {
     name: string;
     artist: string;
     album?: string;
+    duration?: number;
   }>;
   id: number;
   name: string;

@@ -84,7 +84,7 @@ export type TrackInfo = {
   title: string;
   artist: string;
   album?: string;
-  duration?: number;
+  duration?: number; // seconds
   isFavorite?: boolean;
 };
 
@@ -93,7 +93,7 @@ export type PlaylistTrack = {
   title: string;
   artist: string;
   album?: string;
-  duration?: number;
+  duration?: number; // seconds
   isPlaying: boolean;
   url: string;
 };

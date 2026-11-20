@@ -2,12 +2,16 @@ import { createRequire } from "node:module";
 import "./runtime.js";
 
 const require = createRequire(import.meta.url);
-const { cloudsearch, song_url_v1, user_account, user_playlist, playlist_track_all } = require("NeteaseCloudMusicApi") as {
+const { cloudsearch, song_url_v1, song_detail, user_account, user_playlist, playlist_track_all } = require("NeteaseCloudMusicApi") as {
   cloudsearch: (params: { keywords: string; limit: number; cookie: string; proxy?: string }) => Promise<{
     status: number;
     body: unknown;
   }>;
   song_url_v1: (params: { id: string; level: string; cookie: string; proxy?: string }) => Promise<{
+    status: number;
+    body: unknown;
+  }>;
+  song_detail: (params: { ids: string; proxy?: string }) => Promise<{
     status: number;
     body: unknown;
   }>;
@@ -201,6 +205,7 @@ export interface UserPlaylist {
     name: string;
     artist: string;
     album?: string;
+    duration?: number;
   }>;
   id: number;
   name: string;
@@ -310,6 +315,7 @@ export async function getPlaylistTracks(playlistId: number, trackCount?: number)
         name: string;
         ar?: Array<{ name: string }>;
         al?: { name: string };
+        dt?: number;
       }>;
     };
     const pageTracks = (data.songs ?? []).map((song) => ({
@@ -317,6 +323,7 @@ export async function getPlaylistTracks(playlistId: number, trackCount?: number)
       name: song.name,
       artist: (song.ar ?? []).map((artist) => artist.name).join(", "),
       album: song.al?.name ?? "",
+      duration: song.dt,
     }));
     tracks.push(...pageTracks);
 
@@ -326,6 +333,23 @@ export async function getPlaylistTracks(playlistId: number, trackCount?: number)
   }
 
   return tracks;
+}
+
+export async function getSongDurations(trackIds: number[]): Promise<Map<number, number>> {
+  const ids = new Set(trackIds);
+  const res = await withNeteaseDirectRetry("Netease song_detail", (proxy) => song_detail({
+    ids: [...ids].join(","),
+    proxy,
+  }));
+
+  if (res.status !== 200 || !res.body) {
+    throw new Error(`网易云 API 错误: ${res.status}`);
+  }
+
+  const { songs = [] } = res.body as { songs?: Array<{ id: number; dt: number }> };
+  return new Map(songs
+    .filter(({ id, dt }) => ids.has(id) && Number.isFinite(dt) && dt > 0)
+    .map(({ id, dt }) => [id, dt]));
 }
 
 export async function resolveTrack(

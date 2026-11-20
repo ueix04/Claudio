@@ -75,6 +75,25 @@ describe("API Server", () => {
     expect(typeof body.timestamp).toBe("number");
   });
 
+  it("批量补齐旧队列中缺失的网易云时长，包括使用备用音源的歌曲", async () => {
+    const db = await import("./db.js");
+    const netease = await import("./netease.js");
+    const track = { name: "Song", artist: "Artist", url: "test-url" };
+    vi.mocked(db.getRadioQueue).mockResolvedValueOnce([
+      { ...track, id: "10", duration: 0, source: "netease_legacy", sourceTrackId: "10", urlSource: "unblock_netease" },
+      { ...track, id: "20" },
+      { ...track, id: "30", duration: 120_000 },
+      { ...track, id: "local-id", source: "local_library", sourceTrackId: "40" },
+    ]);
+    vi.mocked(netease.getSongDurations).mockResolvedValueOnce(new Map([[10, 192_875], [20, 810]]));
+
+    const res = await fetch(`http://localhost:${port}/api/radio/queue-durations`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ "10": 192_875, "20": 810 });
+    expect(netease.getSongDurations).toHaveBeenCalledWith([10, 20]);
+    expect(db.updateState).not.toHaveBeenCalled();
+  });
+
   it("GET /api/weather/current 返回实时天气", async () => {
     const weather = await import("./weather.js");
     vi.mocked(weather.getCurrentWeather).mockResolvedValue({
