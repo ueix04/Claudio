@@ -9,12 +9,6 @@ import {
 } from "./types.js";
 
 export const NETEASE_LEGACY_SOURCE_ID = "netease_legacy" as const;
-const NETEASE_LEGACY_URL_TTL_MS = 8 * 60 * 1000;
-
-export async function resolveNeteaseOpenPlayableUrl(sourceTrackId: string): Promise<PlayableUrlResult | null> {
-  const playback = await netease.getOpenPlayableUrl(Number(sourceTrackId));
-  return playback ? { ...playback, source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId } : null;
-}
 
 function toSourceTrack(track: netease.NeteaseTrack): MusicSourceTrack {
   return {
@@ -46,38 +40,17 @@ export function toPlayableTrack(track: MusicSourceTrack, playableUrl: PlayableUr
   };
 }
 
-async function resolveNeteasePlayableUrl(
-  sourceTrackId: string,
-  options?: {
-    forceRefresh?: boolean;
-  },
-): Promise<PlayableUrlResult> {
-  const numericId = Number(sourceTrackId);
-  if (!Number.isFinite(numericId)) {
-    throw new MusicSourceError(
-      NETEASE_LEGACY_SOURCE_ID,
-      "not_found",
-      `Invalid Netease track id: ${sourceTrackId}`,
-    );
-  }
-
+async function resolveNeteasePlayableUrl(sourceTrackId: string): Promise<PlayableUrlResult> {
   try {
-    const refreshedAt = Date.now();
-    const url = await netease.getPlayableUrl(numericId, options);
-    if (!url) {
+    const playback = await netease.getOpenPlayableUrl(Number(sourceTrackId));
+    if (!playback) {
       throw new MusicSourceError(
         NETEASE_LEGACY_SOURCE_ID,
         "unplayable",
         `No playable URL found for track ${sourceTrackId}`,
       );
     }
-    return {
-      source: NETEASE_LEGACY_SOURCE_ID,
-      sourceTrackId,
-      url,
-      refreshedAt,
-      expiresAt: refreshedAt + NETEASE_LEGACY_URL_TTL_MS,
-    };
+    return { ...playback, source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId };
   } catch (error) {
     throw normalizeMusicSourceError(NETEASE_LEGACY_SOURCE_ID, error);
   }
@@ -85,7 +58,7 @@ async function resolveNeteasePlayableUrl(
 
 export const neteaseLegacyAdapter: MusicSourceAdapter = {
   id: NETEASE_LEGACY_SOURCE_ID,
-  displayName: "Netease Cloud Music API (legacy)",
+  displayName: "Netease Cloud Music",
 
   async search(options) {
     try {
@@ -106,19 +79,14 @@ export const neteaseLegacyAdapter: MusicSourceAdapter = {
     return tracks.find((track) => track.sourceTrackId === sourceTrackId) ?? null;
   },
 
-  async resolvePlayableUrl(sourceTrackId, options) {
-    return resolveNeteasePlayableUrl(sourceTrackId, options);
-  },
-
-  async refreshPlayableUrl(sourceTrackId) {
-    return resolveNeteasePlayableUrl(sourceTrackId, { forceRefresh: true });
-  },
+  resolvePlayableUrl: resolveNeteasePlayableUrl,
+  refreshPlayableUrl: resolveNeteasePlayableUrl,
 
   async healthCheck() {
     return {
       source: NETEASE_LEGACY_SOURCE_ID,
       ok: true,
-      message: "Legacy adapter is configured. Upstream availability is checked during search/url resolution.",
+      message: "Search and anonymous playback availability are checked per track.",
       checkedAt: Date.now(),
     };
   },

@@ -1,6 +1,7 @@
 import type { Track } from "../db.js";
 import type { TasteProfile } from "../taste-profile.js";
 import { fetchMusicAudio, parseMusicAudioUrl } from "./audio-http.js";
+import { KUGOU_SOURCE_ID, kugouAdapter } from "./kugou.js";
 import { KUWO_SOURCE_ID, kuwoAdapter } from "./kuwo.js";
 import { QQ_SOURCE_ID, qqAdapter } from "./qq.js";
 import {
@@ -11,14 +12,8 @@ import {
 import {
   NETEASE_LEGACY_SOURCE_ID,
   neteaseLegacyAdapter,
-  resolveNeteaseOpenPlayableUrl,
   toPlayableTrack,
 } from "./netease-legacy.js";
-import {
-  UNBLOCK_NETEASE_SOURCE_ID,
-  isUnblockNeteaseEnabled,
-  unblockNeteaseAdapter,
-} from "./unblock-netease.js";
 import {
   MusicSourceAdapter,
   MusicSourceError,
@@ -42,26 +37,17 @@ export {
   summarizeLocalLibraryForPrompt,
 } from "./local-library.js";
 export { NETEASE_LEGACY_SOURCE_ID, neteaseLegacyAdapter };
-export {
-  UNBLOCK_NETEASE_SOURCE_ID,
-  createUnblockNeteaseAdapter,
-  getUnblockNeteaseSources,
-  isUnblockNeteaseEnabled,
-  setUnblockNeteaseMatcherForTests,
-  unblockNeteaseAdapter,
-} from "./unblock-netease.js";
 
 const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
   [localLibraryAdapter.id, localLibraryAdapter],
   [neteaseLegacyAdapter.id, neteaseLegacyAdapter],
-  [unblockNeteaseAdapter.id, unblockNeteaseAdapter],
   [qqAdapter.id, qqAdapter],
   [kuwoAdapter.id, kuwoAdapter],
+  [kugouAdapter.id, kugouAdapter],
 ]);
 
-const PLAYABLE_URL_FALLBACKS: Partial<Record<MusicSourceId, MusicSourceId[]>> = {
-  [NETEASE_LEGACY_SOURCE_ID]: [UNBLOCK_NETEASE_SOURCE_ID, QQ_SOURCE_ID, KUWO_SOURCE_ID, LOCAL_LIBRARY_SOURCE_ID],
-};
+const DIRECT_SOURCES: readonly MusicSourceId[] = [QQ_SOURCE_ID, KUWO_SOURCE_ID, KUGOU_SOURCE_ID];
+const ONLINE_SOURCES = [NETEASE_LEGACY_SOURCE_ID, ...DIRECT_SOURCES];
 const PLAYABLE_URL_VALIDATION_TIMEOUT_MS = 5_000;
 const PLAYABLE_URL_VALIDATION_BYTES = "bytes=0-4095";
 
@@ -116,13 +102,17 @@ export function listMusicSourceAdapters(): MusicSourceAdapter[] {
 }
 
 function getPlayableUrlFallbacks(source: MusicSourceId): MusicSourceId[] {
-  return (PLAYABLE_URL_FALLBACKS[source] ?? []).filter(isSourceEnabled);
+  if (!ONLINE_SOURCES.includes(source)) return [];
+  return [
+    ...DIRECT_SOURCES.filter((candidate) => candidate !== source),
+    ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
+  ];
 }
 
 function getRuntimeSearchOrder(): MusicSourceId[] {
   return [
     ...(isLocalLibraryEnabled() ? [LOCAL_LIBRARY_SOURCE_ID] : []),
-    NETEASE_LEGACY_SOURCE_ID,
+    ...ONLINE_SOURCES,
   ];
 }
 
@@ -133,7 +123,6 @@ function getSourceRole(source: MusicSourceId): "library" | "primary" | "fallback
 
 function isSourceEnabled(source: MusicSourceId): boolean {
   if (source === LOCAL_LIBRARY_SOURCE_ID) return isLocalLibraryEnabled();
-  if (source === UNBLOCK_NETEASE_SOURCE_ID) return isUnblockNeteaseEnabled();
   return true;
 }
 
@@ -243,12 +232,7 @@ export async function getMusicSourceRuntimeStatus(): Promise<MusicSourceRuntimeS
   return {
     generatedAt: Date.now(),
     searchOrder: getRuntimeSearchOrder(),
-    playableUrlFallbacks: [
-      {
-        source: NETEASE_LEGACY_SOURCE_ID,
-        fallbacks: getPlayableUrlFallbacks(NETEASE_LEGACY_SOURCE_ID),
-      },
-    ],
+    playableUrlFallbacks: ONLINE_SOURCES.map((source) => ({ source, fallbacks: getPlayableUrlFallbacks(source) })),
     sources: sourceStatuses,
   };
 }
@@ -396,45 +380,36 @@ async function resolvePlayableUrlWithFallback(
   },
 ): Promise<PlayableUrlResult> {
   const { source, sourceTrackId } = track;
-  if (source === NETEASE_LEGACY_SOURCE_ID) {
-    try {
-      const publicUrl = await resolveNeteaseOpenPlayableUrl(sourceTrackId);
-      if (publicUrl) return await validatePlayableUrlResult(publicUrl);
-    } catch (error) {
-      const normalized = normalizeMusicSourceError(source, error);
-      console.warn(`[music-source] Netease public playback failed for ${sourceTrackId}: ${normalized.code}`);
-    }
-  }
-
+  let primaryError: MusicSourceError;
   try {
     const adapter = getMusicSourceAdapter(source);
-    const result = await adapter.resolvePlayableUrl(sourceTrackId, options);
+    // Direct sources recheck free playback eligibility when their search cache expires.
+    const playableId = DIRECT_SOURCES.includes(source) && !(await adapter.getTrackDetail(sourceTrackId))
+      ? await findMatchedTrackId(adapter, track)
+      : sourceTrackId;
+    if (!playableId) throw new MusicSourceError(source, "not_found", "No matching free recording found");
+    const result = await adapter.resolvePlayableUrl(playableId, options);
     return await validatePlayableUrlResult(result);
   } catch (error) {
-    const primaryError = normalizeMusicSourceError(source, error);
-    const fallbackSources = getPlayableUrlFallbacks(source);
-
-    for (const fallbackSource of fallbackSources) {
-      try {
-        const fallbackAdapter = getMusicSourceAdapter(fallbackSource);
-        const fallbackTrackId = fallbackSource === UNBLOCK_NETEASE_SOURCE_ID
-          ? sourceTrackId
-          : await findMatchedTrackId(fallbackAdapter, track);
-        if (!fallbackTrackId) continue;
-        const fallbackResult = await fallbackAdapter.resolvePlayableUrl(fallbackTrackId, {
-          forceRefresh: options?.forceRefresh ?? true,
-        });
-        return await validatePlayableUrlResult(fallbackResult);
-      } catch (fallbackError) {
-        const normalizedFallbackError = normalizeMusicSourceError(fallbackSource, fallbackError);
-        console.warn(
-          `[music-source] fallback ${fallbackSource} failed for ${source}:${sourceTrackId}: ${normalizedFallbackError.message}`,
-        );
-      }
-    }
-
-    throw primaryError;
+    primaryError = normalizeMusicSourceError(source, error);
   }
+
+  for (const fallbackSource of getPlayableUrlFallbacks(source)) {
+    try {
+      const fallbackAdapter = getMusicSourceAdapter(fallbackSource);
+      const fallbackTrackId = await findMatchedTrackId(fallbackAdapter, track);
+      if (!fallbackTrackId) continue;
+      const fallbackResult = await fallbackAdapter.resolvePlayableUrl(fallbackTrackId, {
+        forceRefresh: options?.forceRefresh ?? true,
+      });
+      return await validatePlayableUrlResult(fallbackResult);
+    } catch (fallbackError) {
+      const normalized = normalizeMusicSourceError(fallbackSource, fallbackError);
+      console.warn(`[music-source] fallback ${fallbackSource} failed for ${source}:${sourceTrackId}: ${normalized.code}`);
+    }
+  }
+
+  throw primaryError;
 }
 
 export async function resolveTrack(
@@ -443,27 +418,31 @@ export async function resolveTrack(
   source?: MusicSourceId,
 ): Promise<PlayableTrack | null> {
   const query = artist ? `${title} ${artist}` : title;
+  const normalizedTitle = normalizeMatchName(title);
+  const normalizedArtists = artist ? normalizeMatchArtists(artist) : "";
+  const matchesQuery = (track: MusicSourceTrack) => normalizeMatchName(track.title) === normalizedTitle
+    && (!normalizedArtists || normalizeMatchArtists(track.artist) === normalizedArtists);
   const searchSources = source
     ? [source]
     : getRuntimeSearchOrder();
-  let lastError: MusicSourceError | null = null;
-
   for (const searchSource of searchSources) {
+    let track: MusicSourceTrack | undefined;
     try {
       const adapter = getMusicSourceAdapter(searchSource);
       const tracks = await adapter.search({ keyword: query, limit: 5 });
-      const track = tracks[0];
-      if (!track) {
-        continue;
-      }
-
+      track = DIRECT_SOURCES.includes(searchSource)
+        ? tracks.find(matchesQuery)
+        : tracks[0];
+      if (!track) continue;
       return await resolveKnownTrack(track);
     } catch (error) {
-      lastError = normalizeMusicSourceError(searchSource, error);
-      if (source) {
-        throw lastError;
+      const normalized = normalizeMusicSourceError(searchSource, error);
+      if (source) throw normalized;
+      console.warn(`[music-source] search source ${searchSource} failed for ${query}: ${normalized.code}`);
+      // A recording with a duration has already tried the other direct sources.
+      if (track && searchSource !== LOCAL_LIBRARY_SOURCE_ID && (track.duration ?? 0) > 0 && matchesQuery(track)) {
+        return null;
       }
-      console.warn(`[music-source] search source ${searchSource} failed for ${query}: ${lastError.message}`);
     }
   }
 

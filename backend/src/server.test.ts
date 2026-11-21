@@ -14,7 +14,11 @@ vi.mock("./music-sources/http-client.js");
 vi.mock("./taste-profile.js");
 vi.mock("./weather.js");
 
-const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
+function neteasePlayback(url: string) {
+  const refreshedAt = Date.now();
+  return { url, refreshedAt, expiresAt: refreshedAt + 1_200_000 };
+}
+
 const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
 const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
 let tempDirs: string[] = [];
@@ -34,7 +38,6 @@ describe("API Server", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    process.env.UNBLOCK_NETEASE_ENABLED = "false";
     delete process.env.LOCAL_MUSIC_ENABLED;
     delete process.env.LOCAL_MUSIC_DIRS;
     const musicSources = await import("./music-sources/index.js");
@@ -47,11 +50,6 @@ describe("API Server", () => {
 
   afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (originalUnblockEnabled === undefined) {
-      delete process.env.UNBLOCK_NETEASE_ENABLED;
-    } else {
-      process.env.UNBLOCK_NETEASE_ENABLED = originalUnblockEnabled;
-    }
     if (originalLocalEnabled === undefined) {
       delete process.env.LOCAL_MUSIC_ENABLED;
     } else {
@@ -279,7 +277,6 @@ describe("API Server", () => {
     const firstFilePath = await createTempMusicFile("Source Artist - Source Song.mp3");
     process.env.LOCAL_MUSIC_ENABLED = "true";
     process.env.LOCAL_MUSIC_DIRS = path.dirname(firstFilePath);
-    process.env.UNBLOCK_NETEASE_ENABLED = "true";
     musicSources.clearLocalLibraryCacheForTests();
 
     const res = await fetch(`http://localhost:${port}/api/music-sources`);
@@ -290,14 +287,14 @@ describe("API Server", () => {
       playableUrlFallbacks: Array<{ source: string; fallbacks: string[] }>;
       sources: Array<{ source: string; role: string; enabled: boolean; ok: boolean }>;
     };
-    expect(body.searchOrder).toEqual(["local_library", "netease_legacy"]);
-    expect(body.playableUrlFallbacks).toEqual([
-      { source: "netease_legacy", fallbacks: ["unblock_netease", "qq", "kuwo", "local_library"] },
-    ]);
+    expect(body.searchOrder).toEqual(["local_library", "netease_legacy", "qq", "kuwo", "kugou"]);
+    expect(body.playableUrlFallbacks).toContainEqual({
+      source: "netease_legacy", fallbacks: ["qq", "kuwo", "kugou", "local_library"],
+    });
     expect(body.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "local_library", role: "library", enabled: true, ok: true }),
       expect.objectContaining({ source: "netease_legacy", role: "primary", enabled: true, ok: true }),
-      expect.objectContaining({ source: "unblock_netease", role: "fallback", enabled: true, ok: true }),
+      expect.objectContaining({ source: "kugou", role: "fallback", enabled: true, ok: true }),
     ]));
     expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
   });
@@ -407,7 +404,7 @@ describe("API Server", () => {
       };
       return currentState;
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("fresh-url");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("fresh-url"));
 
     const res = await fetch(`http://localhost:${port}/api/state`);
 
@@ -415,7 +412,7 @@ describe("API Server", () => {
     const body = await res.json() as { currentTrack: { url: string; urlExpiresAt: number } };
     expect(body.currentTrack.url).toBe("fresh-url");
     expect(body.currentTrack.urlExpiresAt).toBeGreaterThan(Date.now());
-    expect(vi.mocked(netease.getPlayableUrl)).toHaveBeenCalledWith(42, { forceRefresh: true });
+    expect(vi.mocked(netease.getOpenPlayableUrl)).toHaveBeenCalledWith(42);
     expect(currentState.radioQueue[0].url).toBe("fresh-url");
   });
 
@@ -1022,7 +1019,6 @@ describe("WebSocket Server", () => {
 
   beforeEach(async () => {
     vi.resetAllMocks();
-    process.env.UNBLOCK_NETEASE_ENABLED = "false";
     const db = await import("./db.js");
     const claude = await import("./claude.js");
     vi.mocked(claude.getLlmTaskTimeoutMs).mockImplementation((task) => ({
@@ -1061,11 +1057,6 @@ describe("WebSocket Server", () => {
 
   afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (originalUnblockEnabled === undefined) {
-      delete process.env.UNBLOCK_NETEASE_ENABLED;
-    } else {
-      process.env.UNBLOCK_NETEASE_ENABLED = originalUnblockEnabled;
-    }
   });
 
   it("连接并接收初始状态消息", async () => {
@@ -1594,8 +1585,8 @@ describe("WebSocket Server", () => {
       cached: false,
       cachePath: "data/audio/segue.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => (
-      trackId === 2 ? "url-b" : "url-a"
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => (
+      neteasePlayback(trackId === 2 ? "url-b" : "url-a")
     ));
     vi.mocked(db.advanceRadioQueue).mockResolvedValue({
       status: "playing",
@@ -1676,7 +1667,7 @@ describe("WebSocket Server", () => {
       };
       return currentState;
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("url-b-fresh"));
 
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
@@ -1774,8 +1765,8 @@ describe("WebSocket Server", () => {
       cached: false,
       cachePath: "data/audio/prefetch-segue.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => (
-      trackId === 1 ? "url-a" : "url-b-fresh"
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => (
+      neteasePlayback(trackId === 1 ? "url-a" : "url-b-fresh")
     ));
 
     const { WebSocket } = await import("ws");
@@ -1813,9 +1804,9 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(vi.mocked(netease.getPlayableUrl).mock.calls).toEqual([
-      [1, { forceRefresh: true }],
-      [2, { forceRefresh: true }],
+    expect(vi.mocked(netease.getOpenPlayableUrl).mock.calls).toEqual([
+      [1],
+      [2],
     ]);
     expect(claude.callJsonLLM).toHaveBeenCalledTimes(1);
     expect(tts.speak).toHaveBeenCalledTimes(1);
@@ -1876,7 +1867,7 @@ describe("WebSocket Server", () => {
       };
       return currentState;
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("url-b-fresh"));
     vi.mocked(claude.callJsonLLM).mockResolvedValue({
       say: text,
       ttsText: text,
@@ -1963,7 +1954,7 @@ describe("WebSocket Server", () => {
       cached: false,
       cachePath: "data/audio/prefetch-window.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}-fresh`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => neteasePlayback(`url-${trackId}-fresh`));
 
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
@@ -1975,7 +1966,7 @@ describe("WebSocket Server", () => {
       const timeout = setTimeout(() => reject(new Error("timeout waiting for prefetch window")), 3000);
       const check = setInterval(() => {
         if (
-          vi.mocked(netease.getPlayableUrl).mock.calls.length >= 4
+          vi.mocked(netease.getOpenPlayableUrl).mock.calls.length >= 4
           && currentState.currentProgram?.preparedUntilIndex === 3
         ) {
           clearInterval(check);
@@ -1985,10 +1976,10 @@ describe("WebSocket Server", () => {
       }, 10);
     });
 
-    expect(vi.mocked(netease.getPlayableUrl).mock.calls).toEqual(expect.arrayContaining([
-      [2, { forceRefresh: true }],
-      [3, { forceRefresh: true }],
-      [4, { forceRefresh: true }],
+    expect(vi.mocked(netease.getOpenPlayableUrl).mock.calls).toEqual(expect.arrayContaining([
+      [2],
+      [3],
+      [4],
     ]));
     expect(currentState.radioQueue[1].url).toBe("url-2-fresh");
     expect(currentState.radioQueue[2].url).toBe("url-3-fresh");
@@ -2042,7 +2033,7 @@ describe("WebSocket Server", () => {
       };
       return currentState;
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("url-b-fresh"));
 
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
@@ -2117,7 +2108,7 @@ describe("WebSocket Server", () => {
       };
       return currentState;
     });
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("url-b-fresh");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("url-b-fresh"));
     vi.mocked(tts.speak).mockResolvedValue({
       audioBuffer: new ArrayBuffer(0),
       format: "wav",
@@ -2259,7 +2250,7 @@ describe("WebSocket Server", () => {
       cached: false,
       cachePath: "data/audio/long-program.wav",
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}-fresh`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => neteasePlayback(`url-${trackId}-fresh`));
 
     const { WebSocket } = await import("ws");
     const ws = new WebSocket(`ws://localhost:${port}/ws`);

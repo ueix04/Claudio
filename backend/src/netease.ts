@@ -3,12 +3,8 @@ import { fetchSourceJson } from "./music-sources/http-client.js";
 import "./runtime.js";
 
 const require = createRequire(import.meta.url);
-const { cloudsearch, song_url_v1, song_detail, user_account, user_playlist, playlist_track_all } = require("NeteaseCloudMusicApi") as {
+const { cloudsearch, song_detail, user_account, user_playlist, playlist_track_all } = require("NeteaseCloudMusicApi") as {
   cloudsearch: (params: { keywords: string; limit: number; cookie: string; proxy?: string }) => Promise<{
-    status: number;
-    body: unknown;
-  }>;
-  song_url_v1: (params: { id: string; level: string; cookie: string; proxy?: string }) => Promise<{
     status: number;
     body: unknown;
   }>;
@@ -44,15 +40,6 @@ export interface SearchResult {
   total: number;
 }
 
-export interface PlayableTrack {
-  id: number;
-  name: string;
-  artist: string;
-  url: string;
-  picUrl: string;
-  duration: number;
-}
-
 let warnedAboutRawCookie = false;
 
 export function normalizeNeteaseCookie(cookie: string): string {
@@ -67,21 +54,10 @@ export function normalizeNeteaseCookie(cookie: string): string {
   return `MUSIC_U=${trimmed}`;
 }
 
-function ensurePcOsCookie(cookie: string): string {
-  if (!cookie || /(?:^|;)\s*os=/.test(cookie)) {
-    return cookie;
-  }
-  return `${cookie}; os=pc`;
-}
-
 const getCookie = (): string => normalizeNeteaseCookie(process.env.NETEASE_COOKIE || "");
 
 const NETEASE_DIRECT_RETRY_ATTEMPTS = 3;
 const NETEASE_PROXY_RETRY_ATTEMPTS = 2;
-const PLAYABLE_URL_CACHE_TTL_MS = 8 * 60 * 1000;
-
-const playableUrlCache = new Map<number, { url: string; cachedAt: number }>();
-
 async function withNeteaseDirectRetry<T>(
   label: string,
   operation: (proxy?: string) => Promise<T>,
@@ -194,42 +170,6 @@ export async function getOpenPlayableUrl(trackId: number): Promise<NeteasePublic
   }
 
   return { url: track.url, refreshedAt, expiresAt: refreshedAt + track.expi * 1000 };
-}
-
-export async function getPlayableUrl(
-  trackId: number,
-  options?: {
-    forceRefresh?: boolean;
-  },
-): Promise<string> {
-  const cached = playableUrlCache.get(trackId);
-  if (!options?.forceRefresh && cached && Date.now() - cached.cachedAt < PLAYABLE_URL_CACHE_TTL_MS) {
-    return cached.url;
-  }
-
-  const cookie = ensurePcOsCookie(getCookie());
-
-  const res = await withNeteaseDirectRetry("Netease song_url_v1", (proxy) => song_url_v1({
-    id: trackId.toString(),
-    level: "standard",
-    cookie,
-    proxy,
-  }));
-
-  if (res.status !== 200 || !res.body) {
-    throw new Error(`网易云 API 错误: ${res.status}`);
-  }
-
-  const body = res.body as { data?: Array<{ url?: string }> };
-  const songData = body.data?.[0];
-  if (!songData?.url) {
-    throw new Error(`No playable URL found for track ${trackId}`);
-  }
-  playableUrlCache.set(trackId, {
-    url: songData.url,
-    cachedAt: Date.now(),
-  });
-  return songData.url;
 }
 
 export interface UserAccount {
@@ -389,38 +329,4 @@ export async function getSongDurations(trackIds: number[]): Promise<Map<number, 
   return new Map(songs
     .filter(({ id, dt }) => ids.has(id) && Number.isFinite(dt) && dt > 0)
     .map(({ id, dt }) => [id, dt]));
-}
-
-export async function resolveTrack(
-  title: string,
-  artist?: string,
-): Promise<PlayableTrack | null> {
-  const query = artist ? `${title} ${artist}` : title;
-  const result = await searchSongs(query, 5);
-
-  if (result.tracks.length === 0) {
-    return null;
-  }
-
-  const track = result.tracks[0];
-  let url: string;
-  try {
-    url = await getPlayableUrl(track.id);
-    if (!url) {
-      return null;
-    }
-  } catch {
-    return null;
-  }
-
-  const artistName = track.artists.map((a) => a.name).join(", ");
-
-  return {
-    id: track.id,
-    name: track.name,
-    artist: artistName,
-    url,
-    picUrl: track.album.picUrl,
-    duration: track.duration,
-  };
 }

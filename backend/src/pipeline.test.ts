@@ -19,6 +19,11 @@ vi.mock("./taste-profile.js");
 vi.mock("./tts.js");
 vi.mock("./weather.js");
 
+function neteasePlayback(url: string) {
+  const refreshedAt = Date.now();
+  return { url, refreshedAt, expiresAt: refreshedAt + 1_200_000 };
+}
+
 const baseState = {
   status: "idle" as const,
   currentTrack: null,
@@ -99,11 +104,10 @@ function mockSearchFromLineup(lineup: Array<{ id?: number; title: string; artist
       duration: 240_000,
     });
   });
-  vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
+  vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => neteasePlayback(`url-${id}`));
 }
 
 describe("Pipeline Engine", () => {
-  const originalUnblockEnabled = process.env.UNBLOCK_NETEASE_ENABLED;
   const originalLocalEnabled = process.env.LOCAL_MUSIC_ENABLED;
   const originalLocalDirs = process.env.LOCAL_MUSIC_DIRS;
   let tempDirs: string[] = [];
@@ -125,18 +129,12 @@ describe("Pipeline Engine", () => {
       chat_switch: 90_000,
       discovery: 45_000,
     })[task]);
-    process.env.UNBLOCK_NETEASE_ENABLED = "false";
     delete process.env.LOCAL_MUSIC_ENABLED;
     delete process.env.LOCAL_MUSIC_DIRS;
     musicSources.clearLocalLibraryCacheForTests();
   });
 
   afterEach(async () => {
-    if (originalUnblockEnabled === undefined) {
-      delete process.env.UNBLOCK_NETEASE_ENABLED;
-    } else {
-      process.env.UNBLOCK_NETEASE_ENABLED = originalUnblockEnabled;
-    }
     if (originalLocalEnabled === undefined) {
       delete process.env.LOCAL_MUSIC_ENABLED;
     } else {
@@ -339,9 +337,9 @@ describe("Pipeline Engine", () => {
         duration: 240_000,
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => {
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => {
       if (id === 111) throw new Error("Netease Error");
-      return `url-${id}`;
+      return neteasePlayback(`url-${id}`);
     });
 
     const result = await pipeline.runPipeline("morning_brief");
@@ -481,13 +479,13 @@ describe("Pipeline Engine", () => {
         duration: 240_000,
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) =>
-      id === 999 ? "http://example.com/local.mp3" : `url-${id}`,
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) =>
+      neteasePlayback(id === 999 ? "http://example.com/local.mp3" : `url-${id}`),
     );
 
     const result = await pipeline.runPipeline("mood_pick");
 
-    expect(netease.getPlayableUrl).toHaveBeenCalledWith(999, undefined);
+    expect(netease.getOpenPlayableUrl).toHaveBeenCalledWith(999);
     expect(weather.getDefaultWeatherPromptContext).not.toHaveBeenCalled();
     expect(result.tracks[0]).toMatchObject({
       id: 999,
@@ -546,7 +544,7 @@ describe("Pipeline Engine", () => {
         artist: "Stable Artist",
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => neteasePlayback(`url-${trackId}`));
 
     const result = await pipeline.runPipeline("random_discover");
 
@@ -637,7 +635,7 @@ describe("Pipeline Engine", () => {
       }
       return mockNeteaseSearchTrack({ id: 111, name: "Stable Anchor", artist: "Stable Artist" });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => neteasePlayback(`url-${trackId}`));
 
     await pipeline.runPipeline("random_discover");
 
@@ -688,7 +686,7 @@ describe("Pipeline Engine", () => {
         duration: 240_000,
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => neteasePlayback(`url-${id}`));
 
     const result = await pipeline.runPipeline("mood_pick");
 
@@ -755,7 +753,7 @@ describe("Pipeline Engine", () => {
           duration: 240_000,
         });
       });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `url-${id}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => neteasePlayback(`url-${id}`));
 
     const result = await pipeline.runStartupRadioProgram();
 
@@ -882,7 +880,7 @@ describe("Pipeline Engine", () => {
       const id = match ? Number(match[1]) : 1;
       return mockNeteaseSearchTrack({ id, name: `Stable ${id}`, artist: "Stable Artist" });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (trackId: number) => `url-${trackId}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (trackId: number) => neteasePlayback(`url-${trackId}`));
 
     const result = await pipeline.runStartupRadioProgram();
 
@@ -938,7 +936,7 @@ describe("Pipeline Engine", () => {
       picUrl: "yellow-pic",
       duration: 100,
     }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("yellow-url");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("yellow-url"));
 
     const result = await pipeline.runStartupRadioProgram();
 
@@ -975,7 +973,7 @@ describe("Pipeline Engine", () => {
         duration: 240_000,
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => neteasePlayback(`fallback-url-${id}`));
 
     const result = await pipeline.runStartupRadioProgram({ background: true });
 
@@ -1046,7 +1044,7 @@ describe("Pipeline Engine", () => {
         duration: 240_000,
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => neteasePlayback(`fallback-url-${id}`));
 
     const result = await pipeline.runStartupRadioProgram({ background: true });
 
@@ -1104,7 +1102,7 @@ describe("Pipeline Engine", () => {
       picUrl: "rain-pic",
       duration: 88,
     }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("rain-url");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("rain-url"));
 
     const result = await pipeline.runChatSwitchProgram("换一组安静一点的歌");
 
@@ -1170,7 +1168,7 @@ describe("Pipeline Engine", () => {
         duration: 240_000,
       });
     });
-    vi.mocked(netease.getPlayableUrl).mockImplementation(async (id) => `fallback-url-${id}`);
+    vi.mocked(netease.getOpenPlayableUrl).mockImplementation(async (id) => neteasePlayback(`fallback-url-${id}`));
 
     const result = await pipeline.runChatSwitchProgram("我要听电子音乐", {
       preserveCurrentTrack: true,
@@ -1247,7 +1245,7 @@ describe("Pipeline Engine", () => {
       picUrl: "quiet-pic",
       duration: 120,
     }));
-    vi.mocked(netease.getPlayableUrl).mockResolvedValue("quiet-url");
+    vi.mocked(netease.getOpenPlayableUrl).mockResolvedValue(neteasePlayback("quiet-url"));
 
     const result = await pipeline.runChatSwitchProgram("换安静一点", {
       preserveCurrentTrack: true,

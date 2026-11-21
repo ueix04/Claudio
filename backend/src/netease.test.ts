@@ -7,8 +7,7 @@ describe("netease module", () => {
   it("should export searchSongs function", async () => {
     const mod = await import("./netease");
     expect(typeof mod.searchSongs).toBe("function");
-    expect(typeof mod.getPlayableUrl).toBe("function");
-    expect(typeof mod.resolveTrack).toBe("function");
+    expect(typeof mod.getOpenPlayableUrl).toBe("function");
     expect(typeof mod.getPlaylistTracks).toBe("function");
   });
 
