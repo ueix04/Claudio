@@ -74,6 +74,7 @@ describe("music source adapters", () => {
     expect(ids).toContain("kugou");
     expect(ids).toContain("qq");
     expect(ids).toContain("kuwo");
+    expect(ids).toContain("bodian");
   });
 
   it("summarizes the runtime source order and fallback chain", async () => {
@@ -84,9 +85,9 @@ describe("music source adapters", () => {
 
     const status = await getMusicSourceRuntimeStatus();
 
-    expect(status.searchOrder).toEqual([LOCAL_LIBRARY_SOURCE_ID, NETEASE_LEGACY_SOURCE_ID, "qq", "kuwo", "kugou"]);
+    expect(status.searchOrder).toEqual([LOCAL_LIBRARY_SOURCE_ID, NETEASE_LEGACY_SOURCE_ID, "qq", "kuwo", "kugou", "bodian"]);
     expect(status.playableUrlFallbacks).toContainEqual({
-      source: NETEASE_LEGACY_SOURCE_ID, fallbacks: ["qq", "kuwo", "kugou", LOCAL_LIBRARY_SOURCE_ID],
+      source: NETEASE_LEGACY_SOURCE_ID, fallbacks: ["qq", "kuwo", "kugou", "bodian", LOCAL_LIBRARY_SOURCE_ID],
     });
     expect(status.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -349,6 +350,42 @@ describe("music source adapters", () => {
     });
     expect(result).toMatchObject({
       id: "coldcache", source: "qq", urlSource: "qq", url: "https://aqqmusic.tc.qq.com/renewed.m4a",
+    });
+  });
+
+  it("falls back to Bodian guest audio for a matching free recording", async () => {
+    const payInfo = {
+      cannotOnlinePlay: "0", listen_fragment: "0", feeType: { album: "0", song: "0", vip: "0" },
+    };
+    const song = { SONGNAME: "Bodian Song", ARTIST: "Artist", DURATION: "180", PAY: "0", payInfo };
+    vi.mocked(fetchSourceJson)
+      .mockResolvedValueOnce({ code: 0 })
+      .mockResolvedValueOnce({ content: [] })
+      .mockResolvedValueOnce({ status: 1, data: { lists: [] } })
+      .mockResolvedValueOnce({ content: [{ musicpage: { abslist: [
+        { ...song, MUSICRID: "MUSIC_210", PAY: "1" },
+        { ...song, MUSICRID: "MUSIC_211", payInfo: { ...payInfo, listen_fragment: "1" } },
+        { ...song, MUSICRID: "MUSIC_212" },
+      ] } }] })
+      .mockResolvedValueOnce({ code: 200, data: { audioUrl: "https://bd-lv.kuwo.cn/recording.mp3" } });
+
+    const track = await refreshStoredTrackPlayableUrl({
+      id: "985", source: NETEASE_LEGACY_SOURCE_ID, sourceTrackId: "985",
+      name: "Bodian Song", artist: "Artist", url: "expired", duration: 180_000,
+    });
+
+    expect(track).toMatchObject({
+      id: "985", sourceTrackId: "985", urlSource: "bodian", url: "https://bd-lv.kuwo.cn/recording.mp3",
+    });
+    const requests = vi.mocked(fetchSourceJson).mock.calls;
+    expect(requests).toHaveLength(5);
+    expect(requests[3][0].searchParams.get("mobi")).toBe("1");
+    const [playback, init] = requests[4];
+    expect(playback.origin).toBe("https://bd-api.kuwo.cn");
+    expect(playback.searchParams.get("musicId")).toBe("212");
+    expect(playback.searchParams.get("sign")).toMatch(/^[a-f0-9]{32}$/);
+    expect(init?.headers).toEqual({
+      plat: "ar", channel: "aliopen", devid: expect.any(String), ver: "3.9.0",
     });
   });
 

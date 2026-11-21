@@ -1,6 +1,7 @@
 import type { Track } from "../db.js";
 import type { TasteProfile } from "../taste-profile.js";
 import { fetchMusicAudio, parseMusicAudioUrl } from "./audio-http.js";
+import { BODIAN_SOURCE_ID, bodianAdapter } from "./bodian.js";
 import { KUGOU_SOURCE_ID, kugouAdapter } from "./kugou.js";
 import { KUWO_SOURCE_ID, kuwoAdapter } from "./kuwo.js";
 import { QQ_SOURCE_ID, qqAdapter } from "./qq.js";
@@ -44,9 +45,10 @@ const adapters = new Map<MusicSourceId, MusicSourceAdapter>([
   [qqAdapter.id, qqAdapter],
   [kuwoAdapter.id, kuwoAdapter],
   [kugouAdapter.id, kugouAdapter],
+  [bodianAdapter.id, bodianAdapter],
 ]);
 
-const DIRECT_SOURCES: readonly MusicSourceId[] = [QQ_SOURCE_ID, KUWO_SOURCE_ID, KUGOU_SOURCE_ID];
+const DIRECT_SOURCES: readonly MusicSourceId[] = [QQ_SOURCE_ID, KUWO_SOURCE_ID, KUGOU_SOURCE_ID, BODIAN_SOURCE_ID];
 const ONLINE_SOURCES = [NETEASE_LEGACY_SOURCE_ID, ...DIRECT_SOURCES];
 const PLAYABLE_URL_VALIDATION_TIMEOUT_MS = 5_000;
 const PLAYABLE_URL_VALIDATION_BYTES = "bytes=0-4095";

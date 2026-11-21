@@ -1,4 +1,4 @@
-export type MusicSourceId = "netease_legacy" | "qq" | "kuwo" | "kugou" | "local_library";
+export type MusicSourceId = "netease_legacy" | "qq" | "kuwo" | "kugou" | "bodian" | "local_library";
 
 export type MusicSourceErrorCode =
   | "url_expired"

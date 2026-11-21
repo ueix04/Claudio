@@ -287,14 +287,15 @@ describe("API Server", () => {
       playableUrlFallbacks: Array<{ source: string; fallbacks: string[] }>;
       sources: Array<{ source: string; role: string; enabled: boolean; ok: boolean }>;
     };
-    expect(body.searchOrder).toEqual(["local_library", "netease_legacy", "qq", "kuwo", "kugou"]);
+    expect(body.searchOrder).toEqual(["local_library", "netease_legacy", "qq", "kuwo", "kugou", "bodian"]);
     expect(body.playableUrlFallbacks).toContainEqual({
-      source: "netease_legacy", fallbacks: ["qq", "kuwo", "kugou", "local_library"],
+      source: "netease_legacy", fallbacks: ["qq", "kuwo", "kugou", "bodian", "local_library"],
     });
     expect(body.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: "local_library", role: "library", enabled: true, ok: true }),
       expect.objectContaining({ source: "netease_legacy", role: "primary", enabled: true, ok: true }),
       expect.objectContaining({ source: "kugou", role: "fallback", enabled: true, ok: true }),
+      expect.objectContaining({ source: "bodian", role: "fallback", enabled: true, ok: true }),
     ]));
     expect(JSON.stringify(body)).not.toContain(path.dirname(firstFilePath));
   });
