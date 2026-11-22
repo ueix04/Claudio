@@ -1,3 +1,5 @@
+import { fetchViaMusicRelay, hasMusicRelay, MUSIC_ROUTE_TIMEOUT_MS } from "./relay.js";
+
 const MUSIC_AUDIO_DOMAINS = [
   "music.126.net",
   "music.163.com",
@@ -30,7 +32,6 @@ export function parseMusicAudioUrl(value: string, base?: URL): URL | null {
     return null;
   }
 }
-
 export async function fetchMusicAudio(
   url: URL,
   options: { range?: string; signal: AbortSignal },
@@ -46,12 +47,47 @@ export async function fetchMusicAudio(
     "Accept-Encoding": "identity",
     ...(options.range ? { Range: options.range } : {}),
   };
+  if (!hasMusicRelay()) {
+    return fetchAudioWithRedirects(initialTarget, headers, options.signal, fetch);
+  }
+
+  const direct = new AbortController();
+  const timeout = setTimeout(() => direct.abort(), MUSIC_ROUTE_TIMEOUT_MS);
+  try {
+    const response = await fetchAudioWithRedirects(
+      initialTarget,
+      headers,
+      AbortSignal.any([options.signal, direct.signal]),
+      fetch,
+    );
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+    if (response.status === 416 || (
+      response.ok && response.body
+      && !mediaType?.startsWith("text/") && mediaType !== "application/json"
+    )) {
+      return response;
+    }
+    await response.body?.cancel().catch(() => {});
+  } catch (error) {
+    if (options.signal.aborted) throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+  return fetchAudioWithRedirects(initialTarget, headers, options.signal, fetchViaMusicRelay);
+}
+
+async function fetchAudioWithRedirects(
+  initialTarget: URL,
+  headers: HeadersInit,
+  signal: AbortSignal,
+  request: (url: URL, init: RequestInit) => Promise<Response>,
+): Promise<Response> {
   let target = initialTarget;
   for (let redirects = 0; redirects <= MAX_AUDIO_REDIRECTS; redirects++) {
-    const response = await fetch(target, {
+    const response = await request(target, {
       headers,
       redirect: "manual",
-      signal: options.signal,
+      signal,
     });
     if (!REDIRECT_STATUSES.has(response.status)) {
       return response;
